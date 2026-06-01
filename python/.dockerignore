@@ -1,0 +1,12 @@
+# Build-context excludes for the pool image. Keep host bytecode and tooling caches
+# out of the image: stale .pyc from a different interpreter (e.g. a local 3.13) must
+# never ship into the 3.14t image, and caches only bloat layers.
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+.git/

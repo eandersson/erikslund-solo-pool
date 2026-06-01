@@ -1,0 +1,79 @@
+name: erikslund-pool-cpp
+
+services:
+  setup:
+    image: alpine:3.23
+    restart: "no"
+    network_mode: "none"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 64
+    mem_limit: 64m
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+      - ./bitcoin.conf:/templates/bitcoin.conf:ro
+      - ../conf/pool.yml:/templates/pool.yml:ro
+      - config:/config
+    command: ["sh", "/setup.sh"]
+
+  bitcoind:
+    build:
+      context: ../tools/regtest
+      dockerfile: Dockerfile.bitcoind
+      args:
+        BTC_VERSION: "31.0"
+    image: erikslund-bitcoind:31.0
+    restart: unless-stopped
+    stop_grace_period: 120s
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 256
+    mem_limit: 4g
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    volumes:
+      - config:/etc/bitcoin:ro
+      - bitcoin-data:/data
+    ports:
+      - "8333:8333"
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-conf=/etc/bitcoin/bitcoin.conf", "getblockchaininfo"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  pool:
+    build:
+      context: ../cpp
+      dockerfile: Dockerfile
+    image: erikslund-pool-cpp-rt:latest
+    command: ["--config", "/etc/erikslund-pool/pool.yml", "--api-host", "0.0.0.0"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 256
+    mem_limit: 512m
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+      bitcoind:
+        condition: service_healthy
+    volumes:
+      - config:/etc/erikslund-pool:ro
+      - pool-data:/var/lib/erikslund-pool
+    ports:
+      - "3333:3333"
+      - "127.0.0.1:7777:7777"
+
+volumes:
+  config:
+  bitcoin-data:
+  pool-data:

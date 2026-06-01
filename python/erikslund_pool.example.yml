@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=../conf/pool.schema.json
+bitcoin_nodes:
+  - address: 127.0.0.1:8332
+    username: CHANGE_ME
+    password: CHANGE_ME
+stratum_listen:
+  - 0.0.0.0:3333
+api_listen:
+  - 127.0.0.1:7777
+initial_difficulty: 16384
+minimum_difficulty: 1
+variable_difficulty: true
+vardiff_target_shares_per_minute: 12.0
+vardiff_retarget_seconds: 60
+extranonce1_size: 4
+extranonce2_size: 8
+coinbase_signature: /erikslund_pool/
+coinbase_version: 1
+block_poll_milliseconds: 1000
+work_rebroadcast_seconds: 30
+zmq_block_endpoint: tcp://127.0.0.1:28332

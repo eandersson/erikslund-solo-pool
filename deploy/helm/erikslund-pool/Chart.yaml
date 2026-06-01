@@ -1,0 +1,22 @@
+apiVersion: v2
+name: erikslund-pool
+description: >-
+  High-availability Helm chart for the erikslund solo Bitcoin mining pool.
+  Runs N stateless, interchangeable pool replicas (each builds a coinbase to the
+  miner's own payout address, so a block found on any replica is valid and there
+  is no shared share-accounting to coordinate). The Kubernetes Service is the L4
+  load balancer; the /health readiness probe gates which replicas receive miners.
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - bitcoin
+  - mining
+  - stratum
+  - solo-pool
+  - high-availability
+home: https://github.com/erikandersson/erikslund-solo-pool
+sources:
+  - https://github.com/erikandersson/erikslund-solo-pool
+maintainers:
+  - name: erikslund

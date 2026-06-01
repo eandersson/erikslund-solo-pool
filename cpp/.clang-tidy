@@ -1,0 +1,31 @@
+# clang-tidy configuration for the C++ pool.
+#
+# Runs as a static-analysis lint gate in CI (cpp/docker/clang-tidy.sh +
+# .github/workflows/cpp.yml). GCC is the authoritative compiler (the build job);
+# this pass only adds static analysis on top. A couple of clang/libstdc++
+# front-end quirks (e.g. a consteval std::format with a dynamic spec, which GCC
+# accepts) are surfaced as notes by the runner but never gate the build.
+#
+# Curated, bug-focused families the tree passes cleanly:
+#   bugprone-*       likely-bug patterns
+#   performance-*    avoidable copies / allocations
+#   clang-analyzer-* path-sensitive analysis (null deref, leak, use-after-free)
+#   portability-*    non-portable constructs
+# Two members are disabled as too noisy for this codebase:
+#   bugprone-easily-swappable-parameters  flags any two adjacent same-type params
+#   performance-enum-size                 enum underlying-type micro-tuning
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*,
+  -performance-enum-size,
+  clang-analyzer-*,
+  portability-*
+# Gate failures are decided by the runner (it ignores clang's own diagnostics);
+# leaving this empty keeps clang-tidy's exit code from conflating the two.
+WarningsAsErrors: ''
+# Lint our own headers (src/<subsystem>/*.hpp); skip vendored third_party/*.h and
+# system headers (nlohmann, simdjson, libstdc++).
+HeaderFilterRegex: 'src/(api|bitcoin|core|net|pool|stats|stratum|util)/'
+FormatStyle: none

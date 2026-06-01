@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=./pool.schema.json
+bitcoin_nodes:
+  - address: bitcoind:8332
+    username: erikslund
+    password: CHANGE_ME_before_deploying
+api_listen:
+  - 127.0.0.1:7777
+stratum_listen:
+  - 0.0.0.0:3333
+initial_difficulty: 10000
+minimum_difficulty: 1
+stats_directory: stats
+zmq_block_endpoint: tcp://bitcoind:28332

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erikslund-fake-bitcoind"
+version = "0.1.0"
+description = "Stub bitcoind JSON-RPC node (getblocktemplate + PoW-validating submitblock) for testing erikslund-pool"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.optional-dependencies]
+# Optional: only needed for the --zmq hashblock publisher. Without it the pool
+# still picks up new blocks via getbestblockhash polling.
+zmq = ["pyzmq>=26"]
+
+[project.scripts]
+erikslund-fake-bitcoind = "fakebitcoind:main"
+
+[tool.setuptools]
+py-modules = ["fakebitcoind"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+force-single-line = true

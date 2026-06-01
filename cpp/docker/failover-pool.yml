@@ -1,0 +1,17 @@
+bitcoin_nodes:
+  - address: ep-fo-a:18443
+    username: erikslund
+    password: erikslundpass
+  - address: ep-fo-b:18443
+    username: erikslund
+    password: erikslundpass
+stratum_listen: [0.0.0.0:3333]
+api_listen: [0.0.0.0:7777]
+initial_difficulty: 0.0001
+minimum_difficulty: 0.0001
+variable_difficulty: true
+coinbase_signature: /erikslund-failover/
+block_poll_milliseconds: 1000
+work_rebroadcast_seconds: 5
+zmq_block_endpoint: tcp://ep-fo-a:28332
+stats_directory: /stats

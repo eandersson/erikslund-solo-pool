@@ -1,0 +1,29 @@
+name: erikslund-pool-python-external
+
+services:
+  pool:
+    network_mode: host
+    build:
+      context: ../python
+      dockerfile: Dockerfile
+    image: erikslund-pool-py:latest
+    restart: unless-stopped
+    user: "1000:1000"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 256
+    mem_limit: 512m
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config=/etc/erikslund-pool/pool.yml
+      - --log-file=/var/log/erikslund-pool/pool.log
+    volumes:
+      - /opt/erikslund-pool/etc/:/etc/erikslund-pool/:ro
+      - /opt/erikslund-pool/data/:/var/lib/erikslund-pool/
+      - /opt/erikslund-pool/logs/:/var/log/erikslund-pool/

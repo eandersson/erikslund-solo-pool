@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erikslund-sv2-miner"
+version = "0.1.0"
+description = "Stratum V2 (SV2) protocol test client for erikslund-pool (codec/framing/Noise; wire-compat unverified)"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.optional-dependencies]
+# Only needed for the --encrypt (Noise_NX) transport; the plaintext path is
+# stdlib-only. Imported lazily so this stays optional.
+encrypt = ["cryptography>=43"]
+
+[project.scripts]
+erikslund-sv2-miner = "sv2_miner:main"
+
+[tool.setuptools]
+py-modules = ["sv2_miner"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+force-single-line = true

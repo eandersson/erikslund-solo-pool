@@ -1,0 +1,37 @@
+{{ .Chart.Name }} installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Replicas: {{ .Values.replicaCount }} stateless, interchangeable pool backends.
+The Kubernetes Service load-balances miners across them; /health gates routing.
+
+1) Miner endpoint (Stratum) -- username = your BTC payout address, password = anything:
+{{- if eq .Values.stratumService.type "LoadBalancer" }}
+   kubectl get svc {{ include "erikslund-pool.fullname" . }}-stratum -n {{ .Release.Namespace }} -w
+   # then: stratum+tcp://<EXTERNAL-IP>:{{ .Values.stratumService.port }}
+{{- else if eq .Values.stratumService.type "NodePort" }}
+   NODE_PORT=$(kubectl get svc {{ include "erikslund-pool.fullname" . }}-stratum -n {{ .Release.Namespace }} -o jsonpath='{.spec.ports[0].nodePort}')
+   # then: stratum+tcp://<ANY-NODE-IP>:$NODE_PORT
+{{- else }}
+   # ClusterIP -- reach it from inside the cluster:
+   stratum+tcp://{{ include "erikslund-pool.fullname" . }}-stratum.{{ .Release.Namespace }}.svc:{{ .Values.stratumService.port }}
+{{- end }}
+
+2) Status / metrics (cluster-internal):
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "erikslund-pool.fullname" . }}-api 7777:{{ .Values.apiService.port }}
+   curl localhost:7777/health    # "ok" when ready
+   curl localhost:7777/metrics   # Prometheus
+
+3) HA in effect:
+   - readiness=/health pulls a degraded replica (bitcoind down / no work) out of rotation
+   - liveness=TCP only restarts a genuinely wedged process
+   - RollingUpdate maxUnavailable={{ .Values.updateStrategy.maxUnavailable }} + PDB minAvailable={{ .Values.podDisruptionBudget.minAvailable }} keep miners served through upgrades/drains
+   - bitcoind HA: list several config.settings.bitcoin_nodes (tried in order)
+   Upgrade safely:  kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "erikslund-pool.fullname" . }}
+{{- if not .Values.config.existingSecret }}
+{{- range .Values.config.settings.bitcoin_nodes }}
+{{- if eq (.password | toString) "CHANGE_ME_before_deploying" }}
+
+WARNING: a bitcoin_nodes password is still the placeholder. Set your real bitcoind
+RPC password in config.settings (or supply config.existingSecret) and upgrade.
+{{- end }}
+{{- end }}
+{{- end }}

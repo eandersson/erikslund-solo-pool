@@ -1,0 +1,4 @@
+# The tree is edited on Windows but built on Linux (CI runners + the Pi).
+# Shell scripts and autotools inputs MUST be LF or their shebang/macros break
+# on Linux (`#!/bin/sh\r` is unrunnable). Enforce it regardless of core.autocrlf.
+*.sh    text eol=lf

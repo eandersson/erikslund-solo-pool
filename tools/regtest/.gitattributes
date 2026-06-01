@@ -1,0 +1,5 @@
+# Keep these LF even when the repo is checked out on Windows -- a CRLF in a
+# Dockerfile RUN line or a mounted .conf breaks inside the Linux containers.
+*.sh    text eol=lf
+*.conf  text eol=lf
+Dockerfile* text eol=lf

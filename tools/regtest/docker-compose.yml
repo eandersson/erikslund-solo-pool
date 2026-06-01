@@ -1,0 +1,64 @@
+# Shared regtest harness for the C++ and Python pools: a regtest bitcoind
+# and a CPU stratum miner. Each pool's own smoketest brings these up, builds its
+# pool, runs it against bitcoind on this compose's network, and points the miner
+# at it -- so the smoketests share one bitcoind/miner definition instead of
+# each reaching into another pool's directory.
+#
+#   docker compose -f tools/regtest/docker-compose.yml up -d bitcoind   # regtest node
+#   docker compose -f tools/regtest/docker-compose.yml build miner      # build the miner image
+#   docker compose -f tools/regtest/docker-compose.yml down -v          # tear down
+#
+# The project name is fixed so the network ("erikslund-regtest_default") and the
+# built miner image ("erikslund-miner:latest") are predictable across smoketests.
+name: erikslund-regtest
+
+services:
+  bitcoind:
+    build:
+      context: .
+      dockerfile: Dockerfile.bitcoind
+    image: erikslund-bitcoind:regtest
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 256
+    mem_limit: 2g
+    volumes:
+      - ./bitcoin.conf:/etc/bitcoin/bitcoin.conf:ro
+      - bitcoin-data:/data
+    ports:
+      - "127.0.0.1:18443:18443"
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=erikslund",
+             "-rpcpassword=erikslundpass", "-rpcport=18443", "getblockchaininfo"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  miner:
+    build:
+      context: .
+      dockerfile: Dockerfile.miner
+    image: erikslund-miner:latest
+    profiles: ["mine"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    pids_limit: 256
+    mem_limit: 512m
+    # Smoketests build this image (`compose build miner`) then run it via
+    # `docker run ... erikslund-miner:latest --url stratum+tcp://<pool>:3333 ...`
+    # pointed at their own pool container. This default command only makes a
+    # manual `--profile mine up` convenient against a pool reachable as "pool".
+    command: >
+      --algo sha256d
+      --url stratum+tcp://pool:3333
+      --user ${MINER_ADDRESS:-bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf}
+      --pass x
+      --threads ${MINER_THREADS:-4}
+      --retry-pause 2
+
+volumes:
+  bitcoin-data:

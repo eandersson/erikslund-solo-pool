@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=../conf/pool.schema.json
+bitcoin_nodes:
+  - address: bitcoind:18443
+    username: erikslund
+    password: erikslundpass
+stratum_listen:
+  - 0.0.0.0:3333
+initial_difficulty: 1000000
+minimum_difficulty: 1000000
+variable_difficulty: false
+work_rebroadcast_seconds: 600
+block_poll_milliseconds: 600000
+zmq_block_endpoint: tcp://bitcoind:28332
+fast_block_notify: true
+coinbase_signature: /zmq/
+stats_directory: /stats
+api_listen:
+  - 0.0.0.0:7777

@@ -1,0 +1,116 @@
+
+replicaCount: 2
+
+image:
+  repository: erikslund-pool-cpp-rt
+  tag: latest
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+args:
+  - "--config"
+  - "/etc/erikslund-pool/pool.yml"
+
+config:
+  existingSecret: ""
+  settings:
+    bitcoin_nodes:
+      - address: bitcoind:8332
+        username: erikslund
+        password: CHANGE_ME_before_deploying
+    stratum_listen:
+      - 0.0.0.0:3333
+    api_listen:
+      - 0.0.0.0:7777
+    zmq_block_endpoint: tcp://bitcoind:28332
+    initial_difficulty: 10000
+    minimum_difficulty: 1
+
+stratumService:
+  type: LoadBalancer
+  port: 3333
+  nodePort: ""
+  loadBalancerIP: ""
+  sessionAffinity: ClientIP
+  sessionAffinityTimeoutSeconds: 10800
+  externalTrafficPolicy: Local
+  annotations: {}
+
+apiService:
+  type: ClusterIP
+  port: 7777
+
+updateStrategy:
+  maxUnavailable: 0
+  maxSurge: 1
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+affinity: {}
+topologySpreadConstraints: []
+nodeSelector: {}
+tolerations: []
+priorityClassName: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+terminationGracePeriodSeconds: 60
+
+probes:
+  readiness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 6
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+podSecurityContext:
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+networkPolicy:
+  enabled: false
+  apiAllowNamespaces: []
+
+podAnnotations: {}
+nameOverride: ""
+fullnameOverride: ""
+lifecycle: {}

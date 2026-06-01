@@ -1,0 +1,35 @@
+name: E2E (regtest)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cpp-pool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: C++ pool mines a regtest block
+        run: KEEP=0 bash ./cpp/docker/smoketest.sh
+
+  python-pool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+      - name: Install the pool + deps
+        run: pip install -e ./python
+      - name: Python pool mines a regtest block
+        run: KEEP=0 POOL_ON_HOST=1 bash ./python/e2e_regtest.sh

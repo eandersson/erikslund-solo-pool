@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "erikslund pool configuration",
+  "description": "Configuration for the erikslund solo Bitcoin mining pool (C++ and Python implementations). Unknown keys are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bitcoin_nodes"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor hint; ignored by the pool."
+    },
+    "bitcoin_nodes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "bitcoind RPC endpoints, tried in order for failover. The first entry is the primary node.",
+      "items": {
+        "type": "object",
+        "description": "A bitcoind RPC endpoint. Unrecognized keys are ignored.",
+        "additionalProperties": true,
+        "required": ["address", "username", "password"],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "host:port (or full URL) of the bitcoind RPC interface, e.g. bitcoind:8332."
+          },
+          "username": {
+            "type": "string",
+            "description": "RPC username."
+          },
+          "password": {
+            "type": "string",
+            "description": "RPC password."
+          }
+        }
+      }
+    },
+    "stratum_listen": {
+      "type": ["array", "string"],
+      "items": { "type": "string" },
+      "description": "Stratum bind address(es), host:port. Default binds all interfaces on :3333. Multiple entries bind multiple ports."
+    },
+    "api_listen": {
+      "type": ["array", "string"],
+      "items": { "type": "string" },
+      "description": "host:port for the read-only HTTP status/metrics API (always enabled). Default 127.0.0.1:7777 (loopback). The API is UNAUTHENTICATED, so expose it deliberately: set 0.0.0.0 (or a specific interface) only where a host port-mapping, private network, or reverse proxy confines it. The bridge/HA deploy stacks override to 0.0.0.0 (loopback-confined); the host-network stacks keep this loopback default."
+    },
+    "proxy_protocol_from": {
+      "type": ["array", "string"],
+      "items": { "type": "string" },
+      "description": "Trusted upstreams (exact IP or IPv4 CIDR, e.g. \"10.0.0.5\" or \"172.19.0.0/16\") allowed to send a PROXY-protocol v1/v2 header on stratum connections; the pool then logs the real client IP. Empty/absent = disabled (all connections direct). Connections from any non-listed source are always treated as direct, so direct (proxy-bypassing) connections still work and a header can't be spoofed."
+    },
+    "zmq_block_endpoint": {
+      "type": "string",
+      "description": "bitcoind ZMQ hashblock endpoint, e.g. tcp://127.0.0.1:28332. Requires bitcoind -zmqpubhashblock."
+    },
+    "fast_block_notify": {
+      "type": "boolean",
+      "description": "On a ZMQ block notification, broadcast empty 'stop work' built from the new block hash before the slower getblocktemplate. Default true."
+    },
+    "block_poll_milliseconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "New-block poll interval in milliseconds (a backup for ZMQ notifications). Default 1000."
+    },
+    "work_rebroadcast_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How often fresh work is pushed to connected miners, in seconds. Default 30."
+    },
+    "initial_difficulty": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Starting share difficulty for new clients. Default 1."
+    },
+    "minimum_difficulty": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Lowest difficulty variable_difficulty will drop a client to. Default 0.001."
+    },
+    "maximum_difficulty": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Highest difficulty variable_difficulty will raise a client to (0 = no maximum). Default 0."
+    },
+    "variable_difficulty": {
+      "type": "boolean",
+      "description": "Per-client difficulty retargeting (vardiff). Default true."
+    },
+    "vardiff_target_shares_per_minute": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Target shares per minute that variable_difficulty aims each client at. Default 12."
+    },
+    "vardiff_retarget_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How often variable_difficulty re-evaluates a client, in seconds. Default 60."
+    },
+    "extranonce1_size": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 8,
+      "description": "extranonce1 byte length. Default 4. Min 4: a smaller assignment space could wrap and hand two live miners identical work."
+    },
+    "extranonce2_size": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 8,
+      "description": "extranonce2 byte length. Default 8."
+    },
+    "version_rolling_mask": {
+      "type": ["string", "integer"],
+      "description": "BIP320 version bits a client may roll, as a hex string (e.g. \"1fffe000\") or an integer. Default 1fffe000."
+    },
+    "coinbase_signature": {
+      "type": "string",
+      "description": "Signature placed in the coinbase of solved blocks."
+    },
+    "coinbase_version": {
+      "type": "integer",
+      "description": "Coinbase transaction version. Default 1."
+    },
+    "donation_percent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Percentage of the block reward paid to donation_address. Default 0 (disabled)."
+    },
+    "donation_address": {
+      "type": "string",
+      "description": "Address that receives donation_percent of the block reward."
+    },
+    "max_workers_per_address": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum worker rows itemized individually in one address's stats (users/<address>). Connections beyond this still mine and still count toward the address totals, but their per-worker stats fold into a single shared bucket shown under the bare address -- so one address can't fill its stats file with thousands of worker rows. Not a connection cap. 0 = unlimited. Default 256."
+    },
+    "max_clients": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Upper limit on accepted client connections. Default 1024."
+    },
+    "drop_idle_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Disconnect clients idle for this many seconds (0 = never). Default 3600."
+    },
+    "auth_timeout_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Disconnect clients that don't authorize within this many seconds (0 = never). Default 30."
+    },
+    "max_protocol_errors": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Disconnect a client after this many malformed / out-of-order protocol errors since its last accepted share (0 = never). Default 100."
+    },
+    "max_line_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum length of one Stratum protocol line, in bytes (anti-OOM). Default 16384."
+    },
+    "stats_directory": {
+      "type": "string",
+      "description": "Directory for pool/client stats files (pool.status, users/). Default 'stats'."
+    },
+    "status_interval_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "description": "How often the pool.status and users/ files are rewritten, in seconds. Default 30."
+    },
+    "user_stats_retention_days": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 36500,
+      "description": "Remove a users/<address> stats file once the address has been inactive (disconnected; its file no longer rewritten) for this many days. Connected miners are never pruned. 0 keeps files forever (so does anything above the 36500 cap, but use 0). Default 90."
+    },
+    "worker_threads": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Connection-serving worker threads (C++ epoll reactors; Python event loops on a free-threaded build). 0 = auto: one per usable CPU, clamped to a sane max. Set to your container's CPU limit to avoid over-threading. Ignored on a GIL Python build (always one loop)."
+    }
+  }
+}

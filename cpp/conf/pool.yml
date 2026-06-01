@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../../conf/pool.schema.json
+bitcoin_nodes:
+  - address: localhost:8332
+    username: user
+    password: pass
+coinbase_signature: /mined by open-source/
+stratum_listen:
+  - 0.0.0.0:3333
+initial_difficulty: 42
+minimum_difficulty: 1
+version_rolling_mask: 1fffe000
+api_listen:
+  - 127.0.0.1:7777
+zmq_block_endpoint: tcp://127.0.0.1:28332
+stats_directory: stats

@@ -1,0 +1,56 @@
+# C++ pool: build + doctest unit tests AND a clang-tidy static-analysis gate on
+# every push / PR. Fast (no bitcoind); the heavier end-to-end regtest mine lives
+# in e2e.yml (gated to main).
+name: C++
+
+on:
+  push:
+    paths:
+      - 'cpp/**'
+      - 'conf/pool.schema.json'
+      - '.github/workflows/cpp.yml'
+  pull_request:
+    paths:
+      - 'cpp/**'
+      - 'conf/pool.schema.json'
+      - '.github/workflows/cpp.yml'
+
+concurrency:
+  group: cpp-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build + unit tests (doctest, in the toolchain image)
+        run: |
+          docker build -t erikslund-pool-cpp cpp/docker
+          docker run --rm -v "$PWD/cpp:/src:ro" -v cpp-build:/build erikslund-pool-cpp
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: clang-tidy (static-analysis gate)
+        run: |
+          docker build -t erikslund-pool-cpp cpp/docker
+          docker run --rm -v "$PWD/cpp:/src:ro" -v cpp-tidy-build:/build \
+            --entrypoint /usr/local/bin/clang-tidy.sh erikslund-pool-cpp
+
+  cppcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: cppcheck (static-analysis gate)
+        run: |
+          docker build -t erikslund-pool-cpp cpp/docker
+          docker run --rm -v "$PWD/cpp:/src:ro" \
+            --entrypoint /usr/local/bin/cppcheck.sh erikslund-pool-cpp

@@ -1,0 +1,7 @@
+# Out-of-source build output (host-side, if you ever build outside Docker).
+/build/
+/cmake-build*/
+compile_commands.json
+*.o
+*.a
+*.so
