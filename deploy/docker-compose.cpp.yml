@@ -14,7 +14,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     pids_limit: 256
-    mem_limit: 512m
+    mem_limit: 1g
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command:

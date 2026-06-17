@@ -78,9 +78,9 @@ probes:
 resources:
   requests:
     cpu: 250m
-    memory: 128Mi
+    memory: 1Gi
   limits:
-    memory: 512Mi
+    memory: 2Gi
 
 podSecurityContext:
   fsGroup: 1000
