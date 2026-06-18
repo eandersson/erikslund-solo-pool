@@ -97,9 +97,10 @@ target_link_libraries(erikslund-pool PRIVATE erikslund_core)
 # names rather than bare addresses (negligible cost; just a larger symtab).
 target_link_options(erikslund-pool PRIVATE -rdynamic)
 if(MIMALLOC_LIBRARY)
+    target_compile_definitions(erikslund_core PUBLIC HAVE_MIMALLOC)
+    target_link_libraries(erikslund_core PUBLIC ${MIMALLOC_LIBRARY})
     target_link_libraries(erikslund-pool PRIVATE
         -Wl,--no-as-needed ${MIMALLOC_LIBRARY} -Wl,--as-needed)
-    target_compile_definitions(erikslund-pool PRIVATE HAVE_MIMALLOC)
     message(STATUS "mimalloc: ${MIMALLOC_LIBRARY}")
 else()
     message(STATUS "mimalloc: not found -- using the system allocator")

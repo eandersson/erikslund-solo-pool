@@ -19,6 +19,10 @@
 #include <thread>
 #include <utility>
 
+#ifdef HAVE_MIMALLOC
+#include <mimalloc.h>
+#endif
+
 #include "bitcoin/address.hpp"
 #include "bitcoin/block_template.hpp"
 #include "core/errors.hpp"
@@ -41,6 +45,9 @@ constexpr size_t kMaxRecentJobs = 24;
 // it -- applied REGARDLESS of user_stats_retention_days so authorize-churn can't pin the registry
 // cap forever under a keep-forever (retention <= 0) setting.
 constexpr int64_t kGhostRowGraceSeconds = 3600;
+
+// How often the work thread force-collects the allocator to reclaim cross-thread-freed Job txn_data.
+constexpr double kCollectIntervalSeconds = 600.0;
 
 // Cheap shape gate on usernames before attempting the full address decode.
 constexpr std::string_view kAddressChars =
@@ -67,6 +74,12 @@ SubmitOutcome classify_submit(const std::optional<std::string>& rejection) {
     if (*rejection == "duplicate" || *rejection == "duplicate-inconclusive")
         return SubmitOutcome::AlreadyKnown;
     return SubmitOutcome::Rejected;
+}
+
+void periodic_allocator_collect() {
+#ifdef HAVE_MIMALLOC
+    mi_collect(true);
+#endif
 }
 } // namespace
 
@@ -324,7 +337,13 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
 }
 
 void Pool::refresh_work(const std::stop_token& stop) {
+    double last_collect = stats::steady_seconds();
     while (!stop.stop_requested()) {
+        if (const double now = stats::steady_seconds(); now - last_collect >= kCollectIntervalSeconds) {
+            periodic_allocator_collect();
+            last_collect = now;
+        }
+
         try {
             // A mainnet template is multi-MB; fetching it every poll just to read
             // previousblockhash is ~25MB/s of allocator churn (OOMs a 512MB host). Gate the heavy
