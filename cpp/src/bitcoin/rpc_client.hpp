@@ -1,5 +1,6 @@
 #pragma once
-// Synchronous bitcoind JSON-RPC over libcurl. Per-call easy handle => thread-safe.
+// Synchronous bitcoind JSON-RPC over libcurl. One persistent easy handle PER THREAD, reused across
+// calls for HTTP keep-alive + DNS caching (an easy handle is not shared between threads).
 // Failover: a connection failure advances + sticks; an RPC error (node answered) does not.
 #include <atomic>
 #include <limits>

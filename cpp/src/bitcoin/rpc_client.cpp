@@ -1,6 +1,7 @@
 #include "bitcoin/rpc_client.hpp"
 
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -47,6 +48,18 @@ size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* response = static_cast<std::string*>(userdata);
     response->append(ptr, size * nmemb);
     return size * nmemb;
+}
+
+CURL* thread_handle() {
+    thread_local std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> handle(nullptr,
+                                                                            curl_easy_cleanup);
+    if (!handle) {
+        CURL* raw = curl_easy_init();
+        if (!raw)
+            throw RpcConnectionError("failed to initialize curl");
+        handle.reset(raw);
+    }
+    return handle.get();
 }
 
 } // namespace
@@ -110,9 +123,8 @@ nlohmann::json RpcClient::call_payload(const std::string& payload) {
 
 std::string RpcClient::post_one(const Resolved& endpoint, const std::string& payload,
                                 long* http_status) {
-    CURL* curl = curl_easy_init();
-    if (!curl)
-        throw RpcConnectionError("failed to initialize curl");
+    CURL* curl = thread_handle();
+    curl_easy_reset(curl);
 
     std::string response;
     curl_slist* headers = nullptr;
@@ -127,6 +139,7 @@ std::string RpcClient::post_one(const Resolved& endpoint, const std::string& pay
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_);
     // Multi-threaded: the resolver's timeout SIGALRM/siglongjmp isn't thread-safe.
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
@@ -134,7 +147,6 @@ std::string RpcClient::post_one(const Resolved& endpoint, const std::string& pay
     if (http_status)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_status);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     if (curl_result != CURLE_OK)
         throw RpcConnectionError(std::string("transport error: ") + curl_easy_strerror(curl_result));
