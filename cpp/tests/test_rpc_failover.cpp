@@ -35,7 +35,8 @@ public:
     json ok_result;                   // when non-null, Mode::Ok returns this (e.g. a tip hash)
 
 protected:
-    nlohmann::json call_one(const Resolved& endpoint, const std::string& /*payload*/) override {
+    nlohmann::json call_one(const Resolved& endpoint, const std::string& /*payload*/,
+                            long /*timeout*/) override {
         ++hits[endpoint.url];
         switch (mode.at(endpoint.url)) {
         case Mode::Down:
@@ -258,7 +259,7 @@ public:
     }
 
 protected:
-    std::string post_one(const Resolved& endpoint, const std::string& /*payload*/,
+    std::string post_one(const Resolved& endpoint, const std::string& /*payload*/, long /*timeout*/,
                          long* /*http_status*/) override {
         ++hits[endpoint.url];
         switch (mode.at(endpoint.url)) {

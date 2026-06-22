@@ -1,5 +1,6 @@
 #include "bitcoin/rpc_client.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
@@ -65,7 +66,9 @@ CURL* thread_handle() {
 } // namespace
 
 RpcClient::RpcClient(const std::vector<RpcEndpoint>& endpoints, long timeout_seconds)
-    : timeout_(timeout_seconds) {
+    : timeout_(std::max(1L, timeout_seconds)),
+      connect_timeout_(std::min(timeout_, 5L)),
+      poll_timeout_(std::min(timeout_, 10L)) {
     for (const auto& endpoint : endpoints) {
         std::string url = endpoint.url;
         if (url.rfind("http", 0) != 0)
@@ -89,22 +92,23 @@ std::vector<std::string> RpcClient::endpoint_urls() const {
     return urls;
 }
 
-nlohmann::json RpcClient::call(const std::string& method, const nlohmann::json& params) {
+nlohmann::json RpcClient::call(const std::string& method, const nlohmann::json& params,
+                               long timeout) {
     const int id = ++next_id_;
     const std::string payload =
         nlohmann::json{{"jsonrpc", "1.0"}, {"id", id}, {"method", method}, {"params", params}}
             .dump();
-    return call_payload(payload);
+    return call_payload(payload, timeout > 0 ? timeout : timeout_);
 }
 
-nlohmann::json RpcClient::call_payload(const std::string& payload) {
+nlohmann::json RpcClient::call_payload(const std::string& payload, long timeout) {
     const size_t count = endpoints_.size();
     const size_t start = current_.load();
     std::string last_error;
     for (size_t i = 0; i < count; ++i) {
         const size_t index = (start + i) % count;
         try {
-            nlohmann::json result = call_one(endpoints_[index], payload);
+            nlohmann::json result = call_one(endpoints_[index], payload, timeout);
             if (index != start) {
                 size_t expected = start;
                 if (current_.compare_exchange_strong(expected, index))
@@ -121,7 +125,7 @@ nlohmann::json RpcClient::call_payload(const std::string& payload) {
     throw RpcConnectionError("all bitcoind endpoints unreachable: " + last_error);
 }
 
-std::string RpcClient::post_one(const Resolved& endpoint, const std::string& payload,
+std::string RpcClient::post_one(const Resolved& endpoint, const std::string& payload, long timeout,
                                 long* http_status) {
     CURL* curl = thread_handle();
     curl_easy_reset(curl);
@@ -136,7 +140,8 @@ std::string RpcClient::post_one(const Resolved& endpoint, const std::string& pay
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout_);
     // Multi-threaded: the resolver's timeout SIGALRM/siglongjmp isn't thread-safe.
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
@@ -153,9 +158,10 @@ std::string RpcClient::post_one(const Resolved& endpoint, const std::string& pay
     return response;
 }
 
-nlohmann::json RpcClient::call_one(const Resolved& endpoint, const std::string& payload) {
+nlohmann::json RpcClient::call_one(const Resolved& endpoint, const std::string& payload,
+                                   long timeout) {
     long http_status = 0;
-    const std::string response = post_one(endpoint, payload, &http_status);
+    const std::string response = post_one(endpoint, payload, timeout, &http_status);
     nlohmann::json parsed = nlohmann::json::parse(response, nullptr, /*allow_exceptions=*/false);
     if (parsed.is_discarded())
         // Keep the HTTP code so a 401 (bad RPC creds) stays distinguishable from garbage.
@@ -186,7 +192,7 @@ BlockTemplate RpcClient::getblocktemplate_parsed() {
         simdjson::dom::element doc;
         long http_status = 0;
         try {
-            gbt_body_ = post_one(endpoints_[index], payload, &http_status);
+            gbt_body_ = post_one(endpoints_[index], payload, poll_timeout_, &http_status);
             doc = gbt_parser_.parse(gbt_body_);
         } catch (const RpcConnectionError& e) {
             last_error = e.what();
@@ -225,7 +231,7 @@ std::optional<std::string> RpcClient::submitblock(const std::string& block_hex) 
     payload += ",\"method\":\"submitblock\",\"params\":[\"";
     payload += block_hex;
     payload += "\"]}";
-    const nlohmann::json result = call_payload(payload);
+    const nlohmann::json result = call_payload(payload, timeout_); // patient: never abort a block
     if (result.is_null())
         return std::nullopt; // block accepted
     if (result.is_string())
@@ -238,7 +244,7 @@ nlohmann::json RpcClient::validateaddress(const std::string& address) {
 }
 
 std::string RpcClient::getbestblockhash() {
-    return call("getbestblockhash").get<std::string>();
+    return call("getbestblockhash", nlohmann::json::array(), poll_timeout_).get<std::string>();
 }
 
 void RpcClient::maybe_failback(const std::string& expected_tip) {
@@ -255,7 +261,7 @@ void RpcClient::maybe_failback(const std::string& expected_tip) {
             .dump();
     nlohmann::json result;
     try {
-        result = call_one(endpoints_[0], payload);
+        result = call_one(endpoints_[0], payload, poll_timeout_);
     } catch (const std::exception&) {
         // A warming primary answers every call with RPC_IN_WARMUP (-28); failing back would
         // capture the pool (call() never rotates on RpcError) with no work. Stay until it answers.

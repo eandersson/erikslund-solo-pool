@@ -29,23 +29,25 @@ namespace {
 
 class BodyRpc : public RpcClient {
 public:
-    explicit BodyRpc(std::string user = "user", std::string pass = "pass")
+    explicit BodyRpc(std::string user = "user", std::string pass = "pass", long timeout_seconds = 30)
         : RpcClient(std::vector<RpcEndpoint>{{"http://node:8332", std::move(user), std::move(pass)}},
-                    /*timeout_seconds=*/1) {}
+                    timeout_seconds) {}
 
     std::string body = R"({"result":null,"error":null,"id":1})";
     long http = 200;
 
     std::string last_payload; // the JSON-RPC request body we sent
     std::string last_auth;    // the Authorization header we'd have sent
+    long last_timeout = -1;   // the overall timeout post_one was asked to use
     int calls = 0;
 
 protected:
-    std::string post_one(const Resolved& endpoint, const std::string& payload,
+    std::string post_one(const Resolved& endpoint, const std::string& payload, long timeout,
                          long* http_status) override {
         ++calls;
         last_payload = payload;
         last_auth = endpoint.auth_header;
+        last_timeout = timeout;
         if (http_status)
             *http_status = http;
         return body;
@@ -189,4 +191,20 @@ TEST_CASE("endpoint URLs are scheme-normalized: http:// added, https:// preserve
     CHECK(urls[0] == "http://node:8332");
     CHECK(urls[1] == "https://secure:8332");
     CHECK(urls[2] == "http://plain:8332");
+}
+
+TEST_CASE("failover-driving polls use a shorter timeout than submitblock") {
+    BodyRpc rpc;
+
+    rpc.body = R"({"result":null,"error":null,"id":1})";
+    rpc.submitblock("00");
+    const long submit_timeout = rpc.last_timeout;
+
+    rpc.body = json{{"result", std::string(64, 'a')}, {"error", nullptr}, {"id", 1}}.dump();
+    rpc.getbestblockhash();
+    const long poll_timeout = rpc.last_timeout;
+
+    CHECK(submit_timeout == 30);          // submitblock keeps the full timeout
+    CHECK(poll_timeout == 10);            // the tip probe uses the shorter poll timeout
+    CHECK(poll_timeout < submit_timeout); // failover-driving polls fail faster
 }

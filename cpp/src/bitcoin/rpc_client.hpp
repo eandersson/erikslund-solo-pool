@@ -23,7 +23,7 @@ public:
     explicit RpcClient(const std::vector<RpcEndpoint>& endpoints, long timeout_seconds = 30);
 
     nlohmann::json call(const std::string& method,
-                        const nlohmann::json& params = nlohmann::json::array());
+                        const nlohmann::json& params = nlohmann::json::array(), long timeout = 0);
 
     BlockTemplate getblocktemplate_parsed();
     std::optional<std::string> submitblock(const std::string& block_hex);
@@ -49,16 +49,19 @@ protected:
         std::string url;
         std::string auth_header;
     };
-    virtual nlohmann::json call_one(const Resolved& endpoint, const std::string& payload);
-    virtual std::string post_one(const Resolved& endpoint, const std::string& payload,
+    virtual nlohmann::json call_one(const Resolved& endpoint, const std::string& payload,
+                                    long timeout);
+    virtual std::string post_one(const Resolved& endpoint, const std::string& payload, long timeout,
                                  long* http_status = nullptr);
 
 private:
-    nlohmann::json call_payload(const std::string& payload);
+    nlohmann::json call_payload(const std::string& payload, long timeout);
 
     std::vector<Resolved> endpoints_;
     std::atomic<size_t> current_{0};
     long timeout_;
+    long connect_timeout_;
+    long poll_timeout_;
     std::atomic<int> next_id_{0};
     std::atomic<double> last_failback_probe_{-std::numeric_limits<double>::infinity()};
 

@@ -33,3 +33,24 @@ jobs:
         run: pip install -e ./python
       - name: Python pool mines a regtest block
         run: KEEP=0 POOL_ON_HOST=1 bash ./python/e2e_regtest.sh
+
+  cpp-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - name: C++ pool fails over to a backup bitcoind
+        run: POOL=cpp bash ./tools/regtest/failover-test.sh
+
+  python-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+      - name: Install the pool + deps
+        run: pip install -e ./python
+      - name: Python pool fails over to a backup bitcoind
+        run: POOL=python POOL_ON_HOST=1 bash ./tools/regtest/failover-test.sh

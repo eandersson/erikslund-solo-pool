@@ -1,3 +1,6 @@
+# Shared failover config for BOTH pools (C++ and Python) -- see tools/regtest/failover-test.sh.
+# Two bitcoind backends: bitcoin_nodes[0] is the primary, the rest are failover (tried in order).
+# The container names ep-fo-a / ep-fo-b are the two regtest bitcoinds the test peers + runs.
 bitcoin_nodes:
   - address: ep-fo-a:18443
     username: erikslund
