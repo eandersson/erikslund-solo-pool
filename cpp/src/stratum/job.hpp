@@ -3,6 +3,7 @@
 // coinbase2 (payout) is per miner. Immutable + pure validate_share().
 #include <atomic>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,12 +30,14 @@ enum class ShareReject : uint8_t {
 
 std::string_view reject_reason(ShareReject reject);
 
+struct ShareRejection {
+    ShareReject reason = ShareReject::None;
+    double difficulty = 0.0;
+};
+
 struct ShareResult {
-    bool valid = false;
-    ShareReject reject = ShareReject::None; // why, when !valid
-    double difficulty = 0.0;                // pool difficulty this hash satisfies (always set)
-    bool is_block = false;                  // hash <= network target
-    // Work fields below: populated only for accepted shares; empty on the reject path.
+    double difficulty = 0.0;    // pool difficulty this hash satisfies
+    bool is_block = false;      // hash <= network target
     std::string block_hash_hex; // canonical (display) hash
     Bytes header;
     Bytes legacy_coinbase;
@@ -85,7 +88,7 @@ public:
     void set_publish_seq(uint64_t seq) const { publish_seq_.store(seq, std::memory_order_relaxed); }
 
     // Pure; every field is treated as untrusted.
-    ShareResult validate_share(const ShareInput& input) const;
+    [[nodiscard]] std::expected<ShareResult, ShareRejection> validate_share(const ShareInput& input) const;
 
     std::string build_block_hex(ByteView legacy_coinbase, ByteView header) const;
 

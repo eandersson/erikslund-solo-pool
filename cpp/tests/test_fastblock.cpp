@@ -44,12 +44,12 @@ TEST_CASE("empty-block (fastblock) job builds a single-transaction block") {
     input.nonce_hex = "00000000";
     input.share_target = uint256::from_display_hex(std::string(64, 'f'));
     input.now_unix = 1700000000;
-    const ShareResult result = job.validate_share(input);
-    REQUIRE(result.valid);
+    const auto result = job.validate_share(input);
+    REQUIRE(result);
 
     // block = header || varint(1) || coinbase  (only the coinbase, no other txns)
-    const std::string block = job.build_block_hex(result.legacy_coinbase, result.header);
-    CHECK(block.rfind(to_hex(result.header) + "01", 0) == 0);
+    const std::string block = job.build_block_hex(result->legacy_coinbase, result->header);
+    CHECK(block.rfind(to_hex(result->header) + "01", 0) == 0);
 }
 
 TEST_CASE("a template without a witness commitment assembles a legacy (non-segwit) block") {
@@ -77,15 +77,15 @@ TEST_CASE("a template without a witness commitment assembles a legacy (non-segwi
     input.nonce_hex = "00000000";
     input.share_target = uint256::from_display_hex(std::string(64, 'f'));
     input.now_unix = 1700000000;
-    const ShareResult result = job.validate_share(input);
-    REQUIRE(result.valid);
+    const auto result = job.validate_share(input);
+    REQUIRE(result);
 
     // Without segwit, the block body is header || varint(1) || the legacy coinbase verbatim
     // (no 00 01 marker/flag, no witness) -> the legacy coinbase appears right after the count.
-    const std::string block = job.build_block_hex(result.legacy_coinbase, result.header);
-    CHECK(block == to_hex(result.header) + "01" + to_hex(result.legacy_coinbase));
+    const std::string block = job.build_block_hex(result->legacy_coinbase, result->header);
+    CHECK(block == to_hex(result->header) + "01" + to_hex(result->legacy_coinbase));
     // The segwit marker/flag must NOT be present immediately after the count.
-    CHECK(block.find(to_hex(result.header) + "01" + "0001") == std::string::npos);
+    CHECK(block.find(to_hex(result->header) + "01" + "0001") == std::string::npos);
 }
 
 // The on_zmq_block gate deciding whether one-block-ahead empty work is sound to broadcast (vs

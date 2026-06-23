@@ -132,19 +132,19 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
               "1e195ab43b27f0aec7055b81277c8f0ade35b1246a8d44c9aadb4ce7431f3108"});
 
     const uint256 max_target = uint256::from_display_hex(std::string(64, 'f'));
-    const ShareResult result = job.validate_share(good_share(coinbase2, extranonce1, max_target));
-    REQUIRE(result.valid);
-    CHECK_FALSE(result.is_block); // 1d00ffff is hard; this nonce doesn't solve it
-    CHECK(to_hex(result.header) ==
+    const auto result = job.validate_share(good_share(coinbase2, extranonce1, max_target));
+    REQUIRE(result);
+    CHECK_FALSE(result->is_block); // 1d00ffff is hard; this nonce doesn't solve it
+    CHECK(to_hex(result->header) ==
           "00000020452301efcdab8967452301efcdab8967452301efcdab00000000000000000000e8a1adf960"
           "e2275b6f08bafa093ac4d69b6a3259fc3ee2275c1e784c32f6e92900f15365ffff001d2a2a2a2a");
-    CHECK(result.block_hash_hex ==
+    CHECK(result->block_hash_hex ==
           "0858b3ce0d8898eb861cf64da704d77cce6940f60a6dd8ec78c19037ed5a5605");
 
     // legacy coinbase = coinbase1 || extranonce1 || extranonce2 || coinbase2 (each golden above).
     const std::string expected_legacy =
         job.coinbase1_hex() + to_hex(extranonce1) + "01020304" + to_hex(coinbase2);
-    CHECK(to_hex(result.legacy_coinbase) == expected_legacy);
+    CHECK(to_hex(result->legacy_coinbase) == expected_legacy);
 
     // Full block = header || varint(txn_count+1) || segwit-coinbase || txn_data.
     // Segwit serialization inserts marker/flag after nVersion and the 32-byte
@@ -154,9 +154,9 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
     const std::string body = expected_legacy.substr(8, expected_legacy.size() - 16);
     const std::string segwit_coinbase =
         version + "0001" + body + "0120" + std::string(64, '0') + locktime;
-    const std::string expected_block = to_hex(result.header) + "03" + segwit_coinbase +
+    const std::string expected_block = to_hex(result->header) + "03" + segwit_coinbase +
                                        "0123456789abcdef" + "fedcba9876543210";
-    CHECK(job.build_block_hex(result.legacy_coinbase, result.header) == expected_block);
+    CHECK(job.build_block_hex(result->legacy_coinbase, result->header) == expected_block);
 }
 
 TEST_CASE("a solved share is detected as a block on an easy target") {
@@ -173,12 +173,12 @@ TEST_CASE("a solved share is detected as a block on an easy target") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         const std::string nonce_hex = std::format("{:08x}", nonce);
         input.nonce_hex = nonce_hex;
-        const ShareResult result = job.validate_share(input);
-        REQUIRE(result.valid);
-        if (result.is_block) {
+        const auto result = job.validate_share(input);
+        REQUIRE(result);
+        if (result->is_block) {
             found_block = true;
-            CHECK(job.build_block_hex(result.legacy_coinbase, result.header)
-                      .rfind(to_hex(result.header), 0) == 0);
+            CHECK(job.build_block_hex(result->legacy_coinbase, result->header)
+                      .rfind(to_hex(result->header), 0) == 0);
         }
     }
     CHECK(found_block);
@@ -194,29 +194,29 @@ TEST_CASE("share rejection paths") {
     SUBCASE("malformed extranonce2") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.extranonce2_hex = "zzzz";
-        CHECK(job.validate_share(input).reject == ShareReject::MalformedField);
+        CHECK(job.validate_share(input).error().reason == ShareReject::MalformedField);
     }
     SUBCASE("wrong extranonce2 size") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.extranonce2_hex = "0102"; // 2 bytes, expected 4
-        CHECK(job.validate_share(input).reject == ShareReject::InvalidExtranonce2Size);
+        CHECK(job.validate_share(input).error().reason == ShareReject::InvalidExtranonce2Size);
     }
     SUBCASE("oversized extranonce2 is rejected before decode") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.extranonce2_hex = "010203040506"; // 6 bytes, expected 4
-        CHECK(job.validate_share(input).reject == ShareReject::InvalidExtranonce2Size);
+        CHECK(job.validate_share(input).error().reason == ShareReject::InvalidExtranonce2Size);
     }
     SUBCASE("ntime out of range") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "ffffffff"; // far in the future relative to now_unix
-        CHECK(job.validate_share(input).reject == ShareReject::NtimeOutOfRange);
+        CHECK(job.validate_share(input).error().reason == ShareReject::NtimeOutOfRange);
     }
     SUBCASE("below share target") {
         // share target = difficulty 1; the share's hash is far above it.
         ShareInput input = good_share(coinbase2, extranonce1, target_from_compact(0x1d00ffff));
-        const ShareResult result = job.validate_share(input);
-        CHECK_FALSE(result.valid);
-        CHECK(result.reject == ShareReject::AboveTarget);
+        const auto result = job.validate_share(input);
+        CHECK_FALSE(result);
+        CHECK(result.error().reason == ShareReject::AboveTarget);
     }
 }
 
@@ -247,44 +247,44 @@ TEST_CASE("more share rejection and acceptance paths") {
     SUBCASE("malformed ntime hex") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "zzzz";
-        CHECK(job.validate_share(input).reject == ShareReject::MalformedField);
+        CHECK(job.validate_share(input).error().reason == ShareReject::MalformedField);
     }
     SUBCASE("malformed nonce hex") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.nonce_hex = "xyz0";
-        CHECK(job.validate_share(input).reject == ShareReject::MalformedField);
+        CHECK(job.validate_share(input).error().reason == ShareReject::MalformedField);
     }
     SUBCASE("ntime far in the past is out of range") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "00000001"; // well below the job's curtime floor
-        CHECK(job.validate_share(input).reject == ShareReject::NtimeOutOfRange);
+        CHECK(job.validate_share(input).error().reason == ShareReject::NtimeOutOfRange);
     }
     SUBCASE("ntime one second below curtime is rejected") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "6553f0ff"; // fixture curtime 0x6553f100 - 1
-        CHECK(job.validate_share(input).reject == ShareReject::NtimeOutOfRange);
+        CHECK(job.validate_share(input).error().reason == ShareReject::NtimeOutOfRange);
     }
     SUBCASE("ntime exactly at curtime is accepted") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "6553f100"; // == fixture curtime 1700000000
-        CHECK(job.validate_share(input).valid);
+        CHECK(job.validate_share(input).has_value());
     }
     // Submit-margin ceiling = now_unix + 7200 - kNtimeSubmitMargin(120) = 1700007080
     // (good_share() pins now_unix = 1700000000); these three bracket the exact boundary.
     SUBCASE("ntime at the submit-margin ceiling (now + 7200 - 120) is accepted") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "65540ca8"; // now_unix + 7080
-        CHECK(job.validate_share(input).valid);
+        CHECK(job.validate_share(input).has_value());
     }
     SUBCASE("ntime one second above the submit margin is rejected") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "65540ca9"; // now_unix + 7081
-        CHECK(job.validate_share(input).reject == ShareReject::NtimeOutOfRange);
+        CHECK(job.validate_share(input).error().reason == ShareReject::NtimeOutOfRange);
     }
     SUBCASE("ntime at the old now+7200 ceiling now falls inside the forbidden margin") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.ntime_hex = "65540d20"; // now_unix + 7200 (forbidden by the 120s margin)
-        CHECK(job.validate_share(input).reject == ShareReject::NtimeOutOfRange);
+        CHECK(job.validate_share(input).error().reason == ShareReject::NtimeOutOfRange);
     }
 }
 
@@ -299,22 +299,22 @@ TEST_CASE("version-rolling masks the header version") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.version_mask = 0x1fffe000u;
         input.version_bits_hex = "00002000"; // a bit within the mask
-        const ShareResult result = job.validate_share(input);
-        REQUIRE(result.valid);
+        const auto result = job.validate_share(input);
+        REQUIRE(result);
         // header version word (little-endian, first 4 bytes) = base 0x20000000 | 0x00002000.
-        CHECK(to_hex(result.header).substr(0, 8) == "00200020");
+        CHECK(to_hex(result->header).substr(0, 8) == "00200020");
     }
     SUBCASE("bits outside the mask are rejected") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.version_mask = 0x1fffe000u;
         input.version_bits_hex = "00000001"; // not covered by the mask
-        CHECK(job.validate_share(input).reject == ShareReject::VersionBitsOutsideMask);
+        CHECK(job.validate_share(input).error().reason == ShareReject::VersionBitsOutsideMask);
     }
     SUBCASE("malformed version bits hex is rejected") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.version_mask = 0x1fffe000u;
         input.version_bits_hex = "zz";
-        CHECK(job.validate_share(input).reject == ShareReject::MalformedVersionBits);
+        CHECK(job.validate_share(input).error().reason == ShareReject::MalformedVersionBits);
     }
     SUBCASE("non-zero bits without a negotiated mask are rejected (not silently dropped)") {
         // Rolling version without negotiating means the miner hashed a header the pool would
@@ -322,33 +322,29 @@ TEST_CASE("version-rolling masks the header version") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.version_mask = 0;
         input.version_bits_hex = "ffffffff";
-        CHECK(job.validate_share(input).reject == ShareReject::VersionRollingNotNegotiated);
+        CHECK(job.validate_share(input).error().reason == ShareReject::VersionRollingNotNegotiated);
     }
     SUBCASE("zero bits without a negotiated mask are a harmless no-op") {
         ShareInput input = good_share(coinbase2, extranonce1, max_target);
         input.version_mask = 0;
         input.version_bits_hex = "00000000"; // rolls nothing -> header unchanged, still valid
-        const ShareResult result = job.validate_share(input);
-        REQUIRE(result.valid);
-        CHECK(to_hex(result.header).substr(0, 8) == "00000020"); // base version unchanged
+        const auto result = job.validate_share(input);
+        REQUIRE(result);
+        CHECK(to_hex(result->header).substr(0, 8) == "00000020"); // base version unchanged
     }
 }
 
-TEST_CASE("a rejected (above-target) share reports its difficulty but not the block fields") {
+TEST_CASE("a rejected (above-target) share reports its difficulty in the error half") {
     const Job job = make_job(); // hard 1d00ffff target
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
     const Bytes extranonce1 = from_hex("deadbeef");
 
     ShareInput input = good_share(coinbase2, extranonce1, target_from_compact(0x1d00ffff));
-    const ShareResult result = job.validate_share(input);
-    CHECK_FALSE(result.valid);
-    CHECK(result.reject == ShareReject::AboveTarget);
-    CHECK(result.difficulty > 0.0);
-    // The block-submission fields are populated only for a solved block, not for rejects.
-    CHECK(result.header.empty());
-    CHECK(result.legacy_coinbase.empty());
-    CHECK(result.block_hash_hex.empty());
+    const auto result = job.validate_share(input);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().reason == ShareReject::AboveTarget);
+    CHECK(result.error().difficulty > 0.0);
 }
 
 TEST_CASE("reject_reason maps every code to a stable human string") {

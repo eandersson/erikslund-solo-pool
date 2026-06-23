@@ -66,17 +66,38 @@ void from_hex_append(Bytes& out, std::string_view text) {
     }
 }
 
-uint32_t parse_hex_u32(std::string_view text) {
+std::optional<Bytes> try_from_hex(std::string_view text) {
+    if ((text.size() % 2) != 0)
+        return std::nullopt;
+    Bytes out;
+    out.reserve(text.size() / 2);
+    for (size_t i = 0; i < text.size(); i += 2) {
+        const int hi = kHexTable[static_cast<uint8_t>(text[i])];
+        const int lo = kHexTable[static_cast<uint8_t>(text[i + 1])];
+        if (hi < 0 || lo < 0)
+            return std::nullopt;
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return out;
+}
+
+std::optional<uint32_t> try_parse_hex_u32(std::string_view text) noexcept {
     if (text.empty() || text.size() > 8)
-        throw std::invalid_argument("hex u32: empty or longer than 8 digits");
+        return std::nullopt;
     uint32_t value = 0;
     for (char c : text) {
         const int nibble = kHexTable[static_cast<uint8_t>(c)];
         if (nibble < 0)
-            throw std::invalid_argument("hex u32: non-hex character");
+            return std::nullopt;
         value = (value << 4) | static_cast<uint32_t>(nibble);
     }
     return value;
+}
+
+uint32_t parse_hex_u32(std::string_view text) {
+    if (const auto value = try_parse_hex_u32(text))
+        return *value;
+    throw std::invalid_argument("hex u32: empty, longer than 8 digits, or non-hex");
 }
 
 } // namespace erikslund::util

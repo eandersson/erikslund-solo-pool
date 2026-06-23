@@ -74,20 +74,20 @@ SocketConnection::~SocketConnection() {
 }
 
 void SocketConnection::attach_reactor(int epoll_fd, void* epoll_data) {
-    const std::lock_guard<std::mutex> lock(write_mutex_);
+    const std::scoped_lock lock(write_mutex_);
     epoll_fd_ = epoll_fd;
     epoll_data_ = epoll_data;
 }
 
 void SocketConnection::detach_reactor() {
-    const std::lock_guard<std::mutex> lock(write_mutex_);
+    const std::scoped_lock lock(write_mutex_);
     dead_.store(true, std::memory_order_relaxed);
     epoll_fd_ = -1;       // arm_write_interest_locked now short-circuits
     epoll_data_ = nullptr;
 }
 
 void SocketConnection::send_line(std::string_view line) {
-    const std::lock_guard<std::mutex> lock(write_mutex_);
+    const std::scoped_lock lock(write_mutex_);
     if (dead_.load(std::memory_order_relaxed))
         return;
     if (outbox_pos_ > 0) {
@@ -108,7 +108,7 @@ void SocketConnection::send_line(std::string_view line) {
 }
 
 bool SocketConnection::flush_outbox() {
-    const std::lock_guard<std::mutex> lock(write_mutex_);
+    const std::scoped_lock lock(write_mutex_);
     if (dead_.load(std::memory_order_relaxed))
         return false;
     if (!drain_locked()) {

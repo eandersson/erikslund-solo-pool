@@ -1,5 +1,6 @@
 #pragma once
 // Base58 / Base58Check (legacy P2PKH/P2SH address encoding).
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,5 +16,8 @@ std::string base58_encode(std::span<const uint8_t> data);
 // Verifies + strips the trailing 4-byte double-SHA256 checksum.
 Bytes base58check_decode(std::string_view input);
 std::string base58check_encode(std::span<const uint8_t> payload);
+
+std::optional<Bytes> try_base58_decode(std::string_view input);
+std::optional<Bytes> try_base58check_decode(std::string_view input);
 
 } // namespace erikslund::util

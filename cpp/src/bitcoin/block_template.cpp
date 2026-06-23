@@ -68,9 +68,10 @@ BlockTemplate BlockTemplate::from_json(const nlohmann::json& result) {
         block_template.txn_count = static_cast<uint32_t>(transactions->size());
         block_template.txids_internal.reserve(transactions->size());
         // Size the multi-MB blob once to avoid geometric-growth recopies.
-        size_t total_hex = 0;
-        for (const auto& tx : *transactions)
-            total_hex += tx.at("data").get_ref<const std::string&>().size();
+        const size_t total_hex = std::ranges::fold_left(
+            *transactions, size_t{0}, [](size_t acc, const nlohmann::json& tx) {
+                return acc + tx.at("data").get_ref<const std::string&>().size();
+            });
         block_template.txn_data.reserve(total_hex / 2);
         for (const auto& tx : *transactions) {
             std::optional<std::string_view> txid;

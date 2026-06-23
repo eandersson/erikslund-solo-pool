@@ -220,7 +220,7 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     const auto drain_incoming = [&]() {
         std::vector<std::pair<int, std::string>> batch;
         {
-            const std::lock_guard<std::mutex> lock(worker.queue_mutex);
+            const std::scoped_lock lock(worker.queue_mutex);
             batch.swap(worker.incoming);
         }
         if (!batch.empty())
@@ -331,7 +331,7 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     worker.connections.clear();
     // Close any fds accepted but never adopted -- nothing else owns them.
     {
-        const std::lock_guard<std::mutex> lock(worker.queue_mutex);
+        const std::scoped_lock lock(worker.queue_mutex);
         for (auto& [fd, peer] : worker.incoming)
             ::close(fd);
         worker.incoming.clear();
@@ -346,7 +346,7 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
 void Server::deliver_to_worker(size_t worker_index, int fd, std::string peer) {
     ServerWorker& worker = *workers_[worker_index];
     {
-        const std::lock_guard<std::mutex> lock(worker.queue_mutex);
+        const std::scoped_lock lock(worker.queue_mutex);
         worker.incoming.push_back({fd, std::move(peer)});
         worker.pending.fetch_add(1, std::memory_order_relaxed);
     }
@@ -357,7 +357,7 @@ void Server::deliver_to_worker(size_t worker_index, int fd, std::string peer) {
 
 bool Server::enqueue_proxy_read(int fd, std::string peer, size_t worker_index) {
     {
-        const std::lock_guard<std::mutex> lock(proxy_mutex_);
+        const std::scoped_lock lock(proxy_mutex_);
         if (proxy_queue_.size() >= kMaxProxyQueue)
             return false; // shed load: the bounded queue is full
         proxy_queue_.push_back({fd, std::move(peer), worker_index});
@@ -486,7 +486,7 @@ void Server::run(const std::stop_token& stop) {
     proxy_cv_.notify_all();
     proxy_readers_.clear(); // jthread dtor joins each reader
     {
-        const std::lock_guard<std::mutex> lock(proxy_mutex_);
+        const std::scoped_lock lock(proxy_mutex_);
         for (auto& job : proxy_queue_)
             ::close(job.fd);
         proxy_queue_.clear();

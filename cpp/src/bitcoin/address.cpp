@@ -1,7 +1,6 @@
 #include "bitcoin/address.hpp"
 
-#include <stdexcept>
-#include <string>
+#include <expected>
 
 #include "util/base58.hpp"
 #include "util/bech32.hpp"
@@ -17,8 +16,8 @@ struct Base58Versions {
 
 Base58Versions base58_versions(Network network) {
     if (network == Network::Mainnet)
-        return {0x00, 0x05};
-    return {0x6f, 0xc4}; // testnet, regtest and signet share the testnet prefixes
+        return {.p2pkh = 0x00, .p2sh = 0x05};
+    return {.p2pkh = 0x6f, .p2sh = 0xc4}; // testnet, regtest and signet share the testnet prefixes
 }
 
 std::string_view bech32_hrp(Network network) {
@@ -59,27 +58,22 @@ Bytes witness_script(int version, const Bytes& program) {
 
 } // namespace
 
-Bytes address_to_script(std::string_view address, Network net) {
+std::expected<Bytes, AddressError> address_to_script(std::string_view address, Network net) {
     if (auto witness = util::segwit_address_decode(bech32_hrp(net), address))
         return witness_script(witness->version, witness->program);
 
-    try {
-        const Bytes payload = util::base58check_decode(address);
-        if (payload.size() == 21) {
-            const uint8_t version = payload[0];
-            const Bytes hash160(payload.begin() + 1, payload.end());
-            const auto versions = base58_versions(net);
-            if (version == versions.p2pkh)
-                return p2pkh_script(hash160);
-            if (version == versions.p2sh)
-                return p2sh_script(hash160);
-        }
-    } catch (const std::invalid_argument&) {  // NOLINT(bugprone-empty-catch): deliberate
-        // Not base58check; fall through to the unified error.
+    if (const auto payload = util::try_base58check_decode(address);
+        payload && payload->size() == 21) {
+        const uint8_t version = (*payload)[0];
+        const Bytes hash160(payload->begin() + 1, payload->end());
+        const auto versions = base58_versions(net);
+        if (version == versions.p2pkh)
+            return p2pkh_script(hash160);
+        if (version == versions.p2sh)
+            return p2sh_script(hash160);
     }
 
-    throw std::invalid_argument("address: unrecognized or wrong-network address '" +
-                                std::string(address) + "'");
+    return std::unexpected(AddressError::UnrecognizedOrWrongNetwork);
 }
 
 } // namespace erikslund::bitcoin

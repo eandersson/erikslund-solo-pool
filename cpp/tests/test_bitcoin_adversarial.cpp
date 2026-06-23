@@ -17,38 +17,36 @@ using namespace erikslund::util;
 
 namespace {
 Bytes tag(const std::string& s) { return Bytes(s.begin(), s.end()); }
+bool rejected(std::string_view a, Network n) { return !address_to_script(a, n).has_value(); }
 } // namespace
 
-TEST_CASE("address_to_script throws on empty and whitespace addresses") {
-    CHECK_THROWS_AS(address_to_script("", Network::Mainnet), std::invalid_argument);
-    CHECK_THROWS_AS(address_to_script(" ", Network::Mainnet), std::invalid_argument);
-    CHECK_THROWS_AS(address_to_script("   ", Network::Regtest), std::invalid_argument);
+TEST_CASE("address_to_script rejects empty and whitespace addresses") {
+    CHECK(rejected("", Network::Mainnet));
+    CHECK(rejected(" ", Network::Mainnet));
+    CHECK(rejected("   ", Network::Regtest));
 }
 
-TEST_CASE("address_to_script throws on pure garbage") {
+TEST_CASE("address_to_script rejects pure garbage") {
     for (const char* g : {"not-an-address", "hello world", "1234567890", "!!!!!!",
                           "0x1234", "bc1", "tb1", "@@@@"}) {
-        CHECK_THROWS_AS(address_to_script(g, Network::Mainnet), std::invalid_argument);
+        CHECK(rejected(g, Network::Mainnet));
     }
 }
 
-TEST_CASE("address_to_script throws on an oversized junk string (no overrun)") {
-    CHECK_THROWS_AS(address_to_script(std::string(5000, 'x'), Network::Mainnet),
-                    std::invalid_argument);
-    CHECK_THROWS_AS(address_to_script(std::string(5000, '1'), Network::Mainnet),
-                    std::invalid_argument);
+TEST_CASE("address_to_script rejects an oversized junk string (no overrun)") {
+    CHECK(rejected(std::string(5000, 'x'), Network::Mainnet));
+    CHECK(rejected(std::string(5000, '1'), Network::Mainnet));
 }
 
 TEST_CASE("a mainnet P2PKH address is rejected under regtest") {
-    CHECK_THROWS_AS(address_to_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", Network::Regtest),
-                    std::invalid_argument);
+    CHECK(rejected("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", Network::Regtest));
 }
 
 TEST_CASE("a mainnet bech32 address is rejected under every non-mainnet network") {
     const char* mainnet = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
-    CHECK_THROWS_AS(address_to_script(mainnet, Network::Regtest), std::invalid_argument);
-    CHECK_THROWS_AS(address_to_script(mainnet, Network::Testnet), std::invalid_argument);
-    CHECK_THROWS_AS(address_to_script(mainnet, Network::Signet), std::invalid_argument);
+    CHECK(rejected(mainnet, Network::Regtest));
+    CHECK(rejected(mainnet, Network::Testnet));
+    CHECK(rejected(mainnet, Network::Signet));
 }
 
 TEST_CASE("a testnet-prefixed base58 address is rejected under mainnet") {
@@ -57,20 +55,18 @@ TEST_CASE("a testnet-prefixed base58 address is rejected under mainnet") {
     Bytes payload{0x6f};
     append(payload, hash160);
     const std::string testnet_addr = base58check_encode(payload);
-    CHECK_THROWS_AS(address_to_script(testnet_addr, Network::Mainnet), std::invalid_argument);
+    CHECK(rejected(testnet_addr, Network::Mainnet));
 }
 
 TEST_CASE("a P2PKH address with a corrupted checksum is rejected") {
-    CHECK_THROWS_AS(address_to_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb", Network::Mainnet),
-                    std::invalid_argument);
-    CHECK_THROWS_AS(address_to_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7Divfff", Network::Mainnet),
-                    std::invalid_argument);
+    CHECK(rejected("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb", Network::Mainnet));
+    CHECK(rejected("1A1zP1eP5QGefi2DMPTfTL5SLmv7Divfff", Network::Mainnet));
 }
 
 TEST_CASE("a bech32 address with one flipped data symbol is rejected") {
     std::string addr = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
     addr[10] = (addr[10] == 'q') ? 'p' : 'q';
-    CHECK_THROWS_AS(address_to_script(addr, Network::Mainnet), std::invalid_argument);
+    CHECK(rejected(addr, Network::Mainnet));
 }
 
 TEST_CASE("a base58check payload of the wrong length is not a recognized address") {
@@ -78,7 +74,7 @@ TEST_CASE("a base58check payload of the wrong length is not a recognized address
     const Bytes payload = from_hex("62e907b15cbf27d5425399ebf6f0fb50ebb88f18"); // 20 bytes
     const std::string addr = base58check_encode(payload);
     // base58check_decode succeeds (checksum is valid) but size != 21 -> unrecognized.
-    CHECK_THROWS_AS(address_to_script(addr, Network::Mainnet), std::invalid_argument);
+    CHECK(rejected(addr, Network::Mainnet));
 }
 
 TEST_CASE("a base58check address with an unknown version byte is rejected") {
@@ -87,7 +83,7 @@ TEST_CASE("a base58check address with an unknown version byte is rejected") {
     Bytes payload{0x42};
     append(payload, hash160);
     const std::string addr = base58check_encode(payload);
-    CHECK_THROWS_AS(address_to_script(addr, Network::Mainnet), std::invalid_argument);
+    CHECK(rejected(addr, Network::Mainnet));
 }
 
 TEST_CASE("build_coinbase1 rejects a scriptSig pushed over the 100-byte cap") {

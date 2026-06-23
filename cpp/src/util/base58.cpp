@@ -25,12 +25,12 @@ constexpr auto kReverse = make_reverse_table();
 
 } // namespace
 
-Bytes base58_decode(std::string_view input) {
+std::optional<Bytes> try_base58_decode(std::string_view input) {
     Bytes digits; // base-256, little-endian during accumulation
     for (char c : input) {
         const int value = kReverse[static_cast<uint8_t>(c)];
         if (value < 0)
-            throw std::invalid_argument("base58: invalid character");
+            return std::nullopt;
         int carry = value;
         for (uint8_t& byte : digits) {
             carry += byte * 58;
@@ -50,6 +50,12 @@ Bytes base58_decode(std::string_view input) {
     }
     std::reverse(digits.begin(), digits.end());
     return digits;
+}
+
+Bytes base58_decode(std::string_view input) {
+    if (auto decoded = try_base58_decode(input))
+        return std::move(*decoded);
+    throw std::invalid_argument("base58: invalid character");
 }
 
 std::string base58_encode(std::span<const uint8_t> data) {
@@ -77,15 +83,21 @@ std::string base58_encode(std::span<const uint8_t> data) {
     return out;
 }
 
-Bytes base58check_decode(std::string_view input) {
-    Bytes full = base58_decode(input);
-    if (full.size() < 4)
-        throw std::invalid_argument("base58check: too short for a checksum");
-    Bytes payload(full.begin(), full.end() - 4);
+std::optional<Bytes> try_base58check_decode(std::string_view input) {
+    const auto full = try_base58_decode(input);
+    if (!full || full->size() < 4)
+        return std::nullopt;
+    Bytes payload(full->begin(), full->end() - 4);
     const Hash256 hash = sha256d(payload);
-    if (!std::equal(full.end() - 4, full.end(), hash.begin()))
-        throw std::invalid_argument("base58check: checksum mismatch");
+    if (!std::equal(full->end() - 4, full->end(), hash.begin()))
+        return std::nullopt;
     return payload;
+}
+
+Bytes base58check_decode(std::string_view input) {
+    if (auto payload = try_base58check_decode(input))
+        return std::move(*payload);
+    throw std::invalid_argument("base58check: invalid, too short, or checksum mismatch");
 }
 
 std::string base58check_encode(std::span<const uint8_t> payload) {

@@ -1,8 +1,8 @@
 #include "core/config.hpp"
 
 #include <charconv>
+#include <flat_set>
 #include <fstream>
-#include <set>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -87,7 +87,7 @@ Config Config::from_json(const nlohmann::json& object) {
     if (!object.is_object())
         throw ConfigError("config must be a JSON object");
 
-    static const std::set<std::string> known = {
+    static const std::flat_set<std::string> known = {
         "$schema",                          "bitcoin_nodes",
         "stratum_listen",                   "api_listen",
         "coinbase_signature",               "coinbase_version",

@@ -1,6 +1,8 @@
 #include "stratum/job.hpp"
 
+#include <expected>
 #include <format>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -19,11 +21,8 @@ namespace {
 constexpr int64_t kNtimeSlack = 7200;
 constexpr int64_t kNtimeSubmitMargin = 120;
 
-ShareResult rejected(ShareReject reject) {
-    ShareResult result;
-    result.valid = false;
-    result.reject = reject;
-    return result;
+std::unexpected<ShareRejection> rejected(ShareReject reason) {
+    return std::unexpected(ShareRejection{reason});
 }
 
 // Display hex -> mining.notify form: internal hash with each 4-byte word byte-reversed.
@@ -144,23 +143,20 @@ Bytes Job::build_header(const util::Hash256& merkle_root, uint32_t ntime, uint32
     return header;
 }
 
-ShareResult Job::validate_share(const ShareInput& input) const {
+std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput& input) const {
     // Cheap length gate before hex-decode (an oversized extranonce2 always rejects).
     if (input.extranonce2_hex.size() > extranonce2_size_ * 2) [[unlikely]]
         return rejected(ShareReject::InvalidExtranonce2Size);
 
-    Bytes extranonce2;
-    uint32_t ntime = 0;
-    uint32_t nonce = 0;
-    try {
-        extranonce2 = util::from_hex(input.extranonce2_hex);
-        ntime = util::parse_hex_u32(input.ntime_hex);
-        nonce = util::parse_hex_u32(input.nonce_hex);
-    } catch (const std::invalid_argument&) {
+    const auto extranonce2 = util::try_from_hex(input.extranonce2_hex);
+    const auto ntime_opt = util::try_parse_hex_u32(input.ntime_hex);
+    const auto nonce_opt = util::try_parse_hex_u32(input.nonce_hex);
+    if (!extranonce2 || !ntime_opt || !nonce_opt) [[unlikely]]
         return rejected(ShareReject::MalformedField);
-    }
+    const uint32_t ntime = *ntime_opt;
+    const uint32_t nonce = *nonce_opt;
 
-    if (extranonce2.size() != extranonce2_size_) [[unlikely]]
+    if (extranonce2->size() != extranonce2_size_) [[unlikely]]
         return rejected(ShareReject::InvalidExtranonce2Size);
 
     const int64_t ntime_min = static_cast<int64_t>(curtime_);
@@ -170,12 +166,10 @@ ShareResult Job::validate_share(const ShareInput& input) const {
 
     uint32_t version = version_;
     if (input.version_bits_hex) {
-        uint32_t rolled = 0;
-        try {
-            rolled = util::parse_hex_u32(*input.version_bits_hex);
-        } catch (const std::invalid_argument&) {
+        const auto rolled_opt = util::try_parse_hex_u32(*input.version_bits_hex);
+        if (!rolled_opt) [[unlikely]]
             return rejected(ShareReject::MalformedVersionBits);
-        }
+        const uint32_t rolled = *rolled_opt;
         if (input.version_mask == 0) {
             if (rolled != 0) [[unlikely]]
                 return rejected(ShareReject::VersionRollingNotNegotiated);
@@ -187,11 +181,11 @@ ShareResult Job::validate_share(const ShareInput& input) const {
     }
 
     Bytes coinbase;
-    coinbase.reserve(coinbase1_.size() + input.extranonce1.size() + extranonce2.size() +
+    coinbase.reserve(coinbase1_.size() + input.extranonce1.size() + extranonce2->size() +
                      input.coinbase2.size());
     append(coinbase, coinbase1_);
     append(coinbase, input.extranonce1);
-    append(coinbase, extranonce2);
+    append(coinbase, *extranonce2);
     append(coinbase, input.coinbase2);
 
     const util::Hash256 coinbase_txid = util::sha256d(coinbase);
@@ -203,16 +197,10 @@ ShareResult Job::validate_share(const ShareInput& input) const {
     const double difficulty = util::difficulty_from_target(hash_value);
     const bool is_block = util::meets_target(hash_value, network_target_);
 
-    if (!is_block && !util::meets_target(hash_value, input.share_target)) {
-        ShareResult result;
-        result.valid = false;
-        result.reject = ShareReject::AboveTarget;
-        result.difficulty = difficulty;
-        return result;
-    }
+    if (!is_block && !util::meets_target(hash_value, input.share_target))
+        return std::unexpected(ShareRejection{ShareReject::AboveTarget, difficulty});
 
     ShareResult result;
-    result.valid = true;
     result.difficulty = difficulty;
     result.is_block = is_block;
     result.block_hash_hex = util::to_hex(util::reversed(block_hash));

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <print>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,8 +69,8 @@ double run_bench(const Job& job, const Bytes& coinbase2, const Bytes& enonce1, i
                 nbuf = std::format("{:08x}", nonce++);
                 in.nonce_hex = nbuf;
                 // Separate TU + observed result so the optimizer can't elide the call.
-                const ShareResult r = job.validate_share(in);
-                if (r.valid)
+                const auto r = job.validate_share(in);
+                if (r)
                     total.fetch_add(0, std::memory_order_relaxed);
                 ++count;
             }
@@ -97,8 +98,8 @@ TEST_CASE("validate_share throughput benchmark") {
 
     const double one = run_bench(job, coinbase2, enonce1, 1, 3.0);
     const double four = run_bench(job, coinbase2, enonce1, 4, 3.0);
-    std::printf("\n[BENCH] validate_share: 1 thread = %.0f/s | 4 threads = %.0f/s | scaling = %.2fx\n",
-                one, four, one > 0.0 ? four / one : 0.0);
+    std::println("\n[BENCH] validate_share: 1 thread = {:.0f}/s | 4 threads = {:.0f}/s | scaling = {:.2f}x",
+                 one, four, one > 0.0 ? four / one : 0.0);
     std::fflush(stdout);
     CHECK(one > 0.0);
     CHECK(four > 0.0);

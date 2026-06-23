@@ -103,13 +103,13 @@ void Pool::detect_network() {
     log::info("Connected to bitcoind: chain={} blocks={}", chain, info.value("blocks", 0));
 
     if (config_.donation_percent > 0.0 && !config_.donation_address.empty()) {
-        try {
-            donation_script_ = bitcoin::address_to_script(config_.donation_address, network_);
+        if (auto script = bitcoin::address_to_script(config_.donation_address, network_)) {
+            donation_script_ = *script;
             log::info("Donation enabled: {}% of each block to {}", config_.donation_percent,
-                        config_.donation_address);
-        } catch (const std::exception& e) {
-            log::warning("Donation disabled: invalid donation_address '{}': {}",
-                         config_.donation_address, e.what());
+                      config_.donation_address);
+        } else {
+            log::warning("Donation disabled: invalid donation_address '{}'",
+                         config_.donation_address);
         }
     }
 }
@@ -162,7 +162,7 @@ Pool::PublishOutcome Pool::broadcast_job(const std::shared_ptr<const stratum::Jo
     }
     std::vector<std::shared_ptr<Client>> recipients;
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
+        const std::scoped_lock lock(mutex_);
         recipients = clients_;
     }
     for (const auto& client : recipients)
@@ -207,7 +207,7 @@ void Pool::build_and_broadcast(bitcoin::BlockTemplate block_template, bool clean
         return;
     }
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
+        const std::scoped_lock lock(mutex_);
         last_prevhash_ = prevhash;
         last_template_time_ = stats::steady_seconds(); // monotonic
         last_version_ = version;
@@ -256,7 +256,7 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
         // avoids a pointless header fetch per block where fastblock is permanently ineligible.
         bool maybe_eligible = false;
         {
-            const std::lock_guard<std::mutex> lock(mutex_);
+            const std::scoped_lock lock(mutex_);
             maybe_eligible = has_template_ && !fastblock_pending_ &&
                              block_hash_display != last_prevhash_ && chain_name_ != "test" &&
                              chain_name_ != "testnet4";
@@ -276,7 +276,7 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                 uint32_t version = 0;
                 int64_t halving_interval = 210000;
                 {
-                    const std::lock_guard<std::mutex> lock(mutex_);
+                    const std::scoped_lock lock(mutex_);
                     eligible = fastblock_eligible(has_template_, fastblock_pending_,
                                                   block_hash_display, last_prevhash_, next_height,
                                                   confirmations, chain_name_);
@@ -311,7 +311,7 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                     } else {
                         // Suppressed: release the pending latch so the next ZMQ notify isn't
                         // blocked waiting for a GBT to reset it.
-                        const std::lock_guard<std::mutex> lock(mutex_);
+                        const std::scoped_lock lock(mutex_);
                         fastblock_pending_ = false;
                     }
                 }
@@ -341,7 +341,7 @@ void Pool::refresh_work(const std::stop_token& stop) {
                 if (!job->mines_on(tip)) {
                     fetch = true;
                 } else {
-                    const std::lock_guard<std::mutex> lock(mutex_);
+                    const std::scoped_lock lock(mutex_);
                     fetch = tip != last_prevhash_;
                 }
             }
@@ -352,7 +352,7 @@ void Pool::refresh_work(const std::stop_token& stop) {
                 generator_ready_.store(true);
                 bool new_block = false;
                 {
-                    const std::lock_guard<std::mutex> lock(mutex_);
+                    const std::scoped_lock lock(mutex_);
                     new_block = block_template.previousblockhash != last_prevhash_;
                 }
                 build_and_broadcast(std::move(block_template), new_block);
@@ -379,7 +379,7 @@ Pool::add_client(std::shared_ptr<stratum::Connection> connection) {
     auto session =
         std::make_shared<stratum::Session>(*this, *connection, next_extranonce1());
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
+        const std::scoped_lock lock(mutex_);
         clients_.push_back(std::make_shared<Client>(Client{std::move(connection), session}));
     }
     log::info("Client connected: {} (extranonce1={})", peer, session->extranonce1_hex());
@@ -387,12 +387,12 @@ Pool::add_client(std::shared_ptr<stratum::Connection> connection) {
 }
 
 void Pool::remove_client(const std::shared_ptr<stratum::Session>& session) {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     std::erase_if(clients_, [&](const auto& client) { return client->session == session; });
 }
 
 size_t Pool::client_count() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     return clients_.size();
 }
 
@@ -401,11 +401,9 @@ std::optional<Bytes> Pool::validate_address(const std::string& address) {
     // no RPC: an invalid-address flood stays cheap and miners can authorize during a bitcoind blip.
     if (!plausible_address(address))
         return std::nullopt;
-    try {
-        return bitcoin::address_to_script(address, network_);
-    } catch (const std::invalid_argument&) {
-        return std::nullopt; // malformed or wrong-network address
-    }
+    if (auto script = bitcoin::address_to_script(address, network_))
+        return *script;
+    return std::nullopt; // malformed or wrong-network address
 }
 
 std::shared_ptr<const stratum::Job> Pool::current_job() const {
@@ -448,7 +446,7 @@ void Pool::attach_worker(const std::string& address, const std::string& worker) 
     if (address.empty())
         return;
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
-    const std::lock_guard<std::mutex> lock(user_stats_mutex_);
+    const std::scoped_lock lock(user_stats_mutex_);
     if (WorkerStat* stat = worker_entry(address, worker)) // create a zero row if absent
         stat->last_activity_ts = std::max(stat->last_activity_ts, now_wall);
 }
@@ -465,13 +463,13 @@ void Pool::note_accepted_share(const std::string& address, const std::string& wo
     const double now = stats::steady_seconds();       // monotonic: decay clock
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr)); // DISPLAYED
     {
-        const std::lock_guard<std::mutex> lock(stats_mutex_);
+        const std::scoped_lock lock(stats_mutex_);
         hashrate_windows_.add(credited, now);
         sps_windows_.add(1.0, now);
     }
     if (address.empty())
         return;
-    const std::lock_guard<std::mutex> lock(user_stats_mutex_);
+    const std::scoped_lock lock(user_stats_mutex_);
     WorkerStat* stat = worker_entry(address, worker);
     if (!stat)
         return; // address-capped: counted pool-wide, not per-worker
@@ -489,7 +487,7 @@ void Pool::note_rejected_share(const std::string& address, const std::string& wo
     if (address.empty())
         return;
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
-    const std::lock_guard<std::mutex> lock(user_stats_mutex_);
+    const std::scoped_lock lock(user_stats_mutex_);
     if (WorkerStat* stat = worker_entry(address, worker)) {
         ++stat->shares_rejected;
         stat->last_activity_ts = now_wall; // a reject is activity (keeps a live rig out of prune)
@@ -507,7 +505,7 @@ void Pool::prune_user_stats(const std::vector<std::pair<std::string, std::string
     const int64_t ghost_cutoff = now - kGhostRowGraceSeconds;
     const int64_t retention_cutoff =
         retention_on ? now - static_cast<int64_t>(retention_days) * 86400 : 0;
-    const std::lock_guard<std::mutex> lock(user_stats_mutex_);
+    const std::scoped_lock lock(user_stats_mutex_);
     std::set<std::string> connected_keys;
     for (const auto& [address, worker] : live) {
         const auto ai = user_stats_.find(address);
@@ -549,7 +547,7 @@ void Pool::prune_user_stats(const std::vector<std::pair<std::string, std::string
 
 void Pool::notify_new_block() {
     {
-        const std::lock_guard<std::mutex> lock(wakeup_mutex_);
+        const std::scoped_lock lock(wakeup_mutex_);
         new_block_flag_ = true;
     }
     wakeup_cv_.notify_all();
@@ -564,7 +562,7 @@ void Pool::vardiff_loop(const std::stop_token& stop) {
             break;
         std::vector<std::shared_ptr<Client>> clients;
         {
-            const std::lock_guard<std::mutex> lock(mutex_);
+            const std::scoped_lock lock(mutex_);
             clients = clients_;
         }
         for (const auto& client : clients) {
@@ -588,7 +586,7 @@ void Pool::status_loop(const std::stop_token& stop) {
         write_stats();
         std::string tip;
         {
-            const std::lock_guard<std::mutex> lock(mutex_);
+            const std::scoped_lock lock(mutex_);
             tip = last_prevhash_;
         }
         if (!stop.stop_requested())
@@ -604,7 +602,7 @@ void Pool::recover_stats() {
         blocks_found_.store(prior->blocks_found);
         last_block_found_.store(prior->last_block_found);
         {
-            const std::lock_guard<std::mutex> lock(mutex_);
+            const std::scoped_lock lock(mutex_);
             blocks_by_address_ = prior->blocks_by_address;
         }
         log::info("Recovered stats from {}/pool/pool.status: accepted_diff={:.0f} best={:.0f} "
@@ -643,10 +641,9 @@ void Pool::recover_user_stats() {
         auto& keys = by_address[rw.address];
         std::string key = rw.worker; // re-apply the admission cap against the keys seen so far
         if (!key.empty() && !keys.contains(key) && config_.max_workers_per_address > 0) {
-            size_t named = 0;
-            for (const auto& [name, _] : keys)
-                named += !name.empty();
-            if (named >= static_cast<size_t>(config_.max_workers_per_address))
+            const auto named =
+                std::ranges::count_if(keys, [](const auto& kv) { return !kv.first.empty(); });
+            if (named >= static_cast<int64_t>(config_.max_workers_per_address))
                 key.clear();
         }
         Accum& a = keys[key];
@@ -660,7 +657,7 @@ void Pool::recover_user_stats() {
     }
 
     size_t rows = 0;
-    const std::lock_guard<std::mutex> lock(user_stats_mutex_);
+    const std::scoped_lock lock(user_stats_mutex_);
     for (const auto& [address, keys] : by_address)
         for (const auto& [key, a] : keys) {
             WorkerStat* stat = worker_entry(address, key);
@@ -684,7 +681,7 @@ void Pool::write_stats() {
         // (whose mtime would reset the prune clock on a later restart).
         std::vector<std::shared_ptr<Client>> clients_copy;
         {
-            const std::lock_guard<std::mutex> lock(mutex_);
+            const std::scoped_lock lock(mutex_);
             clients_copy = clients_;
         }
         std::vector<std::pair<std::string, std::string>> live;
@@ -803,13 +800,13 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
         snapshot.recent_jobs_cached = recent_jobs_.size();
     }
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
+        const std::scoped_lock lock(mutex_);
         clients = clients_;
         last_template = last_template_time_;
         snapshot.blocks_by_address = blocks_by_address_;
     }
     {
-        const std::lock_guard<std::mutex> lock(stats_mutex_);
+        const std::scoped_lock lock(stats_mutex_);
         snapshot.hashrate_windows = hashrate_windows_.snapshot(now_steady);
         snapshot.sps_windows = sps_windows_.snapshot(now_steady);
     }
@@ -866,7 +863,7 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
             if (!session_stats.address.empty())
                 live.emplace_back(session_stats.address, session_stats.worker);
         }
-        const std::lock_guard<std::mutex> lock(user_stats_mutex_);
+        const std::scoped_lock lock(user_stats_mutex_);
         std::set<std::string> connected_keys;
         for (const auto& [address, worker] : live) {
             const auto ai = user_stats_.find(address);
@@ -923,7 +920,7 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
     // Hand the slow submitblock RPC to the submit thread: running it here would hold the caller's
     // session mutex across the RPC, stalling that miner's next-work push.
     {
-        const std::lock_guard<std::mutex> lock(submit_mutex_);
+        const std::scoped_lock lock(submit_mutex_);
         submit_queue_.push_back(std::move(block));
     }
     submit_cv_.notify_one();
@@ -937,7 +934,7 @@ void Pool::submit_block(const PendingBlock& block) {
             ++blocks_found_;
             last_block_found_.store(static_cast<int64_t>(std::time(nullptr))); // wall: DISPLAYED
             if (!block.address.empty()) {
-                const std::lock_guard<std::mutex> lock(mutex_);
+                const std::scoped_lock lock(mutex_);
                 ++blocks_by_address_[block.address];
             }
             log::info("BLOCK ACCEPTED height={} hash={} address={} worker={}", block.height,

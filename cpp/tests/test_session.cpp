@@ -128,7 +128,7 @@ std::string find_accepted_nonce(const Job& job, const Bytes& enonce1, double dif
         in.nonce_hex = nonce_hex;
         in.share_target = util::target_from_difficulty(difficulty);
         in.now_unix = static_cast<int64_t>(std::time(nullptr));
-        if (job.validate_share(in).valid)
+        if (job.validate_share(in).has_value())
             return nonce_hex;
     }
     return "";
@@ -414,7 +414,7 @@ TEST_CASE("a difficulty change takes effect only from the next job (grace window
         in.nonce_hex = nonce_hex;
         in.share_target = util::target_from_difficulty(start_diff);
         in.now_unix = static_cast<int64_t>(std::time(nullptr));
-        if (f.pool.job->validate_share(in).valid)
+        if (f.pool.job->validate_share(in).has_value())
             nonces.push_back(nonce_hex);
     }
     REQUIRE(nonces.size() == 3);
@@ -487,7 +487,8 @@ TEST_CASE("difficulty-grace crediting: LOWER direction and the meets-the-harder-
         in.nonce_hex = nonce_hex;
         in.share_target = util::uint256::from_display_hex(std::string(64, 'f')); // loosest: always valid
         in.now_unix = static_cast<int64_t>(std::time(nullptr));
-        return pool.job->validate_share(in).difficulty;
+        const auto r = pool.job->validate_share(in);
+        return r ? r->difficulty : r.error().difficulty;
     };
     std::string lucky;
     std::string easy;

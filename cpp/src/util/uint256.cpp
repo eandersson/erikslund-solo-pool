@@ -32,10 +32,7 @@ std::string uint256::to_display_hex() const {
 }
 
 bool uint256::is_zero() const {
-    for (uint8_t b : bytes_)
-        if (b != 0)
-            return false;
-    return true;
+    return std::ranges::all_of(bytes_, [](uint8_t b) { return b == 0; });
 }
 
 std::strong_ordering uint256::operator<=>(const uint256& other) const {

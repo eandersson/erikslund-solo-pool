@@ -1,6 +1,7 @@
 #pragma once
 // Hex <-> bytes.
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -23,5 +24,8 @@ void from_hex_append(Bytes& out, std::string_view text);
 
 // Parse 1..8 hex digits (Stratum ntime/nonce/version). Throws on empty/too-long/non-hex.
 uint32_t parse_hex_u32(std::string_view text);
+
+std::optional<Bytes> try_from_hex(std::string_view text);
+std::optional<uint32_t> try_parse_hex_u32(std::string_view text) noexcept;
 
 } // namespace erikslund::util

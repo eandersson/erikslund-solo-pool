@@ -69,7 +69,7 @@ Session::Session(PoolContext& pool, Connection& connection, Bytes extranonce1)
 }
 
 void Session::maybe_retarget() {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     if (!pool_.vardiff_enabled() || !authorized_)
         return;
     const double now = stats::steady_seconds(); // monotonic
@@ -95,7 +95,7 @@ void Session::maybe_retarget() {
 }
 
 Session::SessionStats Session::stats() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     SessionStats snapshot;
     snapshot.address = address_.value_or("");
     snapshot.worker = worker_.value_or("");
@@ -170,7 +170,7 @@ void Session::handle_line(std::string_view line) {
     const auto request = parse_request(line);
     if (!request)
         return;
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     dispatch(*request);
 }
 
@@ -193,7 +193,7 @@ void Session::dispatch(const Request& request) {
 }
 
 void Session::send_set_difficulty() {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     do_send_set_difficulty();
 }
 
@@ -202,7 +202,7 @@ void Session::do_send_set_difficulty() {
 }
 
 void Session::send_notify(const Job& job, bool clean) {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::scoped_lock lock(mutex_);
     do_send_notify(job, clean);
 }
 
@@ -397,22 +397,23 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     input.version_mask = version_mask_;
     input.now_unix = static_cast<int64_t>(std::time(nullptr));
 
-    const ShareResult result = job->validate_share(input);
-    if (!result.valid) {
+    const auto result = job->validate_share(input);
+    if (!result) {
         ++shares_rejected_;
         pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));
         if (log::level() <= log::Level::Debug)
             log::debug("Rejected share from {} ({})", address_.value_or(""),
-                       reject_reason(result.reject));
-        send_error(id, result.reject == ShareReject::AboveTarget ? ERR_LOW_DIFFICULTY : ERR_OTHER);
+                       reject_reason(result.error().reason));
+        send_error(id,
+                   result.error().reason == ShareReject::AboveTarget ? ERR_LOW_DIFFICULTY : ERR_OTHER);
         return;
     }
 
-    record_accepted_share(result);
+    record_accepted_share(*result);
     send_result(id, true);
 
-    if (result.is_block)
-        pool_.on_block_found(*this, *job, result);
+    if (result->is_block)
+        pool_.on_block_found(*this, *job, *result);
 }
 
 void Session::record_accepted_share(const ShareResult& result) {

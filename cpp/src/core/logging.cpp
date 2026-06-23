@@ -45,7 +45,7 @@ Level level() {
 }
 
 bool set_log_file(std::string_view path) {
-    const std::lock_guard<std::mutex> lock(g_write_mutex);
+    const std::scoped_lock lock(g_write_mutex);
     if (g_log_file) {
         std::fclose(g_log_file);
         g_log_file = nullptr;
@@ -83,7 +83,7 @@ void write(Level level, std::string_view message) {
         std::fflush(stream);
     };
 
-    const std::lock_guard<std::mutex> lock(g_write_mutex);
+    const std::scoped_lock lock(g_write_mutex);
     emit(stderr);
     if (g_log_file)
         emit(g_log_file);
