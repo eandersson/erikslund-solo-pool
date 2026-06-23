@@ -40,9 +40,9 @@ TEST_CASE("parse_request_line rejects an empty method or empty path") {
 }
 
 TEST_CASE("parse_request_line strips the query string and keeps the path prefix") {
-    const auto r = parse_request_line("GET /stats/client/bc1q?refresh=1&x=2 HTTP/1.1");
-    REQUIRE(r.has_value());
-    CHECK(r->second == "/stats/client/bc1q");
+    const auto result = parse_request_line("GET /stats/client/bc1q?refresh=1&x=2 HTTP/1.1");
+    REQUIRE(result.has_value());
+    CHECK(result->second == "/stats/client/bc1q");
 
     // A '?' immediately after the path leaves the bare path.
     const auto bare = parse_request_line("GET /metrics? HTTP/1.1");
@@ -52,17 +52,17 @@ TEST_CASE("parse_request_line strips the query string and keeps the path prefix"
 
 TEST_CASE("parse_request_line tolerates extra tokens after the version (takes 2nd space)") {
     // Only the first two spaces matter; the remainder is the (ignored) version+junk.
-    const auto r = parse_request_line("GET /metrics HTTP/1.1 extra junk here");
-    REQUIRE(r.has_value());
-    CHECK(r->first == "GET");
-    CHECK(r->second == "/metrics");
+    const auto result = parse_request_line("GET /metrics HTTP/1.1 extra junk here");
+    REQUIRE(result.has_value());
+    CHECK(result->first == "GET");
+    CHECK(result->second == "/metrics");
 }
 
 TEST_CASE("parse_request_line does not throw on very long lines") {
     const std::string line = "GET /" + std::string(100000, 'a') + " HTTP/1.1";
-    const auto r = parse_request_line(line);
-    REQUIRE(r.has_value());
-    CHECK(r->second.size() == 100001); // "/" + 100000 'a'
+    const auto result = parse_request_line(line);
+    REQUIRE(result.has_value());
+    CHECK(result->second.size() == 100001); // "/" + 100000 'a'
 }
 
 TEST_CASE("route returns 405 for every non-GET/HEAD method") {
@@ -157,16 +157,16 @@ TEST_CASE("the known read-only endpoints return their expected statuses (no cras
 
 TEST_CASE("a 405 response carries a body and a content-type (well-formed error)") {
     PoolFixture f;
-    const auto r = route("POST", "/metrics", f.pool);
-    CHECK(r.status == 405);
-    CHECK_FALSE(r.body.empty());
-    CHECK(contains(r.content_type, "text/plain"));
+    const auto result = route("POST", "/metrics", f.pool);
+    CHECK(result.status == 405);
+    CHECK_FALSE(result.body.empty());
+    CHECK(contains(result.content_type, "text/plain"));
 }
 
 TEST_CASE("a 400 client-address response is well-formed") {
     PoolFixture f;
-    const auto r = route("GET", "/stats/client/bad!char", f.pool);
-    CHECK(r.status == 400);
-    CHECK_FALSE(r.body.empty());
-    CHECK(contains(r.content_type, "text/plain"));
+    const auto result = route("GET", "/stats/client/bad!char", f.pool);
+    CHECK(result.status == 400);
+    CHECK_FALSE(result.body.empty());
+    CHECK(contains(result.content_type, "text/plain"));
 }

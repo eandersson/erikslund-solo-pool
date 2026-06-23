@@ -642,7 +642,7 @@ void Pool::recover_user_stats() {
         std::string key = rw.worker; // re-apply the admission cap against the keys seen so far
         if (!key.empty() && !keys.contains(key) && config_.max_workers_per_address > 0) {
             const auto named =
-                std::ranges::count_if(keys, [](const auto& kv) { return !kv.first.empty(); });
+                std::ranges::count_if(keys, [](const auto& entry) { return !entry.first.empty(); });
             if (named >= static_cast<int64_t>(config_.max_workers_per_address))
                 key.clear();
         }

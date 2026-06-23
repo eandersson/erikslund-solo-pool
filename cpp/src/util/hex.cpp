@@ -57,12 +57,12 @@ void from_hex_append(Bytes& out, std::string_view text) {
     if ((text.size() % 2) != 0)
         throw std::invalid_argument("hex string has odd length");
     out.reserve(out.size() + text.size() / 2);
-    for (size_t i = 0; i < text.size(); i += 2) {
-        const int hi = kHexTable[static_cast<uint8_t>(text[i])];
-        const int lo = kHexTable[static_cast<uint8_t>(text[i + 1])];
-        if (hi < 0 || lo < 0)
+    for (size_t index = 0; index < text.size(); index += 2) {
+        const int high_nibble = kHexTable[static_cast<uint8_t>(text[index])];
+        const int low_nibble = kHexTable[static_cast<uint8_t>(text[index + 1])];
+        if (high_nibble < 0 || low_nibble < 0)
             throw std::invalid_argument("hex string has a non-hex character");
-        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        out.push_back(static_cast<uint8_t>((high_nibble << 4) | low_nibble));
     }
 }
 
@@ -71,12 +71,12 @@ std::optional<Bytes> try_from_hex(std::string_view text) {
         return std::nullopt;
     Bytes out;
     out.reserve(text.size() / 2);
-    for (size_t i = 0; i < text.size(); i += 2) {
-        const int hi = kHexTable[static_cast<uint8_t>(text[i])];
-        const int lo = kHexTable[static_cast<uint8_t>(text[i + 1])];
-        if (hi < 0 || lo < 0)
+    for (size_t index = 0; index < text.size(); index += 2) {
+        const int high_nibble = kHexTable[static_cast<uint8_t>(text[index])];
+        const int low_nibble = kHexTable[static_cast<uint8_t>(text[index + 1])];
+        if (high_nibble < 0 || low_nibble < 0)
             return std::nullopt;
-        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        out.push_back(static_cast<uint8_t>((high_nibble << 4) | low_nibble));
     }
     return out;
 }
@@ -85,8 +85,8 @@ std::optional<uint32_t> try_parse_hex_u32(std::string_view text) noexcept {
     if (text.empty() || text.size() > 8)
         return std::nullopt;
     uint32_t value = 0;
-    for (char c : text) {
-        const int nibble = kHexTable[static_cast<uint8_t>(c)];
+    for (char character : text) {
+        const int nibble = kHexTable[static_cast<uint8_t>(character)];
         if (nibble < 0)
             return std::nullopt;
         value = (value << 4) | static_cast<uint32_t>(nibble);

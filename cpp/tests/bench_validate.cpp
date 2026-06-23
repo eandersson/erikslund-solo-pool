@@ -69,8 +69,8 @@ double run_bench(const Job& job, const Bytes& coinbase2, const Bytes& enonce1, i
                 nbuf = std::format("{:08x}", nonce++);
                 in.nonce_hex = nbuf;
                 // Separate TU + observed result so the optimizer can't elide the call.
-                const auto r = job.validate_share(in);
-                if (r)
+                const auto result = job.validate_share(in);
+                if (result)
                     total.fetch_add(0, std::memory_order_relaxed);
                 ++count;
             }

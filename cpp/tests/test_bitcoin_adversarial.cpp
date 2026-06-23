@@ -16,8 +16,10 @@ using namespace erikslund::bitcoin;
 using namespace erikslund::util;
 
 namespace {
-Bytes tag(const std::string& s) { return Bytes(s.begin(), s.end()); }
-bool rejected(std::string_view a, Network n) { return !address_to_script(a, n).has_value(); }
+Bytes tag(const std::string& text) { return Bytes(text.begin(), text.end()); }
+bool rejected(std::string_view address, Network network) {
+    return !address_to_script(address, network).has_value();
+}
 } // namespace
 
 TEST_CASE("address_to_script rejects empty and whitespace addresses") {
@@ -27,9 +29,9 @@ TEST_CASE("address_to_script rejects empty and whitespace addresses") {
 }
 
 TEST_CASE("address_to_script rejects pure garbage") {
-    for (const char* g : {"not-an-address", "hello world", "1234567890", "!!!!!!",
-                          "0x1234", "bc1", "tb1", "@@@@"}) {
-        CHECK(rejected(g, Network::Mainnet));
+    for (const char* garbage : {"not-an-address", "hello world", "1234567890", "!!!!!!",
+                                "0x1234", "bc1", "tb1", "@@@@"}) {
+        CHECK(rejected(garbage, Network::Mainnet));
     }
 }
 

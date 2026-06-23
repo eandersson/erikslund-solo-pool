@@ -27,8 +27,8 @@ constexpr auto kReverse = make_reverse_table();
 
 std::optional<Bytes> try_base58_decode(std::string_view input) {
     Bytes digits; // base-256, little-endian during accumulation
-    for (char c : input) {
-        const int value = kReverse[static_cast<uint8_t>(c)];
+    for (char character : input) {
+        const int value = kReverse[static_cast<uint8_t>(character)];
         if (value < 0)
             return std::nullopt;
         int carry = value;
@@ -43,8 +43,8 @@ std::optional<Bytes> try_base58_decode(std::string_view input) {
         }
     }
     // Each leading '1' is a leading zero byte.
-    for (char c : input) {
-        if (c != '1')
+    for (char character : input) {
+        if (character != '1')
             break;
         digits.push_back(0);
     }

@@ -487,8 +487,8 @@ TEST_CASE("difficulty-grace crediting: LOWER direction and the meets-the-harder-
         in.nonce_hex = nonce_hex;
         in.share_target = util::uint256::from_display_hex(std::string(64, 'f')); // loosest: always valid
         in.now_unix = static_cast<int64_t>(std::time(nullptr));
-        const auto r = pool.job->validate_share(in);
-        return r ? r->difficulty : r.error().difficulty;
+        const auto result = pool.job->validate_share(in);
+        return result ? result->difficulty : result.error().difficulty;
     };
     std::string lucky;
     std::string easy;

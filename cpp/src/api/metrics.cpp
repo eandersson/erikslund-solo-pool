@@ -205,9 +205,9 @@ nlohmann::json stratifier_stats_json(const PoolSnapshot& snapshot) {
 
 nlohmann::json connector_stats_json(const PoolSnapshot& snapshot) {
     const auto subscribed = static_cast<size_t>(
-        std::ranges::count_if(snapshot.clients, [](const auto& c) { return c.subscribed; }));
+        std::ranges::count_if(snapshot.clients, [](const auto& client) { return client.subscribed; }));
     const auto authorized = static_cast<size_t>(
-        std::ranges::count_if(snapshot.clients, [](const auto& c) { return c.authorized; }));
+        std::ranges::count_if(snapshot.clients, [](const auto& client) { return client.authorized; }));
     return {{"workers", snapshot.connected},
             {"subscribed", subscribed},
             {"authorized", authorized}};

@@ -58,15 +58,15 @@ Bytes witness_script(int version, const Bytes& program) {
 
 } // namespace
 
-std::expected<Bytes, AddressError> address_to_script(std::string_view address, Network net) {
-    if (auto witness = util::segwit_address_decode(bech32_hrp(net), address))
+std::expected<Bytes, AddressError> address_to_script(std::string_view address, Network network) {
+    if (auto witness = util::segwit_address_decode(bech32_hrp(network), address))
         return witness_script(witness->version, witness->program);
 
     if (const auto payload = util::try_base58check_decode(address);
         payload && payload->size() == 21) {
         const uint8_t version = (*payload)[0];
         const Bytes hash160(payload->begin() + 1, payload->end());
-        const auto versions = base58_versions(net);
+        const auto versions = base58_versions(network);
         if (version == versions.p2pkh)
             return p2pkh_script(hash160);
         if (version == versions.p2sh)

@@ -14,8 +14,12 @@ using namespace erikslund::bitcoin;
 using namespace erikslund::util;
 
 namespace {
-Bytes script_of(std::string_view a, Network n) { return address_to_script(a, n).value(); }
-bool rejected(std::string_view a, Network n) { return !address_to_script(a, n).has_value(); }
+Bytes script_of(std::string_view address, Network network) {
+    return address_to_script(address, network).value();
+}
+bool rejected(std::string_view address, Network network) {
+    return !address_to_script(address, network).has_value();
+}
 } // namespace
 
 TEST_CASE("mainnet P2PKH -> scriptPubKey") {

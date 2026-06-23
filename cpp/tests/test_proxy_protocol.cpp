@@ -42,15 +42,15 @@ std::string drain(int fd) {
 } // namespace
 
 TEST_CASE("PROXY v1: TCP4 yields src ip:port") {
-    const auto r = parse_proxy_v1("PROXY TCP4 1.2.3.4 5.6.7.8 6324 3333");
-    REQUIRE(r.has_value());
-    CHECK(*r == "1.2.3.4:6324");
+    const auto result = parse_proxy_v1("PROXY TCP4 1.2.3.4 5.6.7.8 6324 3333");
+    REQUIRE(result.has_value());
+    CHECK(*result == "1.2.3.4:6324");
 }
 
 TEST_CASE("PROXY v1: TCP6 yields src ip:port") {
-    const auto r = parse_proxy_v1("PROXY TCP6 2001:db8::1 2001:db8::2 6324 3333");
-    REQUIRE(r.has_value());
-    CHECK(*r == "2001:db8::1:6324");
+    const auto result = parse_proxy_v1("PROXY TCP6 2001:db8::1 2001:db8::2 6324 3333");
+    REQUIRE(result.has_value());
+    CHECK(*result == "2001:db8::1:6324");
 }
 
 TEST_CASE("PROXY v1: UNKNOWN / malformed -> nullopt") {
@@ -73,9 +73,9 @@ TEST_CASE("PROXY v2: IPv4 PROXY command yields src ip:port") {
         0x18, 0xB4,       // src port 6324
         0x0D, 0x05,       // dst port 3333
     };
-    const auto r = parse_proxy_v2(h.data(), h.size());
-    REQUIRE(r.has_value());
-    CHECK(*r == "1.2.3.4:6324");
+    const auto result = parse_proxy_v2(h.data(), h.size());
+    REQUIRE(result.has_value());
+    CHECK(*result == "1.2.3.4:6324");
 }
 
 TEST_CASE("PROXY v2: LOCAL command and bad signature -> nullopt") {
@@ -119,9 +119,9 @@ TEST_CASE("PROXY v2: IPv6 PROXY command yields src ip:port") {
     h.insert(h.end(), dst.begin(), dst.end());
     for (uint8_t b : {0x18, 0xB4, 0x0D, 0x05}) // sport 6324, dport 3333
         h.push_back(b);
-    const auto r = parse_proxy_v2(h.data(), h.size());
-    REQUIRE(r.has_value());
-    CHECK(*r == "2001:db8::1:6324");
+    const auto result = parse_proxy_v2(h.data(), h.size());
+    REQUIRE(result.has_value());
+    CHECK(*result == "2001:db8::1:6324");
 }
 
 TEST_CASE("PROXY v2: IPv4 with a trailing TLV still yields src ip:port") {
@@ -130,9 +130,9 @@ TEST_CASE("PROXY v2: IPv4 with a trailing TLV still yields src ip:port") {
     for (uint8_t b : {0x21, 0x11, 0x00, 0x10, 1, 2, 3, 4, 5, 6, 7, 8, 0x18, 0xB4, 0x0D, 0x05,
                       0x03, 0x00, 0x01, 0xAB})
         h.push_back(b);
-    const auto r = parse_proxy_v2(h.data(), h.size());
-    REQUIRE(r.has_value());
-    CHECK(*r == "1.2.3.4:6324");
+    const auto result = parse_proxy_v2(h.data(), h.size());
+    REQUIRE(result.has_value());
+    CHECK(*result == "1.2.3.4:6324");
 }
 
 TEST_CASE("read_proxy_header: v1 header -> RealAddress, trailing bytes preserved") {
@@ -141,9 +141,9 @@ TEST_CASE("read_proxy_header: v1 header -> RealAddress, trailing bytes preserved
     const auto tail = bytes_of(rest);
     bytes.insert(bytes.end(), tail.begin(), tail.end());
     const int fd = fd_with(bytes);
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::RealAddress);
-    CHECK(r.address == "1.2.3.4:6324");
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::RealAddress);
+    CHECK(result.address == "1.2.3.4:6324");
     CHECK(drain(fd) == rest); // consumed exactly the header line
     ::close(fd);
 }
@@ -156,9 +156,9 @@ TEST_CASE("read_proxy_header: v2 IPv4 PROXY -> RealAddress, trailing bytes prese
     const auto tail = bytes_of(rest);
     bytes.insert(bytes.end(), tail.begin(), tail.end());
     const int fd = fd_with(bytes);
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::RealAddress);
-    CHECK(r.address == "1.2.3.4:6324");
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::RealAddress);
+    CHECK(result.address == "1.2.3.4:6324");
     CHECK(drain(fd) == rest);
     ::close(fd);
 }
@@ -171,17 +171,17 @@ TEST_CASE("read_proxy_header: v2 LOCAL (health check) -> Direct, trailing preser
     const auto tail = bytes_of(rest);
     bytes.insert(bytes.end(), tail.begin(), tail.end());
     const int fd = fd_with(bytes);
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::Direct); // not dropped; use the real TCP endpoint
-    CHECK(r.address.empty());
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::Direct); // not dropped; use the real TCP endpoint
+    CHECK(result.address.empty());
     CHECK(drain(fd) == rest);
     ::close(fd);
 }
 
 TEST_CASE("read_proxy_header: v1 UNKNOWN -> Direct (header line consumed)") {
     const int fd = fd_with(bytes_of("PROXY UNKNOWN\r\n{\"x\":1}\n"));
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::Direct);
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::Direct);
     CHECK(drain(fd) == "{\"x\":1}\n");
     ::close(fd);
 }
@@ -189,16 +189,16 @@ TEST_CASE("read_proxy_header: v1 UNKNOWN -> Direct (header line consumed)") {
 TEST_CASE("read_proxy_header: no header (direct connect) -> Direct, nothing consumed") {
     const std::string payload = "{\"id\":1,\"method\":\"mining.subscribe\"}\n";
     const int fd = fd_with(bytes_of(payload));
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::Direct);
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::Direct);
     CHECK(drain(fd) == payload); // only peeked; full payload left for the reactor
     ::close(fd);
 }
 
 TEST_CASE("read_proxy_header: peer closed with no data -> Direct") {
     const int fd = fd_with({});
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::Direct);
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::Direct);
     ::close(fd);
 }
 
@@ -206,16 +206,16 @@ TEST_CASE("read_proxy_header: bad v2 signature -> Malformed with hex detail") {
     auto bytes = bytes_of("garbage-not-a-proxy-header-xxxxx"); // long enough to read a 16-byte head
     bytes.front() = 0x0D;                                      // looks like v2 to the dispatcher
     const int fd = fd_with(bytes);
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::Malformed);
-    CHECK_FALSE(r.detail.empty());            // hex snapshot for diagnosing the real bytes
-    CHECK(r.detail.substr(0, 2) == "0d");     // starts with the peeked 0x0D
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::Malformed);
+    CHECK_FALSE(result.detail.empty());            // hex snapshot for diagnosing the real bytes
+    CHECK(result.detail.substr(0, 2) == "0d");     // starts with the peeked 0x0D
     ::close(fd);
 }
 
 TEST_CASE("read_proxy_header: v1-looking line with no CRLF -> Malformed") {
     const int fd = fd_with(std::vector<uint8_t>(120, 'P')); // 'P' dispatches to v1; never a newline
-    const auto r = read_proxy_header(fd, 1000);
-    CHECK(r.kind == ProxyHeaderKind::Malformed);
+    const auto result = read_proxy_header(fd, 1000);
+    CHECK(result.kind == ProxyHeaderKind::Malformed);
     ::close(fd);
 }

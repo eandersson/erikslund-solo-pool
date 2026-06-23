@@ -173,8 +173,8 @@ TEST_CASE("garbage strings of assorted shapes decode to nullopt, never throw") {
     for (const char* g : {"notanaddress", "bc1!!!!", "bc1 qw508", "111111", "bc1\x01",
                           "::::::", "bc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"}) {
         // Any result is fine as long as it does not throw / crash.
-        const auto r = segwit_address_decode("bc", g);
-        CHECK_FALSE(r.has_value());
+        const auto result = segwit_address_decode("bc", g);
+        CHECK_FALSE(result.has_value());
     }
 }
 

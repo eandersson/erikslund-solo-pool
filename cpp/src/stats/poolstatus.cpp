@@ -283,7 +283,7 @@ nlohmann::json build_user_stats_from(const std::string& address,
     int64_t last_share_timestamp = 0;
 
     std::vector<const api::WorkerSnapshot*> ordered(workers.begin(), workers.end());
-    std::ranges::sort(ordered, {}, [](const api::WorkerSnapshot* w) { return w->worker; });
+    std::ranges::sort(ordered, {}, [](const api::WorkerSnapshot* entry) { return entry->worker; });
 
     nlohmann::json worker_rows = nlohmann::json::array();
     for (const auto* worker_ptr : ordered) {
