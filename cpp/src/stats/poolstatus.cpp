@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +16,8 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -60,12 +63,16 @@ void atomic_write(const std::filesystem::path& path, const std::string& text) {
                                             std::to_string(g_tmp_counter.fetch_add(1));
     try {
         {
+            errno = 0;
             std::ofstream out(temp_path, std::ios::binary);
-            // Throw on a failed open or short write (e.g. disk full) rather than renaming a
-            // truncated temp over the cumulative stats.
-            out.exceptions(std::ios::failbit | std::ios::badbit);
+            if (!out)
+                throw std::runtime_error("open " + temp_path.string() + ": " +
+                                         std::generic_category().message(errno ? errno : EIO));
             out << text;
             out.flush();
+            if (!out)
+                throw std::runtime_error("write " + temp_path.string() + ": " +
+                                         std::generic_category().message(errno ? errno : EIO));
         }
         std::filesystem::rename(temp_path, path);
     } catch (...) {

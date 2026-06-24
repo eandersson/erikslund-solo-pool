@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <ctime>
 #include <exception>
@@ -15,7 +16,9 @@
 #include <limits>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -711,10 +714,16 @@ void Pool::spool_block(const PendingBlock& block) {
         const std::filesystem::path temp_path =
             path.string() + ".tmp." + std::to_string(static_cast<long>(::getpid()));
         {
+            errno = 0;
             std::ofstream out(temp_path, std::ios::binary);
-            out.exceptions(std::ios::failbit | std::ios::badbit);
+            if (!out)
+                throw std::runtime_error("open " + temp_path.string() + ": " +
+                                         std::generic_category().message(errno ? errno : EIO));
             out << block.hex << "\n";
             out.flush();
+            if (!out)
+                throw std::runtime_error("write " + temp_path.string() + ": " +
+                                         std::generic_category().message(errno ? errno : EIO));
         }
         if (const int fd = ::open(temp_path.c_str(), O_RDONLY); fd >= 0) {
             ::fsync(fd);
