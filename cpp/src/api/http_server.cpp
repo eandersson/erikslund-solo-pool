@@ -222,14 +222,15 @@ void HttpServer::accept_loop(const std::stop_token& stop) {
         pollfd pfd{listen_fd_, POLLIN, 0};
         if (::poll(&pfd, 1, 500) <= 0)
             continue;
-        const int fd = ::accept(listen_fd_, nullptr, nullptr);
-        if (fd < 0)
+        util::UniqueFd conn{::accept(listen_fd_, nullptr, nullptr)};
+        if (!conn)
             continue;
-        serve_connection(fd, stop);
+        serve_connection(std::move(conn), stop);
     }
 }
 
-void HttpServer::serve_connection(int fd, const std::stop_token& stop) try {
+void HttpServer::serve_connection(util::UniqueFd conn, const std::stop_token& stop) try {
+    const int fd = conn.get();
     int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
@@ -244,26 +245,20 @@ void HttpServer::serve_connection(int fd, const std::stop_token& stop) try {
                 send_all(fd, build_response("GET", {400, "text/plain; charset=utf-8",
                                                     "request too large\n"}, false),
                          stop);
-                ::close(fd);
                 return;
             }
             pollfd pfd{fd, POLLIN, 0};
             const int poll_result = ::poll(&pfd, 1, buffer.empty() ? kKeepAliveIdleMs : kHeaderReadMs);
-            if (poll_result == 0) {
-                ::close(fd);
+            if (poll_result == 0)
                 return;
-            }
             if (poll_result < 0) {
                 if (errno == EINTR)
                     continue;
-                ::close(fd);
                 return;
             }
             const ssize_t n = ::recv(fd, chunk, sizeof(chunk), 0);
-            if (n <= 0) {
-                ::close(fd);
+            if (n <= 0)
                 return;
-            }
             buffer.append(chunk, static_cast<size_t>(n));
         }
         ++requests;
@@ -286,16 +281,13 @@ void HttpServer::serve_connection(int fd, const std::stop_token& stop) try {
         const bool keep_alive = parsed_ok && (method == "GET" || method == "HEAD") &&
                                 wants_keep_alive(request, header_end) &&
                                 requests < kMaxRequestsPerConn;
-        if (!send_all(fd, build_response(method, response, keep_alive), stop) || !keep_alive) {
-            ::close(fd);
+        if (!send_all(fd, build_response(method, response, keep_alive), stop) || !keep_alive)
             return;
-        }
     }
-    ::close(fd);
 } catch (const std::exception& e) {
-    // An exception escaping a worker jthread calls std::terminate().
+    // An exception escaping a worker jthread calls std::terminate(); the UniqueFd
+    // parameter closes the socket as it unwinds out of the handler, so just log.
     log::warning("HTTP connection handler error: {}", e.what());
-    ::close(fd);
 }
 
 } // namespace erikslund::api

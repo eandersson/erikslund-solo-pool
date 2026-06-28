@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "pool/pool.hpp"
+#include "util/unique_fd.hpp"
 
 namespace erikslund::api {
 
@@ -31,7 +32,7 @@ public:
 
 private:
     void accept_loop(const std::stop_token& stop);
-    void serve_connection(int fd, const std::stop_token& stop);
+    void serve_connection(util::UniqueFd conn, const std::stop_token& stop);
 
     Pool& pool_;
     std::string host_;
