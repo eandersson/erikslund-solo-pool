@@ -111,11 +111,11 @@ TEST_CASE("an unparseable body is a connection error that preserves the HTTP sta
 TEST_CASE("call() builds a jsonrpc-1.0 envelope with method + params") {
     BodyRpc rpc;
     rpc.body = R"({"result":"ok","error":null,"id":1})";
-    rpc.call("getblockheader", json::array({"deadbeef", true}));
+    rpc.call("getblockheader", json::array({"e06ae06a", true}));
     const json sent = json::parse(rpc.last_payload);
     CHECK(sent["jsonrpc"] == "1.0");
     CHECK(sent["method"] == "getblockheader");
-    CHECK(sent["params"] == json::array({"deadbeef", true}));
+    CHECK(sent["params"] == json::array({"e06ae06a", true}));
     CHECK(sent["id"].is_number());
 }
 

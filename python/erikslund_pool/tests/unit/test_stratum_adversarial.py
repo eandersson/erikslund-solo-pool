@@ -124,7 +124,7 @@ class TestSubmitGuardsAdversarial(AsyncSoloPoolTestCase):
         session = _session(config, pool=FakePool(job, config))
         session.authorized = True
         session.subscribed = True
-        for job_id in ("no-such-job", "", "deadbeef"):
+        for job_id in ("no-such-job", "", "e06ae06a"):
             session.writer.sent.clear()
             await session.handle_submit(3, ["w", job_id, "00" * 8, "00000000", "00000000"])
             self.assertEqual(session.writer.by_id(3)["error"][0], 21)

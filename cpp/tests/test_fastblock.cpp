@@ -34,7 +34,7 @@ TEST_CASE("empty-block (fastblock) job builds a single-transaction block") {
 
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("e06ae06a");
 
     ShareInput input;
     input.coinbase2 = coinbase2;
@@ -68,7 +68,7 @@ TEST_CASE("a template without a witness commitment assembles a legacy (non-segwi
 
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("e06ae06a");
 
     ShareInput input;
     input.coinbase2 = coinbase2;

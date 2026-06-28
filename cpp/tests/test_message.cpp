@@ -244,7 +244,7 @@ TEST_CASE("make_error_line is byte-identical to make_error(...).dump()") {
 TEST_CASE("make_notify_line is byte-identical to make_notification(...).dump()") {
     // mining.notify is parity-locked on the wire: the fast per-client path must match the json
     // builder byte for byte, across empty/multi-branch jobs and both clean flags.
-    const std::string job_id = "deadbeef00000001";
+    const std::string job_id = "abbaabba00000001";
     const std::string prevhash =
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     const std::string cb1 = "01000000010000000000000000000000";

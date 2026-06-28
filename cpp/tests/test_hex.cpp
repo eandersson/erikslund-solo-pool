@@ -9,14 +9,14 @@ using namespace erikslund::util;
 
 TEST_CASE("to_hex encodes bytes lowercase") {
     CHECK(to_hex(Bytes{0x00, 0x01, 0xff, 0xab}) == "0001ffab");
-    CHECK(to_hex(Bytes{0xde, 0xad, 0xbe, 0xef}) == "deadbeef");
+    CHECK(to_hex(Bytes{0xab, 0xba, 0xab, 0xba}) == "abbaabba");
     CHECK(to_hex(Bytes{}) == "");
 }
 
 TEST_CASE("from_hex decodes, case-insensitive") {
     CHECK(from_hex("0001ffab") == Bytes{0x00, 0x01, 0xff, 0xab});
-    CHECK(from_hex("DEADBEEF") == Bytes{0xde, 0xad, 0xbe, 0xef});
-    CHECK(from_hex("dEaDbEeF") == Bytes{0xde, 0xad, 0xbe, 0xef});
+    CHECK(from_hex("ABBAABBA") == Bytes{0xab, 0xba, 0xab, 0xba});
+    CHECK(from_hex("aBbAaBbA") == Bytes{0xab, 0xba, 0xab, 0xba});
     CHECK(from_hex("") == Bytes{});
 }
 
@@ -28,7 +28,7 @@ TEST_CASE("from_hex rejects malformed input") {
 
 TEST_CASE("is_hex validates") {
     CHECK(is_hex("00ff"));
-    CHECK(is_hex("DEADBEEF"));
+    CHECK(is_hex("ABBAABBA"));
     CHECK_FALSE(is_hex("0"));     // odd
     CHECK_FALSE(is_hex("0g"));    // non-hex
     CHECK_FALSE(is_hex(""));      // empty
@@ -66,8 +66,8 @@ TEST_CASE("parse_hex_u32 parses 1..8 digits, either case") {
     CHECK(parse_hex_u32("f") == 0xfu);
     CHECK(parse_hex_u32("ff") == 0xffu);
     CHECK(parse_hex_u32("00000000") == 0u);
-    CHECK(parse_hex_u32("deadbeef") == 0xdeadbeefu);
-    CHECK(parse_hex_u32("DEADBEEF") == 0xdeadbeefu);
+    CHECK(parse_hex_u32("abbaabba") == 0xabbaabbau);
+    CHECK(parse_hex_u32("ABBAABBA") == 0xabbaabbau);
     CHECK(parse_hex_u32("ffffffff") == 0xffffffffu);
     CHECK(parse_hex_u32("1") == 1u);
     CHECK(parse_hex_u32("80000000") == 0x80000000u); // high bit set

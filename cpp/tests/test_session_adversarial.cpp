@@ -94,7 +94,7 @@ struct Fixture {
     uint32_t curtime = static_cast<uint32_t>(std::time(nullptr));
     FakePool pool{curtime};
     FakeConnection conn;
-    Session session{pool, conn, util::from_hex("deadbeef")};
+    Session session{pool, conn, util::from_hex("abbaabba")};
 
     void subscribe() {
         session.handle_line(R"({"id":1,"method":"mining.subscribe","params":["miner/1.0"]})");

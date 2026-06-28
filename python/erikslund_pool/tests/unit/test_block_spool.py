@@ -35,11 +35,11 @@ class TestSpoolBlock(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             pool = _pool(temp_dir)
             block_hash = "aa" * 32
-            pool._spool_block(101, block_hash, "deadbeef")
+            pool._spool_block(101, block_hash, "e06ae06a")
             path = os.path.join(pool.block_spool_dir, f"101_{block_hash}.hex")
             self.assertTrue(os.path.exists(path))
             with open(path, encoding="ascii") as f:
-                self.assertEqual(f.read().strip(), "deadbeef")
+                self.assertEqual(f.read().strip(), "e06ae06a")
             # The atomic tmp+rename must not leave a stray temp file behind.
             leftovers = [n for n in os.listdir(pool.block_spool_dir) if ".tmp" in n]
             self.assertEqual(leftovers, [])

@@ -1245,7 +1245,7 @@ def _sample_messages() -> list[object]:
         NewMiningJob(42, 101, 1715000000, 0x20000000, b"\x11" * 32),
         SetNewPrevHash(42, 100, b"\x22" * 32, 1715000000, 0x1d00ffff),
         SetTarget(42, target32),
-        SubmitSharesStandard(42, 1, 100, 0xDEADBEEF, 1715000123, 0x20000000),
+        SubmitSharesStandard(42, 1, 100, 0xABBAABBA, 1715000123, 0x20000000),
         SubmitSharesSuccess(42, 5, 5, 1234567890123),
         SubmitSharesError(42, 6, "stale-share"),
     ]

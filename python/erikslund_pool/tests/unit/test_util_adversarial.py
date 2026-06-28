@@ -32,7 +32,7 @@ class TestUnhexAdversarial(unittest.TestCase):
         self.assertEqual(unhex(""), b"")
 
     def test_uppercase_accepted(self):
-        self.assertEqual(unhex("DEADBEEF"), b"\xde\xad\xbe\xef")
+        self.assertEqual(unhex("E06AE06A"), b"\xe0\x6a\xe0\x6a")
 
 
 class TestBitsToTargetAdversarial(unittest.TestCase):

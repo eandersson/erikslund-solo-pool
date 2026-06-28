@@ -138,7 +138,7 @@ struct Fixture {
     uint32_t curtime = static_cast<uint32_t>(std::time(nullptr));
     FakePool pool{curtime};
     FakeConnection conn;
-    Session session{pool, conn, util::from_hex("deadbeef")};
+    Session session{pool, conn, util::from_hex("e06ae06a")};
 
     void subscribe() {
         session.handle_line(R"({"id":1,"method":"mining.subscribe","params":["miner/1.0"]})");
@@ -261,7 +261,7 @@ TEST_CASE("a valid share is accepted and counted; a resubmit is a duplicate") {
     f.authorize("validaddr.w");
 
     const std::string nonce =
-        find_accepted_nonce(*f.pool.job, util::from_hex("deadbeef"), f.pool.start_difficulty());
+        find_accepted_nonce(*f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty());
     REQUIRE_FALSE(nonce.empty());
 
     const std::string submit = std::format(
@@ -293,7 +293,7 @@ TEST_CASE("a duplicate resubmitted across a clean job is still rejected (generat
     f.authorize("validaddr.w");
 
     const std::string nonce =
-        find_accepted_nonce(*f.pool.job, util::from_hex("deadbeef"), f.pool.start_difficulty());
+        find_accepted_nonce(*f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty());
     REQUIRE_FALSE(nonce.empty());
     const std::string submit = std::format(
         R"({{"id":6,"method":"mining.submit","params":["w","job1","01020304","{}","{}"]}})",
@@ -340,7 +340,7 @@ TEST_CASE("the duplicate guard is insensitive to hex casing (same canonical shar
     f.authorize("validaddr.w");
 
     const std::string nonce =
-        find_accepted_nonce(*f.pool.job, util::from_hex("deadbeef"), f.pool.start_difficulty());
+        find_accepted_nonce(*f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty());
     REQUIRE_FALSE(nonce.empty());
     const std::string ntime = f.pool.job->ntime_hex();
 
@@ -397,7 +397,7 @@ TEST_CASE("a difficulty change takes effect only from the next job (grace window
     Fixture f;
     f.subscribe();
     f.authorize("validaddr.w");
-    const Bytes enonce1 = util::from_hex("deadbeef");
+    const Bytes enonce1 = util::from_hex("e06ae06a");
     const double start_diff = f.session.difficulty(); // clamped start difficulty
 
     // Three distinct accepted nonces (the regtest-easy network target accepts ~half), so each
@@ -462,7 +462,7 @@ TEST_CASE("difficulty-grace crediting: LOWER direction and the meets-the-harder-
     const uint32_t curtime = static_cast<uint32_t>(std::time(nullptr));
     LowFloorPool pool{curtime};
     FakeConnection conn;
-    Session session{pool, conn, util::from_hex("deadbeef")};
+    Session session{pool, conn, util::from_hex("e06ae06a")};
     session.handle_line(R"({"id":1,"method":"mining.subscribe","params":["miner/1.0"]})");
     session.handle_line(R"({"id":3,"method":"mining.authorize","params":["validaddr.w","x"]})");
 
@@ -475,7 +475,7 @@ TEST_CASE("difficulty-grace crediting: LOWER direction and the meets-the-harder-
     // Measure each nonce's actual share difficulty (loosest target => always reports one) and pick
     // one at/above hi (meets the harder old target) and one in [lo, hi) (only meets the easier new
     // one) -- both >= lo, so both are accepted under the new (min) target.
-    const Bytes enonce1 = util::from_hex("deadbeef");
+    const Bytes enonce1 = util::from_hex("e06ae06a");
     const Bytes coinbase2 = pool.job->build_coinbase2(kPayoutScript);
     const auto difficulty_of = [&](uint32_t nonce, std::string& nonce_hex) {
         nonce_hex = std::format("{:08x}", nonce);
@@ -539,7 +539,7 @@ TEST_CASE("a valid share clears the accumulated protocol-error budget") {
 
     // A genuinely valid share resets it to zero (sustained garbage, not lifetime).
     const std::string nonce =
-        find_accepted_nonce(*f.pool.job, util::from_hex("deadbeef"), f.pool.start_difficulty());
+        find_accepted_nonce(*f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty());
     REQUIRE_FALSE(nonce.empty());
     const std::string submit = std::format(
         R"({{"id":3,"method":"mining.submit","params":["w","job1","01020304","{}","{}"]}})",
@@ -797,7 +797,7 @@ TEST_CASE("stats() reflects subscribe/authorize and accepted shares") {
     f.authorize("validaddr.worker9");
 
     const std::string nonce =
-        find_accepted_nonce(*f.pool.job, util::from_hex("deadbeef"), f.pool.start_difficulty());
+        find_accepted_nonce(*f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty());
     REQUIRE_FALSE(nonce.empty());
     f.session.handle_line(std::format(
         R"({{"id":6,"method":"mining.submit","params":["w","job1","01020304","{}","{}"]}})",

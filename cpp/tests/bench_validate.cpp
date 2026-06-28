@@ -94,7 +94,7 @@ TEST_CASE("validate_share throughput benchmark") {
     const Job job = bench_job();
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes enonce1 = from_hex("deadbeef");
+    const Bytes enonce1 = from_hex("abbaabba");
 
     const double one = run_bench(job, coinbase2, enonce1, 1, 3.0);
     const double four = run_bench(job, coinbase2, enonce1, 4, 3.0);

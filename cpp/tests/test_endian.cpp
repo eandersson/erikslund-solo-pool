@@ -55,17 +55,17 @@ TEST_CASE("le32_bytes / le64_bytes produce least-significant-byte-first vectors"
     CHECK(le64_bytes(0x0102030405060708ULL) ==
           Bytes{0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01});
     // The helpers round-trip through the matching reader.
-    CHECK(read_le32(le32_bytes(0xdeadbeef).data()) == 0xdeadbeefu);
-    CHECK(read_le64(le64_bytes(0xcafef00ddeadbeefULL).data()) == 0xcafef00ddeadbeefULL);
+    CHECK(read_le32(le32_bytes(0xe06ae06a).data()) == 0xe06ae06au);
+    CHECK(read_le64(le64_bytes(0xcafef00de06ae06aULL).data()) == 0xcafef00de06ae06aULL);
 }
 
 TEST_CASE("big-endian 32/64 write the most-significant byte first") {
     uint8_t buf[8];
-    write_be32(buf, 0xdeadbeef);
-    CHECK(buf[0] == 0xde);
-    CHECK(buf[1] == 0xad);
-    CHECK(buf[2] == 0xbe);
-    CHECK(buf[3] == 0xef);
+    write_be32(buf, 0xe06ae06a);
+    CHECK(buf[0] == 0xe0);
+    CHECK(buf[1] == 0x6a);
+    CHECK(buf[2] == 0xe0);
+    CHECK(buf[3] == 0x6a);
     write_be64(buf, 0x0102030405060708ULL);
     CHECK(buf[7] == 0x08);
     CHECK(read_be64(buf) == 0x0102030405060708ULL);

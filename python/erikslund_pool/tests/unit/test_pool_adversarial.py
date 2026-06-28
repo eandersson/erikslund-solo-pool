@@ -147,7 +147,7 @@ class TestDonationResolution(unittest.IsolatedAsyncioTestCase):
 class TestRecentJobJunkLookups(unittest.TestCase):
     def test_unknown_job_id_is_none(self):
         pool = Pool(Settings())
-        for junk in ("", "does-not-exist", "deadbeef", "1"):
+        for junk in ("", "does-not-exist", "abbaabba", "1"):
             self.assertIsNone(pool.recent_job(junk))
 
     def test_non_string_job_id_is_none_not_crash(self):

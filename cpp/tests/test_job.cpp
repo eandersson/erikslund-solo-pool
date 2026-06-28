@@ -113,7 +113,7 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
     const Job job = make_job();
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("abbaabba");
 
     CHECK(job.coinbase1_hex() == "01000000010000000000000000000000000000000000000000000000000000"
                                  "000000000000ffffffff1602aa00");
@@ -136,10 +136,10 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
     REQUIRE(result);
     CHECK_FALSE(result->is_block); // 1d00ffff is hard; this nonce doesn't solve it
     CHECK(to_hex(result->header) ==
-          "00000020452301efcdab8967452301efcdab8967452301efcdab00000000000000000000e8a1adf960"
-          "e2275b6f08bafa093ac4d69b6a3259fc3ee2275c1e784c32f6e92900f15365ffff001d2a2a2a2a");
+          "00000020452301efcdab8967452301efcdab8967452301efcdab0000000000000000000074185af0df"
+          "59583eea8894ec1e7fbe700acf31e90df110c0f85c77687184423500f15365ffff001d2a2a2a2a");
     CHECK(result->block_hash_hex ==
-          "0858b3ce0d8898eb861cf64da704d77cce6940f60a6dd8ec78c19037ed5a5605");
+          "ba5564b906d836b684db96f29da3c63a87694ee4542d5f8350b08c4e09ea24f9");
 
     // legacy coinbase = coinbase1 || extranonce1 || extranonce2 || coinbase2 (each golden above).
     const std::string expected_legacy =
@@ -163,7 +163,7 @@ TEST_CASE("a solved share is detected as a block on an easy target") {
     const Job job = make_job("207fffff"); // regtest-easy network target
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("abbaabba");
     const uint256 max_target = uint256::from_display_hex(std::string(64, 'f'));
 
     // ~half of all nonces solve the regtest-easy target; scan a fixed range so
@@ -188,7 +188,7 @@ TEST_CASE("share rejection paths") {
     const Job job = make_job();
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("abbaabba");
     const uint256 max_target = uint256::from_display_hex(std::string(64, 'f'));
 
     SUBCASE("malformed extranonce2") {
@@ -241,7 +241,7 @@ TEST_CASE("more share rejection and acceptance paths") {
     const Job job = make_job();
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("abbaabba");
     const uint256 max_target = uint256::from_display_hex(std::string(64, 'f'));
 
     SUBCASE("malformed ntime hex") {
@@ -292,7 +292,7 @@ TEST_CASE("version-rolling masks the header version") {
     const Job job = make_job();
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("abbaabba");
     const uint256 max_target = uint256::from_display_hex(std::string(64, 'f'));
 
     SUBCASE("bits inside the negotiated mask are applied") {
@@ -338,7 +338,7 @@ TEST_CASE("a rejected (above-target) share reports its difficulty in the error h
     const Job job = make_job(); // hard 1d00ffff target
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
-    const Bytes extranonce1 = from_hex("deadbeef");
+    const Bytes extranonce1 = from_hex("abbaabba");
 
     ShareInput input = good_share(coinbase2, extranonce1, target_from_compact(0x1d00ffff));
     const auto result = job.validate_share(input);

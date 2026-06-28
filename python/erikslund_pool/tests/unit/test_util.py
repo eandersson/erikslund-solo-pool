@@ -34,11 +34,11 @@ class TestDoubleSha(SoloPoolTestCase):
 class TestIntSerialization(SoloPoolTestCase):
     def test_uint32(self):
         self.assertEqual(ser_uint32(1).hex(), "01000000")
-        self.assertEqual(ser_uint32(0xDEADBEEF).hex(), "efbeadde")
+        self.assertEqual(ser_uint32(0xABBAABBA).hex(), "baabbaab")
 
     def test_uint64(self):
         self.assertEqual(ser_uint64(1).hex(), "0100000000000000")
-        self.assertEqual(ser_uint64(0xDEADBEEFCAFEBABE).hex(), "bebafecaefbeadde")
+        self.assertEqual(ser_uint64(0xABBAABBACAFEBABE).hex(), "bebafecabaabbaab")
 
 
 class TestSerializeHeight(SoloPoolTestCase):
@@ -78,7 +78,7 @@ class TestVarint(SoloPoolTestCase):
 
 class TestUnhex(SoloPoolTestCase):
     def test_decodes_hex(self):
-        self.assertEqual(unhex("deadbeef"), b"\xde\xad\xbe\xef")
+        self.assertEqual(unhex("abbaabba"), b"\xab\xba\xab\xba")
         self.assertEqual(unhex(""), b"")
 
     def test_rejects_odd_length(self):
