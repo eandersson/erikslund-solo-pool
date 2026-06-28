@@ -132,12 +132,14 @@ TEST_CASE("a non-object is rejected") {
 TEST_CASE("donation_percent must be within [0, 100]") {
     CHECK_THROWS_AS(Config::from_json(nlohmann::json{{"donation_percent", -1.0}}), ConfigError);
     CHECK_THROWS_AS(Config::from_json(nlohmann::json{{"donation_percent", 100.5}}), ConfigError);
-    // Boundaries are accepted.
+    // Boundaries are accepted (a non-zero percent needs a donation_address; 0 does not).
     CHECK(Config::from_json(nlohmann::json{{"donation_percent", 0.0}}).donation_percent == 0.0);
-    CHECK(Config::from_json(nlohmann::json{{"donation_percent", 100.0}}).donation_percent ==
-          doctest::Approx(100.0));
-    CHECK(Config::from_json(nlohmann::json{{"donation_percent", 1.5}}).donation_percent ==
-          doctest::Approx(1.5));
+    CHECK(Config::from_json(nlohmann::json{{"donation_percent", 100.0},
+                                           {"donation_address", "bc1qexample"}})
+              .donation_percent == doctest::Approx(100.0));
+    CHECK(Config::from_json(nlohmann::json{{"donation_percent", 1.5},
+                                           {"donation_address", "bc1qexample"}})
+              .donation_percent == doctest::Approx(1.5));
 }
 
 TEST_CASE("an over-long coinbase_signature is rejected at load") {

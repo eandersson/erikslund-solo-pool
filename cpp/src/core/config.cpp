@@ -235,6 +235,8 @@ Config Config::from_json(const nlohmann::json& object) {
 
     if (config.donation_percent < 0.0 || config.donation_percent > 100.0)
         throw ConfigError("donation_percent must be in [0.0, 100.0]");
+    if (config.donation_percent > 0.0 && config.donation_address.empty())
+        throw ConfigError("donation_percent > 0 requires a donation_address");
 
     if (config.initial_difficulty <= 0.0)
         throw ConfigError("initial_difficulty must be > 0");

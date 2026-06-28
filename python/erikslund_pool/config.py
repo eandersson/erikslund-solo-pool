@@ -166,6 +166,8 @@ class Settings:
                               "coinbase scriptSig for the height push and extranonces")
         if not 0 <= self.donation_percent <= 100:
             raise ConfigError("donation_percent must be in [0, 100]")
+        if self.donation_percent > 0 and not self.donation_address:
+            raise ConfigError("donation_percent > 0 requires a donation_address")
         if self.status_interval_seconds < 0:
             raise ConfigError("status_interval_seconds must be >= 0")
         # Upper bound ~100 years.

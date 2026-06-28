@@ -45,7 +45,20 @@ TEST_CASE("donation_percent outside [0,100] is a ConfigError; the boundaries pas
     CHECK_THROWS_AS(Config::from_json(json{{"donation_percent", 100.01}}), ConfigError);
     CHECK_THROWS_AS(Config::from_json(json{{"donation_percent", 1000.0}}), ConfigError);
     CHECK_NOTHROW(Config::from_json(json{{"donation_percent", 0.0}}));
-    CHECK_NOTHROW(Config::from_json(json{{"donation_percent", 100.0}}));
+    CHECK_NOTHROW(Config::from_json(json{{"donation_percent", 100.0},
+                                         {"donation_address", "bc1qexample"}}));
+}
+
+TEST_CASE("donation_percent > 0 with no donation_address is a ConfigError (fail-closed)") {
+    // The bug this guards: a non-zero percent with an empty address silently disabled donation
+    // (coinbase pays 100% to the miner) with no warning.
+    CHECK_THROWS_AS(Config::from_json(json{{"donation_percent", 1.0}}), ConfigError);
+    CHECK_THROWS_AS(Config::from_json(json{{"donation_percent", 1.0}, {"donation_address", ""}}),
+                    ConfigError);
+    // 0% needs no address; a non-zero percent WITH an address is fine.
+    CHECK_NOTHROW(Config::from_json(json{{"donation_percent", 0.0}}));
+    CHECK_NOTHROW(Config::from_json(json{{"donation_percent", 5.0},
+                                         {"donation_address", "bc1qexample"}}));
 }
 
 TEST_CASE("an over-long coinbase_signature (no room in the 100-byte scriptSig) is a ConfigError") {

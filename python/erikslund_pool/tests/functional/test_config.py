@@ -251,6 +251,7 @@ class TestConfigValidation(SoloPoolTestCase):
             {"extranonce1_size": 3}, {"extranonce1_size": 9},
             {"extranonce2_size": 0}, {"extranonce2_size": 9},
             {"donation_percent": -1}, {"donation_percent": 101},
+            {"donation_percent": 1},  # > 0 requires a donation_address (fail-closed)
             {"max_clients": -1}, {"drop_idle_seconds": -1},
             {"auth_timeout_seconds": -1}, {"max_protocol_errors": -1},
             {"status_interval_seconds": -1},
@@ -265,7 +266,7 @@ class TestConfigValidation(SoloPoolTestCase):
             {"block_poll_milliseconds": 1}, {"maximum_difficulty": 0},
             {"drop_idle_seconds": 0}, {"auth_timeout_seconds": 0},
             {"status_interval_seconds": 0}, {"donation_percent": 0},
-            {"donation_percent": 100},
+            {"donation_percent": 100, "donation_address": "bc1qexample"},
         ):
             with self.subTest(cfg=cfg):
                 Settings.from_dict(cfg)  # must not raise
