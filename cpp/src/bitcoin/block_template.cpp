@@ -1,6 +1,8 @@
 #include "bitcoin/block_template.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 
@@ -40,13 +42,20 @@ void check_mandatory_rule(std::string_view name) {
         throw std::invalid_argument("unsupported mandatory template rule: " + std::string(name));
 }
 
+uint32_t require_header_u32(int64_t value, const char* field) {
+    if (value < 0 || value > std::numeric_limits<uint32_t>::max())
+        throw std::invalid_argument(std::string("getblocktemplate ") + field +
+                                    " out of uint32 range");
+    return static_cast<uint32_t>(value);
+}
+
 } // namespace
 
 BlockTemplate BlockTemplate::from_json(const nlohmann::json& result) {
     BlockTemplate block_template;
     block_template.height = result.at("height").get<int64_t>();
-    block_template.version = result.at("version").get<uint32_t>();
-    block_template.curtime = result.at("curtime").get<uint32_t>();
+    block_template.version = require_header_u32(result.at("version").get<int64_t>(), "version");
+    block_template.curtime = require_header_u32(result.at("curtime").get<int64_t>(), "curtime");
     block_template.bits_hex = result.at("bits").get<std::string>();
     block_template.bits = util::parse_hex_u32(block_template.bits_hex);
     block_template.coinbase_value = result.at("coinbasevalue").get<uint64_t>();
@@ -98,8 +107,10 @@ BlockTemplate BlockTemplate::from_simdjson(const simdjson::dom::element& result)
 
     BlockTemplate block_template;
     block_template.height = require(result["height"].get_int64(), "height");
-    block_template.version = static_cast<uint32_t>(require(result["version"].get_int64(), "version"));
-    block_template.curtime = static_cast<uint32_t>(require(result["curtime"].get_int64(), "curtime"));
+    block_template.version =
+        require_header_u32(require(result["version"].get_int64(), "version"), "version");
+    block_template.curtime =
+        require_header_u32(require(result["curtime"].get_int64(), "curtime"), "curtime");
     block_template.bits_hex = std::string(require(result["bits"].get_string(), "bits"));
     block_template.bits = util::parse_hex_u32(block_template.bits_hex);
     block_template.coinbase_value =

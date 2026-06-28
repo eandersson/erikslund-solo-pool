@@ -213,6 +213,21 @@ class TestHostileTemplates(SoloPoolTestCase):
         with self.assertRaises(WorkError):
             self.make_job(template)
 
+    def test_out_of_range_version_or_curtime_is_rejected(self):
+        # A malformed/compromised bitcoind could send a header field outside [0, 2**32-1]; the pool
+        # must reject the template rather than emit an over-wide / wrapped header field (parity with
+        # the C++ pool's checked narrowing).
+        for field in ("version", "curtime"):
+            for bad in (0x1_0000_0000, -1):   # one past uint32 max, and negative
+                template = self.make_template()
+                template[field] = bad
+                with self.assertRaises(WorkError):
+                    self.make_job(template)
+        # Exactly uint32 max is still accepted.
+        template = self.make_template()
+        template["version"] = 0xFFFFFFFF
+        self.assertEqual(self.make_job(template).version, 0xFFFFFFFF)
+
     def test_wrong_length_previousblockhash_is_rejected(self):
         # A wrong-length hash must raise, not yield a malformed prevhash / bad header.
         for bad in ("ab" * 31, "ab" * 33, ""):

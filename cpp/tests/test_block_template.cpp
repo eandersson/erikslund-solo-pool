@@ -224,6 +224,28 @@ TEST_CASE("from_simdjson and from_json agree on a pre-segwit hash-fallback templ
     check_equal(BlockTemplate::from_json(nlohmann::json::parse(text)), parse_with_simdjson(text));
 }
 
+TEST_CASE("an out-of-uint32-range version/curtime is rejected by both parsers (not narrowed)") {
+    // A malformed/compromised bitcoind could send a header field outside [0, 2^32-1]; silently
+    // narrowing it would corrupt the candidate header, so the template must be rejected. Both the
+    // nlohmann and simdjson paths must reject it identically (a divergence is an invalid-block risk).
+    for (const char* field : {"version", "curtime"}) {
+        nlohmann::json over = minimal_template();
+        over[field] = int64_t{0x1'0000'0000}; // 2^32, one past uint32 max
+        CHECK_THROWS_AS(BlockTemplate::from_json(over), std::invalid_argument);
+        CHECK_THROWS_AS(parse_with_simdjson(over.dump()), std::invalid_argument);
+
+        nlohmann::json negative = minimal_template();
+        negative[field] = int64_t{-1};
+        CHECK_THROWS_AS(BlockTemplate::from_json(negative), std::invalid_argument);
+        CHECK_THROWS_AS(parse_with_simdjson(negative.dump()), std::invalid_argument);
+    }
+    // Exactly uint32 max is still accepted by both parsers.
+    nlohmann::json edge = minimal_template();
+    edge["version"] = int64_t{0xFFFFFFFF};
+    CHECK(BlockTemplate::from_json(edge).version == 0xFFFFFFFFu);
+    CHECK(parse_with_simdjson(edge.dump()).version == 0xFFFFFFFFu);
+}
+
 TEST_CASE("from_simdjson rejects the same hostile templates as from_json") {
     // Mandatory unknown rule.
     nlohmann::json bad_rule = minimal_template();

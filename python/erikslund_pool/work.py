@@ -57,6 +57,9 @@ class Job:
         self.height = template["height"]
         self.version = template["version"]
         self.curtime = template["curtime"]
+        if not (isinstance(self.version, int) and isinstance(self.curtime, int)
+                and 0 <= self.version <= _UINT32_MAX and 0 <= self.curtime <= _UINT32_MAX):
+            raise WorkError("template version/curtime out of uint32 range")
         self.bits = int(template["bits"], 16)
         self.network_target = bits_to_target(self.bits)
         self.coinbasevalue = template["coinbasevalue"]
