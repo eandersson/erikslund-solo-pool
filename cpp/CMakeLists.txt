@@ -33,6 +33,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     endif()
 endif()
 
+# ---- sanitizers (opt-in; the runtime gate -- see docker/sanitize.sh) ----------
+# -DSANITIZE=ON instruments a Debug build with AddressSanitizer + Undefined-
+# BehaviorSanitizer for the dynamic test gate. UBSan is made fatal so a violation
+# fails the run rather than only printing; frame pointers are kept for readable
+# reports. Never part of Release -- the production profile stays uninstrumented.
+option(SANITIZE "Instrument with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined
+                        -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # ---- dependencies ------------------------------------------------------------
 # nlohmann/json and doctest are header-only and installed on the default include
 # path by their -dev packages, so they need no find_package(). libcurl needs a

@@ -31,8 +31,9 @@ RUN apt-get update && apt-get dist-upgrade -y && apt-get install -y --no-install
 COPY build-entrypoint.sh /usr/local/bin/build-entrypoint.sh
 COPY clang-tidy.sh /usr/local/bin/clang-tidy.sh
 COPY cppcheck.sh /usr/local/bin/cppcheck.sh
+COPY sanitize.sh /usr/local/bin/sanitize.sh
 RUN chmod +x /usr/local/bin/build-entrypoint.sh /usr/local/bin/clang-tidy.sh \
-        /usr/local/bin/cppcheck.sh
+        /usr/local/bin/cppcheck.sh /usr/local/bin/sanitize.sh
 
 WORKDIR /build
 ENTRYPOINT ["/usr/local/bin/build-entrypoint.sh"]

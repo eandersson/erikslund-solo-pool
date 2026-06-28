@@ -68,10 +68,11 @@ TEST_CASE("a template without a witness commitment assembles a legacy (non-segwi
 
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
+    const Bytes extranonce1 = from_hex("deadbeef");
 
     ShareInput input;
     input.coinbase2 = coinbase2;
-    input.extranonce1 = from_hex("deadbeef");
+    input.extranonce1 = extranonce1;
     input.extranonce2_hex = "01020304";
     input.ntime_hex = "6553f100";
     input.nonce_hex = "00000000";
