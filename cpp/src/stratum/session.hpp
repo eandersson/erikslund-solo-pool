@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -29,6 +30,10 @@ class Connection {
 public:
     virtual ~Connection() = default;
     virtual void send_line(std::string_view line) = 0;
+    virtual void send_lines(std::span<const std::string_view> lines) {
+        for (std::string_view line : lines)
+            send_line(line);
+    }
     virtual std::string peer() const = 0;
 };
 
@@ -124,6 +129,9 @@ private:
     // Caller holds mutex_; the public send_* wrap these.
     void do_send_set_difficulty();
     void do_send_notify(const Job& job, bool clean);
+    std::string set_difficulty_line();
+    std::optional<std::string> build_notify_line(const Job& job, bool clean);
+    void send_difficulty_then_work();
 
     void begin_difficulty_change(double new_difficulty);
 

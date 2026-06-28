@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -21,6 +22,7 @@ public:
     SocketConnection& operator=(const SocketConnection&) = delete;
 
     void send_line(std::string_view line) override; // never blocks
+    void send_lines(std::span<const std::string_view> lines) override; // coalesced; never blocks
     std::string peer() const override { return peer_; }
 
     int fd() const { return fd_; }

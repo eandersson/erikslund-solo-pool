@@ -1,11 +1,13 @@
 #include "stratum/session.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <ctime>
 #include <format>
 #include <optional>
+#include <span>
 #include <stdexcept>
 
 #include "core/logging.hpp"
@@ -197,8 +199,12 @@ void Session::send_set_difficulty() {
     do_send_set_difficulty();
 }
 
+std::string Session::set_difficulty_line() {
+    return make_notification("mining.set_difficulty", json::array({difficulty_})).dump();
+}
+
 void Session::do_send_set_difficulty() {
-    send(make_notification("mining.set_difficulty", json::array({difficulty_})));
+    connection_.send_line(set_difficulty_line());
 }
 
 void Session::send_notify(const Job& job, bool clean) {
@@ -206,16 +212,16 @@ void Session::send_notify(const Job& job, bool clean) {
     do_send_notify(job, clean);
 }
 
-void Session::do_send_notify(const Job& job, bool clean) {
+std::optional<std::string> Session::build_notify_line(const Job& job, bool clean) {
     if (!subscribed_ || !authorized_ || !payout_script_)
-        return;
+        return std::nullopt;
     // Publication-order guard: concurrent broadcasters (GBT refresh vs ZMQ fastblock) aren't
     // ordered, so skip any job below what was already delivered (else the miner grinds superseded
     // work). seq 0 = never pool-published (tests / direct sends): always deliver.
     const uint64_t seq = job.publish_seq();
     if (seq != 0) {
         if (seq < last_notified_seq_)
-            return;
+            return std::nullopt;
         last_notified_seq_ = seq;
     }
     const Coinbase2Cache& coinbase2 = coinbase2_for(job);
@@ -225,12 +231,31 @@ void Session::do_send_notify(const Job& job, bool clean) {
         rotate_seen_shares();
     // Fast path: mining.notify fans out per client per broadcast; the json-tree dump dominated the
     // broadcast loop. Byte-identical (doctest-pinned).
-    connection_.send_line(make_notify_line(job.job_id(), job.prevhash_stratum(),
-                                           job.coinbase1_hex(), coinbase2.coinbase2_hex,
-                                           job.merkle_branch_hex(), job.version_hex(),
-                                           job.nbits_hex(), job.ntime_hex(), clean));
+    std::string line = make_notify_line(job.job_id(), job.prevhash_stratum(),
+                                        job.coinbase1_hex(), coinbase2.coinbase2_hex,
+                                        job.merkle_branch_hex(), job.version_hex(),
+                                        job.nbits_hex(), job.ntime_hex(), clean);
     // The new difficulty (if any) is now in effect from this job on; stop honoring the old one.
     pending_difficulty_change_ = false;
+    return line;
+}
+
+void Session::do_send_notify(const Job& job, bool clean) {
+    if (auto line = build_notify_line(job, clean))
+        connection_.send_line(*line);
+}
+
+void Session::send_difficulty_then_work() {
+    const std::string difficulty = set_difficulty_line();
+    std::optional<std::string> notify;
+    if (auto job = pool_.current_job())
+        notify = build_notify_line(*job, /*clean=*/true);
+    if (notify) {
+        const std::array<std::string_view, 2> flight{difficulty, *notify};
+        connection_.send_lines(flight);
+    } else {
+        connection_.send_line(difficulty);
+    }
 }
 
 void Session::begin_difficulty_change(double new_difficulty) {
@@ -253,11 +278,8 @@ void Session::handle_subscribe(const json& id, const std::vector<std::string>& p
                     }));
     // Client authorized BEFORE subscribing (unusual): it has no job yet, so send work now instead
     // of waiting for the next pool broadcast.
-    if (authorized_ && payout_script_) {
-        do_send_set_difficulty();
-        if (auto job = pool_.current_job())
-            do_send_notify(*job, /*clean=*/true);
-    }
+    if (authorized_ && payout_script_)
+        send_difficulty_then_work();
 }
 
 void Session::handle_configure(const Request& request) {
@@ -324,9 +346,7 @@ void Session::handle_authorize(const json& id, const std::vector<std::string>& p
     log::info("Authorized {} (address={}, user_agent={}, extranonce1={})", connection_.peer(),
               *address_, user_agent_, extranonce1_hex()); // both sanitized at ingress
 
-    do_send_set_difficulty();
-    if (auto job = pool_.current_job())
-        do_send_notify(*job, /*clean=*/true);
+    send_difficulty_then_work();
 }
 
 void Session::handle_suggest_difficulty(const Request& request) {

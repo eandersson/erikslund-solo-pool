@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <span>
 #include <utility>
 
 namespace erikslund::net {
@@ -87,6 +88,10 @@ void SocketConnection::detach_reactor() {
 }
 
 void SocketConnection::send_line(std::string_view line) {
+    send_lines(std::span<const std::string_view>(&line, 1));
+}
+
+void SocketConnection::send_lines(std::span<const std::string_view> lines) {
     const std::scoped_lock lock(write_mutex_);
     if (dead_.load(std::memory_order_relaxed))
         return;
@@ -94,8 +99,10 @@ void SocketConnection::send_line(std::string_view line) {
         outbox_.erase(0, outbox_pos_);
         outbox_pos_ = 0;
     }
-    outbox_.append(line);
-    outbox_.push_back('\n');
+    for (std::string_view line : lines) {
+        outbox_.append(line);
+        outbox_.push_back('\n');
+    }
     if (outbox_.size() > kMaxOutboxBytes) {
         fail_locked(); // peer cannot keep up; drop it rather than buffer unboundedly
         return;

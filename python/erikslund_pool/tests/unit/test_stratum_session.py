@@ -1,5 +1,6 @@
 """Async ClientSession handler tests (subscribe/configure/authorize/suggest/submit)."""
 
+import json
 import time
 
 from erikslund_pool.config import Settings
@@ -15,6 +16,41 @@ from erikslund_pool.tests.scenario.test_share_to_block import FakeWriter
 def _session(config, *, extranonce1=b"\x00\x00\x00\x01", job=None, pool=None):
     pool = pool or FakePool(job, config)
     return ClientSession(pool, None, FakeWriter(), extranonce1)
+
+
+class _DrainBatchWriter(FakeWriter):
+    """Records the messages flushed in each drain() so a test can assert send coalescing."""
+
+    def __init__(self):
+        super().__init__()
+        self.batches: list[list[dict]] = []
+        self._pending: list[dict] = []
+
+    def write(self, data: bytes):
+        super().write(data)
+        self._pending.append(json.loads(data))
+
+    async def drain(self):
+        self.batches.append(self._pending)
+        self._pending = []
+
+
+class TestColdStartCoalescing(AsyncSoloPoolTestCase):
+    """Cold-start set_difficulty + notify go out in ONE drain (one segment), difficulty first."""
+
+    async def test_first_work_flight_is_one_drain(self):
+        writer = _DrainBatchWriter()
+        session = ClientSession(
+            FakePool(self.make_job(), Settings(variable_difficulty=False)), None, writer,
+            b"\x00\x00\x00\x01")
+        await session.handle_subscribe(1, ["cpuminer/test"])         # result only (not authorized)
+        await session.handle_authorize(2, ["bcrt1qexampleworker"])   # -> coalesced diff + notify
+        per_drain = [[m.get("method") for m in batch] for batch in writer.batches]
+        # The first-work flight is a single drain carrying set_difficulty THEN notify.
+        self.assertIn(["mining.set_difficulty", "mining.notify"], per_drain)
+        # ...and was never split into a difficulty-only drain plus a separate notify drain.
+        self.assertNotIn(["mining.set_difficulty"], per_drain)
+        self.assertNotIn(["mining.notify"], per_drain)
 
 
 class TestSubscribe(AsyncSoloPoolTestCase):

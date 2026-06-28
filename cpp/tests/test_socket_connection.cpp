@@ -6,7 +6,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <string>
+#include <string_view>
 
 #include "net/socket_connection.hpp"
 
@@ -103,6 +105,23 @@ TEST_CASE("send_line frames the line and delivers it on a writable socket") {
         const ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
         REQUIRE(n == 6);
         CHECK(std::string(buf, 6) == "hello\n");
+    }
+    ::close(sv[1]);
+}
+
+TEST_CASE("send_lines coalesces several lines into one framed flight") {
+    int sv[2];
+    make_pair(sv);
+    {
+        SocketConnection conn(sv[0], 30.0, "test:lines"); // owns sv[0]
+        const std::array<std::string_view, 2> flight{"alpha", "beta"};
+        conn.send_lines(flight);
+        CHECK_FALSE(conn.dead());
+        // Both lines arrive newline-framed, in order, from a single coalesced write.
+        char buf[32] = {};
+        const ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+        REQUIRE(n == 11);
+        CHECK(std::string(buf, 11) == "alpha\nbeta\n");
     }
     ::close(sv[1]);
 }

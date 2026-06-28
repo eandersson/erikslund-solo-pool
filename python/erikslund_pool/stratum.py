@@ -130,10 +130,13 @@ class ClientSession:
         return self._coinbase2[1]
 
     async def _send(self, message: dict) -> bool:
-        data = msgspec.json.encode(message) + b"\n"
+        return await self._send_frames(message)
+
+    async def _send_frames(self, *messages: dict) -> bool:
         try:
             async with self._write_lock:
-                self.writer.write(data)
+                for message in messages:
+                    self.writer.write(msgspec.json.encode(message) + b"\n")
                 await self.writer.drain()
             return True
         except (ConnectionError, OSError):
@@ -148,8 +151,11 @@ class ClientSession:
             self.protocol_errors += 1
         await self._send({"id": message_id, "result": None, "error": [code, message, None]})
 
+    def _set_difficulty_message(self) -> dict:
+        return {"id": None, "method": "mining.set_difficulty", "params": [self.difficulty]}
+
     async def send_set_difficulty(self):
-        await self._send({"id": None, "method": "mining.set_difficulty", "params": [self.difficulty]})
+        await self._send(self._set_difficulty_message())
 
     def _begin_difficulty_change(self, new_difficulty: float) -> None:
         if not self.pending_difficulty_change:
@@ -157,24 +163,37 @@ class ClientSession:
         self.difficulty = new_difficulty
         self.pending_difficulty_change = True
 
-    async def send_notify(self, job, clean: bool):
+    def _notify_message(self, job, clean: bool) -> dict | None:
         if not (self.subscribed and self.authorized and self.payout_script is not None):
-            return
+            return None
         self._coinbase2_for(job)             # populate the cache for this job
         coinbase2_hex = self._coinbase2[2]
         # Keep one generation of lookback on a clean job; skip when empty so a cap rotation's
         # demoted generation isn't discarded.
         if clean and self._seen_shares:
             self._rotate_seen_shares()
-        await self._send({
+        # New difficulty is in effect from this job on; stop honoring the old one.
+        self.pending_difficulty_change = False
+        return {
             "id": None,
             "method": "mining.notify",
             "params": [job.job_id, job.prevhash_stratum, job.coinbase1_hex, coinbase2_hex,
                        job.merkle_branch_hex, job.version_hex, job.nbits_hex,
                        job.ntime_hex, clean],
-        })
-        # New difficulty is in effect from this job on; stop honoring the old one.
-        self.pending_difficulty_change = False
+        }
+
+    async def send_notify(self, job, clean: bool):
+        message = self._notify_message(job, clean)
+        if message is not None:
+            await self._send(message)
+
+    async def _send_difficulty_then_work(self) -> None:
+        job = self.pool._current_job_locked()
+        notify = self._notify_message(job, clean=True) if job is not None else None
+        if notify is not None:
+            await self._send_frames(self._set_difficulty_message(), notify)
+        else:
+            await self.send_set_difficulty()
 
     async def handle_subscribe(self, message_id, params):
         # Only a non-empty string sets the user-agent; anything else keeps the default "?".
@@ -189,10 +208,7 @@ class ClientSession:
         ])
         # Authorized before subscribe: no job sent yet, so send difficulty + work now.
         if self.authorized and self.payout_script is not None:
-            await self.send_set_difficulty()
-            job = self.pool._current_job_locked()
-            if job is not None:
-                await self.send_notify(job, clean=True)
+            await self._send_difficulty_then_work()
 
     async def handle_configure(self, message_id, params):
         result = {}
@@ -265,10 +281,7 @@ class ClientSession:
         await self._result(message_id, True)
         LOG.info("Authorized %s (addr=%s, ua=%s, enonce1=%s)",
                  self.peer, self.address, self.user_agent, self.extranonce1_hex)
-        await self.send_set_difficulty()
-        job = self.pool._current_job_locked()   # cross-loop read
-        if job is not None:
-            await self.send_notify(job, clean=True)
+        await self._send_difficulty_then_work()
 
     @staticmethod
     def _clamp_suggested(value, minimum: float, maximum: float) -> float | None:
