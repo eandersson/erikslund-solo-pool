@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -98,14 +99,25 @@ int bind_listener(const std::string& host, uint16_t port) {
 
 } // namespace
 
+namespace {
+
+unsigned usable_cpu_count() {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+        const int count = CPU_COUNT(&set);
+        if (count > 0)
+            return static_cast<unsigned>(count);
+    }
+    return std::max(1u, std::thread::hardware_concurrency()); // fall back if the query fails
+}
+} // namespace
+
 unsigned resolve_worker_count(int configured) {
     if (configured > 0)
         return static_cast<unsigned>(configured);
-    // hardware_concurrency() reports host cores, not a cgroup quota; clamp so a CPU-limited
-    // container isn't over-threaded.
     constexpr unsigned kMaxAutoWorkers = 16;
-    const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-    return std::min(cores, kMaxAutoWorkers);
+    return std::min(usable_cpu_count(), kMaxAutoWorkers);
 }
 
 Server::Server(Pool& pool, const Config& config)
