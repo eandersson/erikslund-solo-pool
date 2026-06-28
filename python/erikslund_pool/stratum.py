@@ -400,6 +400,12 @@ class ClientSession:
             self._record_rejected()
             await self._error(message_id, ERR_STALE)
             return
+        if (len(extranonce2_hex) > self.pool.config.extranonce2_size * 2
+                or len(ntime_hex) > 8 or len(nonce_hex) > 8
+                or (version_bits_hex is not None and len(version_bits_hex) > 8)):
+            self._record_rejected()
+            await self._error(message_id, ERR_OTHER)
+            return
         if not self._remember(self._dedup_key(*parsed)):
             self._record_rejected()
             await self._error(message_id, ERR_DUPLICATE)

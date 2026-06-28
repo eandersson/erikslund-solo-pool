@@ -397,6 +397,14 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         return;
     }
 
+    if (extranonce2.size() > pool_.extranonce2_size() * 2 || ntime.size() > 8 || nonce.size() > 8 ||
+        (version_bits && version_bits->size() > 8)) [[unlikely]] {
+        ++shares_rejected_;
+        pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));
+        send_error(id, ERR_OTHER);
+        return;
+    }
+
     if (!remember(make_dedup_key(job_id, extranonce2, ntime, nonce, version_bits))) [[unlikely]] {
         ++shares_rejected_;
         pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));

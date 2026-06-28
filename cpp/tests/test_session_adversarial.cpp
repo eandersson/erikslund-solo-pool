@@ -267,6 +267,25 @@ TEST_CASE("an exact-duplicate submit (even of a rejected share) is flagged dupli
     CHECK(f.pool.rejected == rejected_after_first + 1);
 }
 
+TEST_CASE("an over-width submit field is rejected before the dedup set (never remembered)") {
+    Fixture f;
+    f.subscribe();
+    f.authorize_valid();
+    // Valid job_id but a grossly over-width extranonce2 that would otherwise be copied verbatim
+    // into the bounded dedup set (memory-amplification DoS).
+    const std::string huge(4096, 'a');
+    f.session.handle_line(f.submit("job1", huge, f.pool.job->ntime_hex(), "00000000"));
+    REQUIRE(f.conn.by_id(6).has_value());
+    CHECK((*f.conn.by_id(6))["error"][0] == 20); // ERR_OTHER
+
+    // Resubmitting the identical over-width share is STILL other-error, never DUPLICATE (22) --
+    // proof it was rejected before insertion into the seen-set.
+    f.conn.sent.clear();
+    f.session.handle_line(f.submit("job1", huge, f.pool.job->ntime_hex(), "00000000"));
+    REQUIRE(f.conn.by_id(6).has_value());
+    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+}
+
 TEST_CASE("submit with version bits outside the negotiated mask is rejected") {
     Fixture f;
     f.subscribe();

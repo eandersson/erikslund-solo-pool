@@ -310,6 +310,25 @@ class TestSubmitGuards(AsyncSoloPoolTestCase):
         self.assertEqual(session.writer.by_id(9)["error"][0], 20)
 
 
+class TestOverWidthSubmitNotRemembered(AsyncSoloPoolTestCase):
+    """Over-width submit fields are rejected (ERR_OTHER) BEFORE the dedup set, so a miner cannot
+    bloat the bounded seen-shares set with unbounded keys (memory-amplification DoS)."""
+
+    async def test_over_width_field_rejected_before_dedup(self):
+        job = self.make_job(job_id="1")
+        session = ClientSession(FakePool(job, Settings()), None, FakeWriter(), b"\x00\x00\x00\x01")
+        session.authorized = True
+        session.subscribed = True
+        huge = "a" * 4096   # valid job_id, grossly over-width extranonce2
+        await session.handle_submit(7, ["w", "1", huge, "00000000", "00000000"])
+        self.assertEqual(session.writer.by_id(7)["error"][0], 20)   # ERR_OTHER
+        # Resubmitting the identical over-width share is STILL ERR_OTHER, never ERR_DUPLICATE (22) --
+        # proof it was never inserted into the seen-set.
+        await session.handle_submit(8, ["w", "1", huge, "00000000", "00000000"])
+        self.assertEqual(session.writer.by_id(8)["error"][0], 20)
+        self.assertEqual(len(session._seen_shares), 0)
+
+
 class TestDispatch(AsyncSoloPoolTestCase):
     async def test_extranonce_subscribe_acks_true(self):
         session = _session(Settings())
