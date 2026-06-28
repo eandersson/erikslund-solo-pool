@@ -48,6 +48,7 @@ def tune_keepalive(sock, work_rebroadcast_seconds: float) -> None:
     if sock is None or not hasattr(sock, "setsockopt"):
         return
     try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         for name, value in (
             ("TCP_KEEPIDLE", KEEPALIVE_IDLE_SECONDS),

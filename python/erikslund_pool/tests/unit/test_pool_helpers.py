@@ -2,9 +2,12 @@
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock
+from unittest.mock import patch
 
 from erikslund_pool.config import Settings
 from erikslund_pool.constants import MAX_RECENT_JOBS
+from erikslund_pool.pool import LISTEN_BACKLOG
 from erikslund_pool.pool import Pool
 from erikslund_pool.util import redact_url
 
@@ -173,6 +176,19 @@ class TestRecentJobs(unittest.TestCase):
         # The most recent job is always retrievable; the oldest was evicted.
         self.assertIsNotNone(pool.recent_job(ids[-1]))
         self.assertIsNone(pool.recent_job(ids[0]))
+
+
+class TestStartServersBacklog(unittest.TestCase):
+    """The stratum acceptor must pass an explicit listen() backlog matching the C++ pool's
+    kListenBacklog, so a correlated reconnect burst isn't dropped to CPython's default of 100."""
+
+    def test_start_servers_passes_explicit_backlog(self):
+        pool = Pool(Settings())
+        with patch("erikslund_pool.pool.asyncio.start_server", new=AsyncMock()) as start_server:
+            asyncio.run(pool._start_servers(reuse_port=False, log=False))
+        self.assertGreaterEqual(start_server.await_count, 1)
+        for call in start_server.await_args_list:
+            self.assertEqual(call.kwargs["backlog"], LISTEN_BACKLOG)
 
 
 class TestStatsShapes(unittest.TestCase):

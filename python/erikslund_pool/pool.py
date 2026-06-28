@@ -41,6 +41,7 @@ LOG = logging.getLogger(__name__)
 # Grace before a disconnected never-mined (authorize-only) registry row is pruned, applied
 # regardless of user_stats_retention_days so authorize-churn can't pin the registry cap.
 GHOST_ROW_GRACE_SECONDS = 3600.0
+LISTEN_BACKLOG = 1024
 
 
 def block_subsidy(height: int, halving_interval: int) -> int:
@@ -885,7 +886,8 @@ class Pool:
             # `limit` caps a single buffered line, bounding per-connection memory.
             server = await asyncio.start_server(
                 self._make_handler(), self.config.bind_host, port,
-                limit=self.config.max_line_bytes, reuse_port=reuse_port)
+                limit=self.config.max_line_bytes, reuse_port=reuse_port,
+                backlog=LISTEN_BACKLOG)
             servers.append(server)
             if log:
                 LOG.info("Stratum listening on %s:%d", self.config.bind_host, port)

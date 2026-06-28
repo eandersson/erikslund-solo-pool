@@ -43,6 +43,7 @@ class TestTuneKeepalive(unittest.TestCase):
         self.addCleanup(sock.close)
         tune_keepalive(sock, 30)
         self.assertEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 1)
+        self.assertEqual(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY), 1)
         # Linux-only options: assert only where the platform exposes them.
         if hasattr(socket, "TCP_KEEPIDLE"):
             self.assertEqual(
