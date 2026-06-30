@@ -2,9 +2,8 @@
 
 #include <string>
 
-#include <nlohmann/json.hpp>
-
 #include "bitcoin/block_template.hpp"
+#include "gbt_fixture.hpp"
 #include "pool/pool.hpp"
 #include "stratum/job.hpp"
 #include "util/hex.hpp"
@@ -14,20 +13,21 @@
 using namespace erikslund;
 using namespace erikslund::stratum;
 using namespace erikslund::util;
+using namespace erikslund::test;
 
 // fastblock work is an empty (coinbase-only) template; commitment = sha256d(64 zeros).
 TEST_CASE("empty-block (fastblock) job builds a single-transaction block") {
-    nlohmann::json t;
+    gbt_json t = gbt_json::object_t{};
     t["height"] = 200;
     t["version"] = 0x20000000;
     t["curtime"] = 1700000000;
-    t["bits"] = "1d00ffff";
+    t["bits"] = std::string("1d00ffff");
     t["coinbasevalue"] = 5000000000LL;
     t["previousblockhash"] = std::string(64, '0');
     t["default_witness_commitment"] = "6a24aa21a9ed" + to_hex(sha256d(Bytes(64, 0)));
-    t["transactions"] = nlohmann::json::array();
+    t["transactions"] = gbt_json::array_t{};
 
-    const auto block_template = bitcoin::BlockTemplate::from_json(t);
+    const auto block_template = from_template(t);
     Job job("e1", block_template, Bytes{'/', 'e', '/'}, 4, 4, 1, true);
     CHECK(job.txn_count() == 0);
     CHECK(job.merkle_branch_hex().empty()); // no other txns -> empty merkle branch
@@ -53,17 +53,17 @@ TEST_CASE("empty-block (fastblock) job builds a single-transaction block") {
 }
 
 TEST_CASE("a template without a witness commitment assembles a legacy (non-segwit) block") {
-    nlohmann::json t;
+    gbt_json t = gbt_json::object_t{};
     t["height"] = 200;
     t["version"] = 0x20000000;
     t["curtime"] = 1700000000;
-    t["bits"] = "1d00ffff";
+    t["bits"] = std::string("1d00ffff");
     t["coinbasevalue"] = 5000000000LL;
     t["previousblockhash"] = std::string(64, '0');
     // No default_witness_commitment field.
-    t["transactions"] = nlohmann::json::array();
+    t["transactions"] = gbt_json::array_t{};
 
-    const auto block_template = bitcoin::BlockTemplate::from_json(t);
+    const auto block_template = from_template(t);
     Job job("legacy1", block_template, Bytes{'/', 'e', '/'}, 4, 4, 1);
 
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");

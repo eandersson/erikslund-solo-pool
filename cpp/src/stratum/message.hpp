@@ -5,11 +5,9 @@
 #include <string_view>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 namespace erikslund::stratum {
-
-using json = nlohmann::json;
 
 // The [code, message, null] triple in a JSON-RPC error.
 struct StratumError {
@@ -25,7 +23,7 @@ inline constexpr StratumError ERR_UNAUTHORIZED{24, "Unauthorized worker"};
 inline constexpr StratumError ERR_NOT_SUBSCRIBED{25, "Not subscribed"};
 
 struct Request {
-    json id = nullptr;                 // echoed in responses (number, string, or null)
+    glz::generic id;                   // echoed in responses (number, string, or null); null default
     std::string method;
     // Each param as a string ("" for non-string elements; those reject downstream).
     std::vector<std::string> params;
@@ -41,14 +39,14 @@ struct Request {
 // Returns nullopt unless it's a JSON object with a string method.
 std::optional<Request> parse_request(std::string_view line);
 
-json make_result(const json& id, json result);
-json make_error(const json& id, const StratumError& error);
-json make_notification(std::string_view method, json params);
+glz::generic make_result(const glz::generic& id, glz::generic result);
+glz::generic make_error(const glz::generic& id, const StratumError& error);
+glz::generic make_notification(std::string_view method, glz::generic params);
 
 // Fast paths for the per-share submit response: serialize straight to the wire line (no json
 // tree). Byte-identical to make_result/make_error dumped (key order error < id < result).
-std::string make_result_line(const json& id, bool result);
-std::string make_error_line(const json& id, const StratumError& error);
+std::string make_result_line(const glz::generic& id, bool result);
+std::string make_error_line(const glz::generic& id, const StratumError& error);
 
 // Fast path for mining.notify (highest-fanout, re-serialized per client per broadcast):
 // concatenate the wire line from the job's already-hex fields. All values are hex, so no JSON

@@ -21,13 +21,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         make \
+        git \
         libcurl4-openssl-dev \
         libzmq3-dev \
         libmimalloc-dev \
-        nlohmann-json3-dev \
         libyaml-cpp-dev \
-        libsimdjson-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Glaze (stephenberry/glaze): the header-only JSON/YAML library the PoC migrates onto. Drop the
+# include tree onto the default search path (/usr/local/include); header-only, so no link step and
+# the runtime image carries nothing from it.
+ARG GLAZE_VERSION=v7.8.3
+RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenberry/glaze.git /tmp/glaze \
+    && cp -r /tmp/glaze/include/glaze /usr/local/include/glaze \
+    && rm -rf /tmp/glaze
 
 WORKDIR /src
 COPY . .
@@ -47,7 +54,7 @@ RUN set -eux; \
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libcurl4 libzmq5 libyaml-cpp0.8 libsimdjson* curl \
+        libcurl4 libzmq5 libyaml-cpp0.8 curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 pool \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /var/lib/erikslund-pool \

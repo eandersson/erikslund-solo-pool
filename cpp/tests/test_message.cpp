@@ -1,15 +1,38 @@
 #include <doctest/doctest.h>
 
+#include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "stratum/message.hpp"
 
 using namespace erikslund::stratum;
+using json = glz::generic;
+
+namespace {
+
+json jarray(std::initializer_list<json> elements) {
+    json out = json::array_t{};
+    for (const json& element : elements)
+        out.get_array().push_back(element);
+    return out;
+}
+
+json jstrings(const std::vector<std::string>& values) {
+    json out = json::array_t{};
+    for (const std::string& value : values)
+        out.get_array().emplace_back(json(value));
+    return out;
+}
+
+std::string dump(const json& value) { return glz::write_json(value).value_or(""); }
+
+} // namespace
 
 TEST_CASE("parse_request accepts a well-formed request") {
     const auto req = parse_request(R"({"id":7,"method":"mining.submit","params":["a","b"]})");
     REQUIRE(req.has_value());
-    CHECK(req->id == 7);
+    CHECK(req->id.get<double>() == 7);
     CHECK(req->method == "mining.submit");
     CHECK(req->params.size() == 2);
     CHECK(req->params[0] == "a");
@@ -79,21 +102,21 @@ TEST_CASE("parse_request rejects junk") {
 }
 
 TEST_CASE("response builders shape the JSON-RPC objects") {
-    const json ok = make_result(1, true);
-    CHECK(ok["id"] == 1);
-    CHECK(ok["result"] == true);
+    json ok = make_result(1, true);
+    CHECK(ok["id"].get<double>() == 1);
+    CHECK(ok["result"].get<bool>() == true);
     CHECK(ok["error"].is_null());
 
-    const json err = make_error(2, ERR_DUPLICATE);
-    CHECK(err["id"] == 2);
+    json err = make_error(2, ERR_DUPLICATE);
+    CHECK(err["id"].get<double>() == 2);
     CHECK(err["result"].is_null());
-    CHECK(err["error"][0] == 22);
+    CHECK(err["error"][0].get<double>() == 22);
     CHECK(err["error"][2].is_null());
 
-    const json note = make_notification("mining.set_difficulty", json::array({1024.0}));
+    json note = make_notification("mining.set_difficulty", jarray({json(1024.0)}));
     CHECK(note["id"].is_null());
-    CHECK(note["method"] == "mining.set_difficulty");
-    CHECK(note["params"][0] == 1024.0);
+    CHECK(note["method"].get<std::string>() == "mining.set_difficulty");
+    CHECK(note["params"][0].get<double>() == doctest::Approx(1024.0));
 }
 
 TEST_CASE("parse_request preserves a string id") {
@@ -202,46 +225,52 @@ TEST_CASE("brace characters inside a string do not inflate the depth count") {
 }
 
 TEST_CASE("make_error carries the right code for each StratumError") {
-    CHECK(make_error(1, ERR_OTHER)["error"][0] == 20);
-    CHECK(make_error(1, ERR_STALE)["error"][0] == 21);
-    CHECK(make_error(1, ERR_DUPLICATE)["error"][0] == 22);
-    CHECK(make_error(1, ERR_LOW_DIFFICULTY)["error"][0] == 23);
-    CHECK(make_error(1, ERR_UNAUTHORIZED)["error"][0] == 24);
-    CHECK(make_error(1, ERR_NOT_SUBSCRIBED)["error"][0] == 25);
+    auto code_of = [](const StratumError& error) {
+        json m = make_error(1, error);
+        return m["error"][0].get<double>();
+    };
+    CHECK(code_of(ERR_OTHER) == 20);
+    CHECK(code_of(ERR_STALE) == 21);
+    CHECK(code_of(ERR_DUPLICATE) == 22);
+    CHECK(code_of(ERR_LOW_DIFFICULTY) == 23);
+    CHECK(code_of(ERR_UNAUTHORIZED) == 24);
+    CHECK(code_of(ERR_NOT_SUBSCRIBED) == 25);
     // The message string is carried at index 1.
-    CHECK(make_error(1, ERR_DUPLICATE)["error"][1] == "Duplicate share");
+    json dup = make_error(1, ERR_DUPLICATE);
+    CHECK(dup["error"][1].get<std::string>() == "Duplicate share");
 }
 
 TEST_CASE("make_result echoes the id type (string preserved)") {
-    const json ok = make_result(std::string("xyz"), json::array({"sub", "en1", 4}));
-    CHECK(ok["id"] == "xyz");
-    CHECK(ok["result"][0] == "sub");
+    json ok = make_result(std::string("xyz"), jarray({json("sub"), json("en1"), json(4)}));
+    CHECK(ok["id"].get<std::string>() == "xyz");
+    CHECK(ok["result"][0].get<std::string>() == "sub");
     CHECK(ok["error"].is_null());
 }
 
-TEST_CASE("make_result_line is byte-identical to make_result(...).dump()") {
+TEST_CASE("make_result_line is byte-identical to make_result(...) serialized") {
     // The fast submit-response path must produce exactly the same wire bytes as the json builder.
-    CHECK(make_result_line(7, true) == make_result(7, true).dump());
-    CHECK(make_result_line(7, false) == make_result(7, false).dump());
-    CHECK(make_result_line(nullptr, true) == make_result(nullptr, true).dump());
-    CHECK(make_result_line(std::string("abc-1"), true) == make_result(std::string("abc-1"), true).dump());
-    // Explicit expected bytes (nlohmann orders object keys lexicographically: error, id, result).
+    CHECK(make_result_line(7, true) == dump(make_result(7, true)));
+    CHECK(make_result_line(7, false) == dump(make_result(7, false)));
+    CHECK(make_result_line(nullptr, true) == dump(make_result(nullptr, true)));
+    CHECK(make_result_line(std::string("abc-1"), true) ==
+          dump(make_result(std::string("abc-1"), true)));
+    // Explicit expected bytes (the pinned wire order: error, id, result).
     CHECK(make_result_line(7, true) == R"({"error":null,"id":7,"result":true})");
     CHECK(make_result_line(std::string("x"), true) == R"({"error":null,"id":"x","result":true})");
 }
 
-TEST_CASE("make_error_line is byte-identical to make_error(...).dump()") {
+TEST_CASE("make_error_line is byte-identical to make_error(...) serialized") {
     for (const StratumError& err : {ERR_OTHER, ERR_STALE, ERR_DUPLICATE, ERR_LOW_DIFFICULTY,
                                     ERR_UNAUTHORIZED, ERR_NOT_SUBSCRIBED}) {
-        CHECK(make_error_line(9, err) == make_error(9, err).dump());
-        CHECK(make_error_line(nullptr, err) == make_error(nullptr, err).dump());
-        CHECK(make_error_line(std::string("id-1"), err) == make_error(std::string("id-1"), err).dump());
+        CHECK(make_error_line(9, err) == dump(make_error(9, err)));
+        CHECK(make_error_line(nullptr, err) == dump(make_error(nullptr, err)));
+        CHECK(make_error_line(std::string("id-1"), err) == dump(make_error(std::string("id-1"), err)));
     }
     CHECK(make_error_line(9, ERR_DUPLICATE) ==
           R"({"error":[22,"Duplicate share",null],"id":9,"result":null})");
 }
 
-TEST_CASE("make_notify_line is byte-identical to make_notification(...).dump()") {
+TEST_CASE("make_notify_line is byte-identical to make_notification(...) serialized") {
     // mining.notify is parity-locked on the wire: the fast per-client path must match the json
     // builder byte for byte, across empty/multi-branch jobs and both clean flags.
     const std::string job_id = "abbaabba00000001";
@@ -254,10 +283,10 @@ TEST_CASE("make_notify_line is byte-identical to make_notification(...).dump()")
     const std::string ntime = "6553f100";
 
     const auto reference = [&](const std::vector<std::string>& branches, bool clean) {
-        return make_notification("mining.notify",
-                                 json::array({job_id, prevhash, cb1, cb2, branches, version,
-                                              nbits, ntime, clean}))
-            .dump();
+        return dump(make_notification(
+            "mining.notify", jarray({json(job_id), json(prevhash), json(cb1), json(cb2),
+                                     jstrings(branches), json(version), json(nbits), json(ntime),
+                                     json(clean)})));
     };
 
     const std::vector<std::string> none{};

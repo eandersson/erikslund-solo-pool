@@ -1,15 +1,19 @@
 #include "core/config.hpp"
 
 #include <charconv>
-#include <flat_set>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
-#include <yaml-cpp/yaml.h>
+#include <glaze/glaze.hpp>
+#include <glaze/yaml.hpp>
 
 #include "bitcoin/coinbase.hpp"
 #include "core/errors.hpp"
@@ -34,199 +38,8 @@ std::pair<std::string, uint16_t> split_host_port(const std::string& host_port) {
     return {host_port.substr(0, colon), static_cast<uint16_t>(port)};
 }
 
-nlohmann::json scalar_to_json(const std::string& text) {
-    if (!text.empty()) {
-        const char* begin = text.data();
-        const char* end = begin + text.size();
-
-        if (int64_t as_int = 0;
-            std::from_chars(begin, end, as_int).ptr == end)
-            return as_int;
-        if (double as_double = 0.0;
-            std::from_chars(begin, end, as_double).ptr == end)
-            return as_double;
-        // YAML 1.1 boolean spellings.
-        if (text == "true" || text == "True" || text == "TRUE")
-            return true;
-        if (text == "false" || text == "False" || text == "FALSE")
-            return false;
-    }
-    return text;
-}
-
-nlohmann::json yaml_to_json(const YAML::Node& node) {
-    switch (node.Type()) {
-    case YAML::NodeType::Map: {
-        nlohmann::json object = nlohmann::json::object();
-        for (const auto& entry : node)
-            object[entry.first.as<std::string>()] = yaml_to_json(entry.second);
-        return object;
-    }
-    case YAML::NodeType::Sequence: {
-        nlohmann::json array = nlohmann::json::array();
-        for (const auto& element : node)
-            array.push_back(yaml_to_json(element));
-        return array;
-    }
-    case YAML::NodeType::Scalar:
-        // A quoted scalar carries the non-specific "!" tag: keep it a string (don't coerce
-        // password: "12345" or token: "true"). Plain scalars get type inference.
-        if (node.Tag() == "!")
-            return node.Scalar();
-        return scalar_to_json(node.Scalar());
-    case YAML::NodeType::Null:
-    case YAML::NodeType::Undefined:
-    default:
-        return nullptr;
-    }
-}
-
-} // namespace
-
-Config Config::from_json(const nlohmann::json& object) {
-    if (!object.is_object())
-        throw ConfigError("config must be a JSON object");
-
-    static const std::flat_set<std::string> known = {
-        "$schema",                          "bitcoin_nodes",
-        "stratum_listen",                   "api_listen",
-        "coinbase_signature",               "coinbase_version",
-        "initial_difficulty",               "minimum_difficulty",
-        "maximum_difficulty",               "variable_difficulty",
-        "vardiff_target_shares_per_minute", "vardiff_retarget_seconds",
-        "extranonce1_size",                 "extranonce2_size",
-        "zmq_block_endpoint",               "fast_block_notify",
-        "block_poll_milliseconds",          "work_rebroadcast_seconds",
-        "version_rolling_mask",             "donation_percent",
-        "donation_address",                 "max_clients",
-        "max_workers_per_address",
-        "drop_idle_seconds",                "max_line_bytes",
-        "auth_timeout_seconds",             "max_protocol_errors",
-        "stats_directory",                  "status_interval_seconds",
-        "user_stats_retention_days",        "worker_threads",
-        "proxy_protocol_from"};
-    for (const auto& item : object.items())
-        if (!known.contains(item.key()))
-            throw ConfigError("unknown config key: " + item.key());
-
-    Config config;
-
-    if (object.contains("bitcoin_nodes") && object["bitcoin_nodes"].is_array() &&
-        !object["bitcoin_nodes"].empty()) {
-        const auto& nodes = object["bitcoin_nodes"];
-        config.rpc_url = nodes[0].at("address").get<std::string>();
-        config.rpc_user = nodes[0].value("username", std::string{});
-        config.rpc_password = nodes[0].value("password", std::string{});
-        for (size_t i = 1; i < nodes.size(); ++i) {
-            bitcoin::RpcEndpoint endpoint;
-            endpoint.url = nodes[i].at("address").get<std::string>();
-            endpoint.user = nodes[i].value("username", config.rpc_user);
-            endpoint.password = nodes[i].value("password", config.rpc_password);
-            config.rpc_failover.push_back(std::move(endpoint));
-        }
-    }
-
-    if (object.contains("stratum_listen")) {
-        const auto& listen = object["stratum_listen"];
-        std::vector<std::string> urls;
-        if (listen.is_string())
-            urls.push_back(listen.get<std::string>());
-        else if (listen.is_array())
-            for (const auto& u : listen)
-                urls.push_back(u.get<std::string>());
-        if (!urls.empty()) {
-            config.bind_host = split_host_port(urls[0]).first;
-            config.bind_ports.clear();
-            for (const auto& u : urls) {
-                const auto [host, port] = split_host_port(u);
-                // Only the first bind host is honored; reject differing per-entry hosts.
-                if (host != config.bind_host)
-                    throw ConfigError("stratum_listen entries must all use the same host "
-                                      "(per-port hosts are not supported): " + u);
-                config.bind_ports.push_back(port);
-            }
-            config.bind_port = config.bind_ports.front();
-        }
-    }
-
-    if (object.contains("proxy_protocol_from")) {
-        const auto& trusted = object["proxy_protocol_from"];
-        if (trusted.is_string())
-            config.proxy_protocol_from.push_back(trusted.get<std::string>());
-        else if (trusted.is_array())
-            for (const auto& entry : trusted)
-                config.proxy_protocol_from.push_back(entry.get<std::string>());
-    }
-
-    if (object.contains("api_listen")) {
-        const auto& listen = object["api_listen"];
-        std::string host_port;
-        if (listen.is_string())
-            host_port = listen.get<std::string>();
-        else if (listen.is_array() && !listen.empty())
-            host_port = listen[0].get<std::string>();
-        if (!host_port.empty()) {
-            const auto [host, port] = split_host_port(host_port);
-            config.api_host = host;
-            config.api_port = port;
-        }
-    }
-
-    const auto load = [&](const char* key, auto& field) {
-        if (!object.contains(key))
-            return;
-        try {
-            field = object.at(key).get<std::remove_reference_t<decltype(field)>>();
-        } catch (const nlohmann::json::exception&) {
-            throw ConfigError(std::string("invalid value type for config key '") + key + "'");
-        }
-    };
-    load("coinbase_signature", config.coinbase_signature);
-    load("coinbase_version", config.coinbase_version);
-    load("initial_difficulty", config.initial_difficulty);
-    load("minimum_difficulty", config.minimum_difficulty);
-    load("maximum_difficulty", config.maximum_difficulty);
-    load("variable_difficulty", config.variable_difficulty);
-    load("vardiff_target_shares_per_minute", config.vardiff_target_shares_per_minute);
-    load("vardiff_retarget_seconds", config.vardiff_retarget_seconds);
-    load("extranonce1_size", config.extranonce1_size);
-    load("extranonce2_size", config.extranonce2_size);
-    load("zmq_block_endpoint", config.zmq_block_endpoint);
-    load("fast_block_notify", config.fast_block_notify);
-    load("work_rebroadcast_seconds", config.work_rebroadcast_seconds);
-    load("donation_percent", config.donation_percent);
-    load("donation_address", config.donation_address);
-    load("max_clients", config.max_clients);
-    load("max_workers_per_address", config.max_workers_per_address);
-    load("drop_idle_seconds", config.drop_idle_seconds);
-    load("auth_timeout_seconds", config.auth_timeout_seconds);
-    load("max_protocol_errors", config.max_protocol_errors);
-    load("max_line_bytes", config.max_line_bytes);
-    load("stats_directory", config.stats_directory);
-    load("status_interval_seconds", config.status_interval_seconds);
-    load("user_stats_retention_days", config.user_stats_retention_days);
-    load("worker_threads", config.worker_threads);
-
-    if (object.contains("block_poll_milliseconds")) {
-        try {
-            config.poll_interval = object["block_poll_milliseconds"].get<double>() / 1000.0;
-        } catch (const nlohmann::json::exception&) {
-            throw ConfigError("block_poll_milliseconds must be a number");
-        }
-    }
-
-    if (object.contains("version_rolling_mask")) {
-        const auto& value = object.at("version_rolling_mask");
-        try {
-            config.version_rolling_mask = value.is_string()
-                                      ? static_cast<uint32_t>(std::stoul(value.get<std::string>(),
-                                                                         nullptr, 16))
-                                      : value.get<uint32_t>();
-        } catch (const std::exception&) {
-            throw ConfigError("invalid version_rolling_mask");
-        }
-    }
-
+// Range checks + clamps applied after a Config is populated from the parsed file.
+void finalize_and_validate(Config& config) {
     if (config.version_rolling_mask & ~0x1fffe000u) {
         log::warning("version_rolling_mask {:08x} has bits outside the BIP320 range; clamping to "
                      "1fffe000", config.version_rolling_mask);
@@ -281,7 +94,160 @@ Config Config::from_json(const nlohmann::json& object) {
         throw ConfigError("coinbase_signature too long: it must leave room in the " +
                           std::to_string(bitcoin::kMaxScriptSig) +
                           "-byte coinbase scriptSig for the height push and extranonces");
+}
+
+struct NodeEntry {
+    std::string address;
+    std::optional<std::string> username;
+    std::optional<std::string> password;
+    std::optional<bool> notify;
+};
+using ScalarOrList = std::variant<std::string, std::vector<std::string>>;
+
+struct ConfigFile {
+    std::optional<std::vector<NodeEntry>> bitcoin_nodes;
+    std::optional<ScalarOrList> stratum_listen;
+    std::optional<ScalarOrList> api_listen;
+    std::optional<ScalarOrList> proxy_protocol_from;
+    std::optional<std::string> coinbase_signature;
+    std::optional<std::uint32_t> coinbase_version;
+    std::optional<double> initial_difficulty;
+    std::optional<double> minimum_difficulty;
+    std::optional<double> maximum_difficulty;
+    std::optional<bool> variable_difficulty;
+    std::optional<double> vardiff_target_shares_per_minute;
+    std::optional<int> vardiff_retarget_seconds;
+    std::optional<std::size_t> extranonce1_size;
+    std::optional<std::size_t> extranonce2_size;
+    std::optional<std::string> zmq_block_endpoint;
+    std::optional<bool> fast_block_notify;
+    std::optional<double> block_poll_milliseconds;
+    std::optional<double> work_rebroadcast_seconds;
+    std::optional<std::variant<std::uint32_t, std::string>> version_rolling_mask;
+    std::optional<double> donation_percent;
+    std::optional<std::string> donation_address;
+    std::optional<int> max_clients;
+    std::optional<int> max_workers_per_address;
+    std::optional<int> drop_idle_seconds;
+    std::optional<std::size_t> max_line_bytes;
+    std::optional<int> auth_timeout_seconds;
+    std::optional<int> max_protocol_errors;
+    std::optional<std::string> stats_directory;
+    std::optional<double> status_interval_seconds;
+    std::optional<int> user_stats_retention_days;
+    std::optional<int> worker_threads;
+};
+
+std::vector<std::string> to_list(const ScalarOrList& value) {
+    if (const auto* one = std::get_if<std::string>(&value))
+        return {*one};
+    return std::get<std::vector<std::string>>(value);
+}
+
+Config config_from(const ConfigFile& file) {
+    Config config;
+
+    if (file.bitcoin_nodes && !file.bitcoin_nodes->empty()) {
+        const auto& nodes = *file.bitcoin_nodes;
+        if (nodes[0].address.empty())
+            throw ConfigError("bitcoin_nodes[0] requires an address");
+        config.rpc_url = nodes[0].address;
+        config.rpc_user = nodes[0].username.value_or(std::string{});
+        config.rpc_password = nodes[0].password.value_or(std::string{});
+        for (std::size_t i = 1; i < nodes.size(); ++i) {
+            if (nodes[i].address.empty())
+                throw ConfigError("a bitcoin_nodes entry requires an address");
+            config.rpc_failover.push_back({nodes[i].address,
+                                           nodes[i].username.value_or(config.rpc_user),
+                                           nodes[i].password.value_or(config.rpc_password)});
+        }
+    }
+
+    if (file.stratum_listen) {
+        const auto urls = to_list(*file.stratum_listen);
+        if (!urls.empty()) {
+            config.bind_host = split_host_port(urls[0]).first;
+            config.bind_ports.clear();
+            for (const auto& url : urls) {
+                const auto [host, port] = split_host_port(url);
+                if (host != config.bind_host)
+                    throw ConfigError("stratum_listen entries must all use the same host "
+                                      "(per-port hosts are not supported): " + url);
+                config.bind_ports.push_back(port);
+            }
+            config.bind_port = config.bind_ports.front();
+        }
+    }
+
+    if (file.api_listen) {
+        const auto entries = to_list(*file.api_listen);
+        if (!entries.empty()) {
+            const auto [host, port] = split_host_port(entries[0]);
+            config.api_host = host;
+            config.api_port = port;
+        }
+    }
+
+    if (file.proxy_protocol_from)
+        config.proxy_protocol_from = to_list(*file.proxy_protocol_from);
+
+    const auto apply = [](auto& field, const auto& opt) {
+        if (opt)
+            field = *opt;
+    };
+    apply(config.coinbase_signature, file.coinbase_signature);
+    apply(config.coinbase_version, file.coinbase_version);
+    apply(config.initial_difficulty, file.initial_difficulty);
+    apply(config.minimum_difficulty, file.minimum_difficulty);
+    apply(config.maximum_difficulty, file.maximum_difficulty);
+    apply(config.variable_difficulty, file.variable_difficulty);
+    apply(config.vardiff_target_shares_per_minute, file.vardiff_target_shares_per_minute);
+    apply(config.vardiff_retarget_seconds, file.vardiff_retarget_seconds);
+    apply(config.extranonce1_size, file.extranonce1_size);
+    apply(config.extranonce2_size, file.extranonce2_size);
+    apply(config.zmq_block_endpoint, file.zmq_block_endpoint);
+    apply(config.fast_block_notify, file.fast_block_notify);
+    apply(config.work_rebroadcast_seconds, file.work_rebroadcast_seconds);
+    apply(config.donation_percent, file.donation_percent);
+    apply(config.donation_address, file.donation_address);
+    apply(config.max_clients, file.max_clients);
+    apply(config.max_workers_per_address, file.max_workers_per_address);
+    apply(config.drop_idle_seconds, file.drop_idle_seconds);
+    apply(config.max_line_bytes, file.max_line_bytes);
+    apply(config.auth_timeout_seconds, file.auth_timeout_seconds);
+    apply(config.max_protocol_errors, file.max_protocol_errors);
+    apply(config.stats_directory, file.stats_directory);
+    apply(config.status_interval_seconds, file.status_interval_seconds);
+    apply(config.user_stats_retention_days, file.user_stats_retention_days);
+    apply(config.worker_threads, file.worker_threads);
+
+    if (file.block_poll_milliseconds)
+        config.poll_interval = *file.block_poll_milliseconds / 1000.0;
+
+    if (file.version_rolling_mask) {
+        if (const auto* num = std::get_if<std::uint32_t>(&*file.version_rolling_mask)) {
+            config.version_rolling_mask = *num;
+        } else {
+            try {
+                config.version_rolling_mask = static_cast<std::uint32_t>(
+                    std::stoul(std::get<std::string>(*file.version_rolling_mask), nullptr, 16));
+            } catch (const std::exception&) {
+                throw ConfigError("invalid version_rolling_mask");
+            }
+        }
+    }
+
+    finalize_and_validate(config);
     return config;
+}
+
+} // namespace
+
+Config Config::from_string(const std::string& text) {
+    ConfigFile file;
+    if (const auto ec = glz::read_yaml(file, text))
+        throw ConfigError("invalid config: " + glz::format_error(ec, text));
+    return config_from(file);
 }
 
 Config Config::from_file(const std::string& path) {
@@ -290,13 +256,7 @@ Config Config::from_file(const std::string& path) {
         throw ConfigError("cannot open config file: " + path);
     std::stringstream buffer;
     buffer << stream.rdbuf();
-
-    try {
-        const YAML::Node root = YAML::Load(buffer.str());
-        return from_json(yaml_to_json(root));
-    } catch (const YAML::Exception& error) {
-        throw ConfigError("config file is not valid YAML: " + path + ": " + error.what());
-    }
+    return from_string(buffer.str());
 }
 
 } // namespace erikslund

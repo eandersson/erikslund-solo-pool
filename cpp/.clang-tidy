@@ -26,6 +26,6 @@ Checks: >
 # leaving this empty keeps clang-tidy's exit code from conflating the two.
 WarningsAsErrors: ''
 # Lint our own headers (src/<subsystem>/*.hpp); skip vendored third_party/*.h and
-# system headers (nlohmann, simdjson, libstdc++).
+# system / third-party headers (glaze, yaml-cpp, libstdc++).
 HeaderFilterRegex: 'src/(api|bitcoin|core|net|pool|stats|stratum|util)/'
 FormatStyle: none

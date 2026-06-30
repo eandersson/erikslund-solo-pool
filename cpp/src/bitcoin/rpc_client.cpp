@@ -92,23 +92,25 @@ std::vector<std::string> RpcClient::endpoint_urls() const {
     return urls;
 }
 
-nlohmann::json RpcClient::call(const std::string& method, const nlohmann::json& params,
-                               long timeout) {
+glz::generic RpcClient::call(const std::string& method, const glz::generic& params, long timeout) {
     const int id = ++next_id_;
-    const std::string payload =
-        nlohmann::json{{"jsonrpc", "1.0"}, {"id", id}, {"method", method}, {"params", params}}
-            .dump();
+    glz::generic request;
+    request["jsonrpc"] = "1.0";
+    request["id"] = static_cast<double>(id);
+    request["method"] = method;
+    request["params"] = params.is_null() ? glz::generic(glz::generic::array_t{}) : params;
+    const std::string payload = glz::write_json(request).value_or("");
     return call_payload(payload, timeout > 0 ? timeout : timeout_);
 }
 
-nlohmann::json RpcClient::call_payload(const std::string& payload, long timeout) {
+glz::generic RpcClient::call_payload(const std::string& payload, long timeout) {
     const size_t count = endpoints_.size();
     const size_t start = current_.load();
     std::string last_error;
     for (size_t i = 0; i < count; ++i) {
         const size_t index = (start + i) % count;
         try {
-            nlohmann::json result = call_one(endpoints_[index], payload, timeout);
+            glz::generic result = call_one(endpoints_[index], payload, timeout);
             if (index != start) {
                 size_t expected = start;
                 if (current_.compare_exchange_strong(expected, index))
@@ -158,58 +160,52 @@ std::string RpcClient::post_one(const Resolved& endpoint, const std::string& pay
     return response;
 }
 
-nlohmann::json RpcClient::call_one(const Resolved& endpoint, const std::string& payload,
-                                   long timeout) {
+glz::generic RpcClient::call_one(const Resolved& endpoint, const std::string& payload,
+                                 long timeout) {
     long http_status = 0;
     const std::string response = post_one(endpoint, payload, timeout, &http_status);
-    nlohmann::json parsed = nlohmann::json::parse(response, nullptr, /*allow_exceptions=*/false);
-    if (parsed.is_discarded())
+    glz::generic parsed;
+    if (glz::read_json(parsed, response))
         // Keep the HTTP code so a 401 (bad RPC creds) stays distinguishable from garbage.
         throw RpcConnectionError("unparseable body (HTTP " + std::to_string(http_status) + ")");
     if (parsed.contains("error") && !parsed["error"].is_null())
-        throw RpcError(parsed["error"].dump());
-    // Move the result subtree out; a ternary would copy the whole DOM.
-    if (const auto it = parsed.find("result"); it != parsed.end())
-        return std::move(*it);
-    return nlohmann::json();
+        throw RpcError(glz::write_json(parsed["error"]).value_or("rpc error"));
+    // Move the result subtree out; a copy would duplicate the whole DOM.
+    if (parsed.contains("result"))
+        return std::move(parsed["result"]);
+    return glz::generic{};
 }
 
 BlockTemplate RpcClient::getblocktemplate_parsed() {
-    nlohmann::json request;
-    request["rules"] = nlohmann::json::array({"segwit"});
-    request["capabilities"] = nlohmann::json::array({"coinbasetxn", "workid", "coinbase/append"});
-    const std::string payload = nlohmann::json{{"jsonrpc", "1.0"},
-                                               {"id", ++next_id_},
-                                               {"method", "getblocktemplate"},
-                                               {"params", nlohmann::json::array({request})}}
-                                    .dump();
+    glz::generic request;
+    request["rules"] = glz::generic::array_t{"segwit"};
+    request["capabilities"] = glz::generic::array_t{"coinbasetxn", "workid", "coinbase/append"};
+    glz::generic envelope;
+    envelope["jsonrpc"] = "1.0";
+    envelope["id"] = static_cast<double>(++next_id_);
+    envelope["method"] = "getblocktemplate";
+    envelope["params"] = glz::generic::array_t{request};
+    const std::string payload = glz::write_json(envelope).value_or("");
 
     const size_t count = endpoints_.size();
     const size_t start = current_.load();
     std::string last_error;
     for (size_t i = 0; i < count; ++i) {
         const size_t index = (start + i) % count;
-        simdjson::dom::element doc;
         long http_status = 0;
+        BlockTemplate block_template;
         try {
             gbt_body_ = post_one(endpoints_[index], payload, poll_timeout_, &http_status);
-            doc = gbt_parser_.parse(gbt_body_);
+            block_template = BlockTemplate::from_gbt(gbt_body_);
+        } catch (const RpcError&) {
+            throw;
         } catch (const RpcConnectionError& e) {
             last_error = e.what();
             continue;
-        } catch (const simdjson::simdjson_error& e) {
+        } catch (const std::invalid_argument& e) {
             last_error = "unparseable body (HTTP " + std::to_string(http_status) + "): " + e.what();
             continue;
         }
-        // Validate the reply BEFORE sticking: any throw leaves current_ at `start`, so the next
-        // poll retries the recovering primary instead of being captured by a bad backup.
-        simdjson::dom::element error_field;
-        if (!doc["error"].get(error_field) && !error_field.is_null())
-            throw RpcError(simdjson::to_string(error_field));
-        simdjson::dom::element result;
-        if (doc["result"].get(result) || result.is_null())
-            throw RpcError("getblocktemplate reply has no result");
-        BlockTemplate block_template = BlockTemplate::from_simdjson(result);
         // Only now is this endpoint proven to be serving work.
         if (index != start) {
             size_t expected = start;
@@ -231,20 +227,21 @@ std::optional<std::string> RpcClient::submitblock(const std::string& block_hex) 
     payload += ",\"method\":\"submitblock\",\"params\":[\"";
     payload += block_hex;
     payload += "\"]}";
-    const nlohmann::json result = call_payload(payload, timeout_); // patient: never abort a block
+    const glz::generic result = call_payload(payload, timeout_); // patient: never abort a block
     if (result.is_null())
         return std::nullopt; // block accepted
     if (result.is_string())
         return result.get<std::string>();
-    return result.dump();
+    return glz::write_json(result).value_or("");
 }
 
-nlohmann::json RpcClient::validateaddress(const std::string& address) {
-    return call("validateaddress", nlohmann::json::array({address}));
+glz::generic RpcClient::validateaddress(const std::string& address) {
+    glz::generic params = glz::generic::array_t{address};
+    return call("validateaddress", params);
 }
 
 std::string RpcClient::getbestblockhash() {
-    return call("getbestblockhash", nlohmann::json::array(), poll_timeout_).get<std::string>();
+    return call("getbestblockhash", glz::generic{}, poll_timeout_).get<std::string>();
 }
 
 void RpcClient::maybe_failback(const std::string& expected_tip) {
@@ -255,11 +252,13 @@ void RpcClient::maybe_failback(const std::string& expected_tip) {
     if (now - last_failback_probe_.load() < kFailbackProbeSeconds)
         return;
     last_failback_probe_.store(now);
-    const std::string payload =
-        nlohmann::json{{"jsonrpc", "1.0"}, {"id", ++next_id_},
-                       {"method", "getbestblockhash"}, {"params", nlohmann::json::array()}}
-            .dump();
-    nlohmann::json result;
+    glz::generic request;
+    request["jsonrpc"] = "1.0";
+    request["id"] = static_cast<double>(++next_id_);
+    request["method"] = "getbestblockhash";
+    request["params"] = glz::generic::array_t{};
+    const std::string payload = glz::write_json(request).value_or("");
+    glz::generic result;
     try {
         result = call_one(endpoints_[0], payload, poll_timeout_);
     } catch (const std::exception&) {
@@ -269,17 +268,18 @@ void RpcClient::maybe_failback(const std::string& expected_tip) {
     }
     // Reachable but on a different tip (catching up / stuck / forked): failing back would pin
     // the pool to stale work. Wait until it reports the tip we mine on.
-    if (!result.is_string() || result.get_ref<const std::string&>() != expected_tip)
+    if (!result.is_string() || result.get<std::string>() != expected_tip)
         return;
     current_.store(0);
     log::info("bitcoind RPC failed back to the primary {}", util::redact_url(endpoints_[0].url));
 }
 
-nlohmann::json RpcClient::getblockheader(const std::string& block_hash) {
-    return call("getblockheader", nlohmann::json::array({block_hash}));
+glz::generic RpcClient::getblockheader(const std::string& block_hash) {
+    glz::generic params = glz::generic::array_t{block_hash};
+    return call("getblockheader", params);
 }
 
-nlohmann::json RpcClient::getblockchaininfo() {
+glz::generic RpcClient::getblockchaininfo() {
     return call("getblockchaininfo");
 }
 

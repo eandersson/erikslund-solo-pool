@@ -6,9 +6,6 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-#include <simdjson.h>
-
 #include "util/bytes.hpp"
 #include "util/sha256.hpp"
 
@@ -28,8 +25,7 @@ struct BlockTemplate {
     Bytes txn_data;                            // all raw tx bytes, template order
     std::vector<util::Hash256> txids_internal; // internal byte order, template order
 
-    static BlockTemplate from_json(const nlohmann::json& result);
-    static BlockTemplate from_simdjson(const simdjson::dom::element& result);
+    static BlockTemplate from_gbt(const std::string& response_json);
 };
 
 } // namespace erikslund::bitcoin

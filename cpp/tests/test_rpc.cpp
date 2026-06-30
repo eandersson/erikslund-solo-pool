@@ -1,9 +1,8 @@
 #include <doctest/doctest.h>
 
 #include <stdexcept>
+#include <string>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "bitcoin/rpc_client.hpp"
 #include "bitcoin/rpc_endpoint.hpp"
@@ -14,14 +13,14 @@ using namespace erikslund;
 TEST_CASE("bitcoin_nodes parse and keep failover order") {
     // bitcoin_nodes[0] is the primary; the rest are failover. An entry that omits
     // username/password inherits the primary's credentials.
-    const auto j = nlohmann::json::parse(R"({
+    const std::string j = R"({
         "bitcoin_nodes": [
             {"address": "http://primary:8332", "username": "erikslund", "password": "x"},
             {"address": "http://backup1:8332", "username": "u1", "password": "p1"},
             {"address": "backup2:8332"}
         ]
-    })");
-    const Config config = Config::from_json(j);
+    })";
+    const Config config = Config::from_string(j);
     REQUIRE(config.rpc_failover.size() == 2);
 
     const auto endpoints = config.rpc_endpoints();
@@ -34,22 +33,22 @@ TEST_CASE("bitcoin_nodes parse and keep failover order") {
 }
 
 TEST_CASE("no rpc_failover -> a single endpoint") {
-    const Config config = Config::from_json(nlohmann::json::object());
+    const Config config = Config::from_string("{}");
     CHECK(config.rpc_endpoints().size() == 1);
 }
 
 TEST_CASE("multi-port config parses") {
-    const auto j = nlohmann::json::parse(R"({
+    const std::string j = R"({
         "stratum_listen": ["0.0.0.0:3333", "0.0.0.0:4444"]
-    })");
-    const Config config = Config::from_json(j);
+    })";
+    const Config config = Config::from_string(j);
     REQUIRE(config.stratum_ports().size() == 2);
     CHECK(config.stratum_ports()[0] == 3333);
     CHECK(config.stratum_ports()[1] == 4444);
 }
 
 TEST_CASE("default stratum port is the single bind_port") {
-    const Config config = Config::from_json(nlohmann::json::object());
+    const Config config = Config::from_string("{}");
     CHECK(config.stratum_ports() == std::vector<uint16_t>{3333});
 }
 
@@ -72,13 +71,13 @@ TEST_CASE("RpcClient rejects an empty endpoint list") {
 }
 
 TEST_CASE("RpcClient is constructible straight from Config::rpc_endpoints()") {
-    const auto j = nlohmann::json::parse(R"({
+    const std::string j = R"({
         "bitcoin_nodes": [
             {"address": "http://primary:8332", "username": "u", "password": "p"},
             {"address": "backup:8332"}
         ]
-    })");
-    const Config config = Config::from_json(j);
+    })";
+    const Config config = Config::from_string(j);
     bitcoin::RpcClient rpc(config.rpc_endpoints());
     CHECK(rpc.endpoint_count() == 2);
 }

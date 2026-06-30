@@ -55,8 +55,8 @@ TEST_CASE("build_pool_status computes best_share_percent against the network dif
     s.uptime = 10;
     s.network_diff = 1000.0;
     s.best_share = 250.0; // 25% of the network difficulty
-    const auto status = build_pool_status(s);
-    CHECK(status["shares"]["best_share_percent"] == doctest::Approx(25.0));
+    auto status = build_pool_status(s);
+    CHECK(status["shares"]["best_share_percent"].get<double>() == doctest::Approx(25.0));
     CHECK_FALSE(status["shares"].contains("progress_to_block_percent"));
     CHECK_FALSE(status["pool_stat"].contains("time_to_block_seconds"));
 }
@@ -65,8 +65,8 @@ TEST_CASE("build_pool_status best_share_percent is zero when the network diff is
     api::PoolSnapshot s;
     s.uptime = 10;
     s.best_share = 250.0; // no network_diff set
-    const auto status = build_pool_status(s);
-    CHECK(status["shares"]["best_share_percent"] == doctest::Approx(0.0));
+    auto status = build_pool_status(s);
+    CHECK(status["shares"]["best_share_percent"].get<double>() == doctest::Approx(0.0));
 }
 
 TEST_CASE("build_pool_status reports users, workers, and runtime when idle") {
@@ -74,10 +74,10 @@ TEST_CASE("build_pool_status reports users, workers, and runtime when idle") {
     s.uptime = 5;
     s.users = 0;
     s.connected = 0;
-    const auto status = build_pool_status(s);
-    CHECK(status["pool_stat"]["users"] == 0);
-    CHECK(status["pool_stat"]["workers"] == 0);
-    CHECK(status["pool_stat"]["runtime"] == 5);
+    auto status = build_pool_status(s);
+    CHECK(status["pool_stat"]["users"].get<double>() == 0);
+    CHECK(status["pool_stat"]["workers"].get<double>() == 0);
+    CHECK(status["pool_stat"]["runtime"].get<double>() == 5);
     CHECK_FALSE(status["pool_stat"].contains("Idle"));
     CHECK_FALSE(status["pool_stat"].contains("Disconnected"));
     CHECK_FALSE(status["pool_stat"].contains("time_to_block_seconds"));
@@ -85,23 +85,23 @@ TEST_CASE("build_pool_status reports users, workers, and runtime when idle") {
 
 TEST_CASE("build_user_stats returns empty fields for an unknown address") {
     api::PoolSnapshot s; // no clients
-    const auto user = build_user_stats("ghost", s);
-    CHECK(user["workers"] == 0);
-    CHECK(user["shares_accepted"] == 0);
-    CHECK(user["bestshare"] == doctest::Approx(0.0));
+    auto user = build_user_stats("ghost", s);
+    CHECK(user["workers"].get<double>() == 0);
+    CHECK(user["shares_accepted"].get<double>() == 0);
+    CHECK(user["bestshare"].get<double>() == doctest::Approx(0.0));
     CHECK(user["worker"].is_array());
-    CHECK(user["worker"].empty());
+    CHECK(user["worker"].get_array().empty());
     // All seven hashrate windows still present, all "0".
-    CHECK(user["hashrate1m"] == "0");
-    CHECK(user["hashrate7d"] == "0");
-    CHECK(user["blocks"] == 0);
+    CHECK(user["hashrate1m"].get<std::string>() == "0");
+    CHECK(user["hashrate7d"].get<std::string>() == "0");
+    CHECK(user["blocks"].get<double>() == 0);
 }
 
 TEST_CASE("build_user_stats attributes accepted blocks to the payout address") {
     api::PoolSnapshot s;
     s.blocks_by_address["addr1"] = 2;
-    CHECK(build_user_stats("addr1", s)["blocks"] == 2);
-    CHECK(build_user_stats("other", s)["blocks"] == 0);
+    CHECK(build_user_stats("addr1", s)["blocks"].get<double>() == 2);
+    CHECK(build_user_stats("other", s)["blocks"].get<double>() == 0);
 }
 
 TEST_CASE("read_pool_status tolerates a malformed file and a missing shares block") {
@@ -142,26 +142,26 @@ TEST_CASE("build_pool_status has the C pool's shape") {
                           1e6 / kNonces, 5e5 / kNonces, 1e5 / kNonces};
     s.sps_windows = {1.234567, 0.5, 0.25, 0.125};
 
-    const auto status = build_pool_status(s);
-    CHECK(status["pool_stat"]["users"] == 2);
-    CHECK(status["pool_stat"]["workers"] == 3);
-    CHECK(status["shares"]["best_share_percent"] == doctest::Approx(4.5)); // 45 / 1000 * 100
+    auto status = build_pool_status(s);
+    CHECK(status["pool_stat"]["users"].get<double>() == 2);
+    CHECK(status["pool_stat"]["workers"].get<double>() == 3);
+    CHECK(status["shares"]["best_share_percent"].get<double>() == doctest::Approx(4.5)); // 45/1000*100
     // lastupdate is an RFC 9557 UTC timestamp string, e.g. "2026-06-04T11:31:24Z[UTC]".
     CHECK(status["pool_stat"]["lastupdate"].is_string());
     CHECK(status["pool_stat"]["lastupdate"].get<std::string>().ends_with("Z[UTC]"));
-    CHECK(status["shares"]["accepted"] == 123);
-    CHECK(status["shares"]["rejected"] == 2);
-    CHECK(status["shares"]["bestshare"] == 45);
+    CHECK(status["shares"]["accepted"].get<double>() == 123);
+    CHECK(status["shares"]["rejected"].get<double>() == 2);
+    CHECK(status["shares"]["bestshare"].get<double>() == 45);
     // Per-window hashrate strings differ window to window.
-    CHECK(status["hashrate"]["hashrate1m"] == "5M");
-    CHECK(status["hashrate"]["hashrate5m"] == "4M");
-    CHECK(status["hashrate"]["hashrate7d"] == "100K");
-    CHECK(status["hashrate"].size() == 7); // seven decaying windows
+    CHECK(status["hashrate"]["hashrate1m"].get<std::string>() == "5M");
+    CHECK(status["hashrate"]["hashrate5m"].get<std::string>() == "4M");
+    CHECK(status["hashrate"]["hashrate7d"].get<std::string>() == "100K");
+    CHECK(status["hashrate"].get_object().size() == 7); // seven decaying windows
     // SPS fields are shares_per_second_*, rounded to 5 decimals.
-    CHECK(status["shares"]["shares_per_second_1m"] == doctest::Approx(1.23457));
-    CHECK(status["shares"]["shares_per_second_5m"] == doctest::Approx(0.5));
-    CHECK(status["shares"]["shares_per_second_15m"] == doctest::Approx(0.25));
-    CHECK(status["shares"]["shares_per_second_1h"] == doctest::Approx(0.125));
+    CHECK(status["shares"]["shares_per_second_1m"].get<double>() == doctest::Approx(1.23457));
+    CHECK(status["shares"]["shares_per_second_5m"].get<double>() == doctest::Approx(0.5));
+    CHECK(status["shares"]["shares_per_second_15m"].get<double>() == doctest::Approx(0.25));
+    CHECK(status["shares"]["shares_per_second_1h"].get<double>() == doctest::Approx(0.125));
     CHECK_FALSE(status["shares"].contains("SPS1m"));
 }
 
@@ -443,20 +443,21 @@ TEST_CASE("build_user_stats renders the persistent registry rows; address = thei
     // Two live connections for addr1 drive the "workers" count (rows persist past disconnect).
     s.clients = {make_conn("addr1", "w1"), make_conn("addr1", "w2")};
 
-    const auto user = build_user_stats("addr1", s);
-    CHECK(user["workers"] == 2); // live connection count
-    CHECK(user["shares_accepted"] == 5);
-    CHECK(user["shares_rejected"] == 1);
-    CHECK(user["bestshare"] == doctest::Approx(9.0));
-    CHECK(user["lastshare"] == format_rfc9557(200));
-    REQUIRE(user["worker"].size() == 2);          // one row per name
-    CHECK(user["worker"][0]["workername"] == "w1"); // sorted by name
-    CHECK(user["worker"][0]["hashrate1m"] == "5M");
-    CHECK(user["worker"][0]["shares_rejected"] == 1);
-    CHECK_FALSE(user["worker"][0].contains("difficulty")); // not unique per name
-    CHECK(user["worker"][0].contains("last_share_age"));
+    auto user = build_user_stats("addr1", s);
+    CHECK(user["workers"].get<double>() == 2); // live connection count
+    CHECK(user["shares_accepted"].get<double>() == 5);
+    CHECK(user["shares_rejected"].get<double>() == 1);
+    CHECK(user["bestshare"].get<double>() == doctest::Approx(9.0));
+    CHECK(user["lastshare"].get<std::string>() == format_rfc9557(200));
+    auto& rows = user["worker"].get_array();
+    REQUIRE(rows.size() == 2);                       // one row per name
+    CHECK(rows[0]["workername"].get<std::string>() == "w1"); // sorted by name
+    CHECK(rows[0]["hashrate1m"].get<std::string>() == "5M");
+    CHECK(rows[0]["shares_rejected"].get<double>() == 1);
+    CHECK_FALSE(rows[0].contains("difficulty")); // not unique per name
+    CHECK(rows[0].contains("last_share_age"));
     // Address-level windows are the SUM of the two rows (10e6 -> "10M").
-    CHECK(user["hashrate1m"] == "10M");
+    CHECK(user["hashrate1m"].get<std::string>() == "10M");
     CHECK(user.contains("hashrate6hr"));
 }
 
@@ -464,21 +465,23 @@ TEST_CASE("a persistent worker row renders even with zero live connections (post
     api::PoolSnapshot s;
     s.workers = {make_worker("addr1", "w1", 7, 0, 9.0, 140, 4e6)};
     // No clients: the worker disconnected, but its registry row persists (decaying).
-    const auto user = build_user_stats("addr1", s);
-    CHECK(user["workers"] == 0);          // nobody connected
-    CHECK(user["shares_accepted"] == 7);  // ...but the accumulated shares survive
-    REQUIRE(user["worker"].size() == 1);
-    CHECK(user["worker"][0]["workername"] == "w1");
-    CHECK(user["worker"][0]["hashrate1m"] == "4M");
+    auto user = build_user_stats("addr1", s);
+    CHECK(user["workers"].get<double>() == 0);          // nobody connected
+    CHECK(user["shares_accepted"].get<double>() == 7);  // ...but the accumulated shares survive
+    auto& rows = user["worker"].get_array();
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0]["workername"].get<std::string>() == "w1");
+    CHECK(rows[0]["hashrate1m"].get<std::string>() == "4M");
 }
 
 TEST_CASE("the bare-address registry bucket renders under the address name") {
     api::PoolSnapshot s;
     s.workers = {make_worker("addr1", "", 5, 1, 3.0, 130, 2e6),   // overflow/unnamed bucket
                  make_worker("addr1", "w1", 1, 0, 9.0, 140, 1e6)};
-    const auto user = build_user_stats("addr1", s);
-    REQUIRE(user["worker"].size() == 2);
-    CHECK(user["worker"][0]["workername"] == "addr1"); // "" sorts first, renders as the address
-    CHECK(user["worker"][0]["shares_accepted"] == 5);
-    CHECK(user["worker"][1]["workername"] == "w1");
+    auto user = build_user_stats("addr1", s);
+    auto& rows = user["worker"].get_array();
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0]["workername"].get<std::string>() == "addr1"); // "" sorts first, renders as address
+    CHECK(rows[0]["shares_accepted"].get<double>() == 5);
+    CHECK(rows[1]["workername"].get<std::string>() == "w1");
 }

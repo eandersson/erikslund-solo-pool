@@ -13,9 +13,8 @@
 #include <thread>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "bitcoin/block_template.hpp"
+#include "gbt_fixture.hpp"
 #include "stratum/job.hpp"
 #include "util/difficulty.hpp"
 #include "util/hex.hpp"
@@ -23,23 +22,24 @@
 using namespace erikslund;
 using namespace erikslund::stratum;
 using namespace erikslund::util;
+using namespace erikslund::test;
 
 namespace {
 Job bench_job() {
-    nlohmann::json tx1;
-    tx1["data"] = "0123456789abcdef";
+    gbt_json tx1 = gbt_json::object_t{};
+    tx1["data"] = std::string("0123456789abcdef");
     tx1["txid"] = std::string(64, '1');
-    nlohmann::json t;
+    gbt_json t = gbt_json::object_t{};
     t["height"] = 170;
     t["version"] = 0x20000000;
     t["curtime"] = 1700000000;
-    t["bits"] = "1d00ffff"; // hard target -> the share is above target -> full work, reject path
+    t["bits"] = std::string("1d00ffff"); // hard target -> the share is above target -> full work, reject path
     t["coinbasevalue"] = 5000000000LL;
-    t["previousblockhash"] = "00000000000000000000abcdef0123456789abcdef0123456789abcdef012345";
+    t["previousblockhash"] = std::string("00000000000000000000abcdef0123456789abcdef0123456789abcdef012345");
     t["default_witness_commitment"] = std::string("6a24aa21a9ed") + std::string(64, '0');
-    t["transactions"] = nlohmann::json::array();
-    t["transactions"].push_back(tx1);
-    const auto bt = bitcoin::BlockTemplate::from_json(t);
+    t["transactions"] = gbt_json::array_t{};
+    t["transactions"].get_array().push_back(std::move(tx1));
+    const auto bt = from_template(t);
     const Bytes tag{'/', 'b', '/'};
     return Job("job1", bt, tag, 4, 4, 1);
 }

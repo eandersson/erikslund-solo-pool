@@ -8,8 +8,7 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-#include <simdjson.h>
+#include <glaze/glaze.hpp>
 
 #include "bitcoin/block_template.hpp"
 #include "bitcoin/rpc_endpoint.hpp"
@@ -22,17 +21,17 @@ public:
               long timeout_seconds = 30);
     explicit RpcClient(const std::vector<RpcEndpoint>& endpoints, long timeout_seconds = 30);
 
-    nlohmann::json call(const std::string& method,
-                        const nlohmann::json& params = nlohmann::json::array(), long timeout = 0);
+    glz::generic call(const std::string& method, const glz::generic& params = glz::generic{},
+                      long timeout = 0);
 
     BlockTemplate getblocktemplate_parsed();
     std::optional<std::string> submitblock(const std::string& block_hex);
-    nlohmann::json validateaddress(const std::string& address);
-    nlohmann::json getblockchaininfo();
+    glz::generic validateaddress(const std::string& address);
+    glz::generic getblockchaininfo();
     // Cheap tip probe that gates the multi-MB getblocktemplate poll.
     std::string getbestblockhash();
     // Verbose header (height/bits/mediantime); grounds the fastblock empty job.
-    nlohmann::json getblockheader(const std::string& block_hash);
+    glz::generic getblockheader(const std::string& block_hash);
 
     size_t endpoint_count() const { return endpoints_.size(); }
 
@@ -49,13 +48,13 @@ protected:
         std::string url;
         std::string auth_header;
     };
-    virtual nlohmann::json call_one(const Resolved& endpoint, const std::string& payload,
-                                    long timeout);
+    virtual glz::generic call_one(const Resolved& endpoint, const std::string& payload,
+                                  long timeout);
     virtual std::string post_one(const Resolved& endpoint, const std::string& payload, long timeout,
                                  long* http_status = nullptr);
 
 private:
-    nlohmann::json call_payload(const std::string& payload, long timeout);
+    glz::generic call_payload(const std::string& payload, long timeout);
 
     std::vector<Resolved> endpoints_;
     std::atomic<size_t> current_{0};
@@ -65,9 +64,8 @@ private:
     std::atomic<int> next_id_{0};
     std::atomic<double> last_failback_probe_{-std::numeric_limits<double>::infinity()};
 
-    // getblocktemplate_parsed() only (single caller thread); buffer + parser arena reused across polls.
+    // getblocktemplate_parsed() only (single caller thread); response buffer reused across polls.
     std::string gbt_body_;
-    simdjson::dom::parser gbt_parser_;
 };
 
 } // namespace erikslund::bitcoin

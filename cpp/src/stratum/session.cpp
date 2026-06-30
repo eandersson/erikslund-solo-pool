@@ -16,6 +16,9 @@
 
 namespace erikslund::stratum {
 
+// File-local only (not in session.hpp): the dynamic JSON-RPC DOM type.
+using json = glz::generic;
+
 namespace {
 // Append `value` lowercased (no padding). For length-meaningful fields (job_id, and extranonce2
 // which goes raw into the coinbase, so "ab" != "00ab") a short value must NOT collapse onto a
@@ -119,7 +122,7 @@ Session::SessionStats Session::stats() const {
 }
 
 void Session::send(const json& message) {
-    connection_.send_line(message.dump());
+    connection_.send_line(glz::write_json(message).value_or(""));
 }
 
 void Session::send_result(const json& id, json result) {
@@ -200,7 +203,10 @@ void Session::send_set_difficulty() {
 }
 
 std::string Session::set_difficulty_line() {
-    return make_notification("mining.set_difficulty", json::array({difficulty_})).dump();
+    json params = json::array_t{};
+    params.get_array().emplace_back(json(difficulty_));
+    return glz::write_json(make_notification("mining.set_difficulty", std::move(params)))
+        .value_or("");
 }
 
 void Session::do_send_set_difficulty() {
@@ -270,12 +276,21 @@ void Session::handle_subscribe(const json& id, const std::vector<std::string>& p
         user_agent_ = log::sanitize(params[0]);
     subscribed_ = true;
     const std::string subscription_id = extranonce1_hex_;
-    send_result(id, json::array({
-                        json::array({json::array({"mining.set_difficulty", subscription_id}),
-                                     json::array({"mining.notify", subscription_id})}),
-                        extranonce1_hex_,
-                        pool_.extranonce2_size(),
-                    }));
+    // result = [[["mining.set_difficulty", <sub>], ["mining.notify", <sub>]], <enonce1>, <en2size>]
+    json set_difficulty_entry = json::array_t{};
+    set_difficulty_entry.get_array().emplace_back(json(std::string("mining.set_difficulty")));
+    set_difficulty_entry.get_array().emplace_back(json(subscription_id));
+    json notify_entry = json::array_t{};
+    notify_entry.get_array().emplace_back(json(std::string("mining.notify")));
+    notify_entry.get_array().emplace_back(json(subscription_id));
+    json subscriptions = json::array_t{};
+    subscriptions.get_array().push_back(std::move(set_difficulty_entry));
+    subscriptions.get_array().push_back(std::move(notify_entry));
+    json result = json::array_t{};
+    result.get_array().push_back(std::move(subscriptions));
+    result.get_array().emplace_back(json(extranonce1_hex_));
+    result.get_array().emplace_back(json(static_cast<double>(pool_.extranonce2_size())));
+    send_result(id, std::move(result));
     // Client authorized BEFORE subscribing (unusual): it has no job yet, so send work now instead
     // of waiting for the next pool broadcast.
     if (authorized_ && payout_script_)
@@ -283,7 +298,7 @@ void Session::handle_subscribe(const json& id, const std::vector<std::string>& p
 }
 
 void Session::handle_configure(const Request& request) {
-    json result = json::object();
+    json result = json::object_t{};
     if (request.configure_version_rolling) {
         uint32_t client_mask = 0xffffffff;
         if (request.version_rolling_mask_present) {

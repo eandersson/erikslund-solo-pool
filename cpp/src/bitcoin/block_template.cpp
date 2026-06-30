@@ -3,9 +3,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <vector>
 
+#include <glaze/glaze.hpp>
+
+#include "core/errors.hpp"
 #include "util/endian.hpp"
 #include "util/hex.hpp"
 
@@ -49,107 +55,86 @@ uint32_t require_header_u32(int64_t value, const char* field) {
     return static_cast<uint32_t>(value);
 }
 
-} // namespace
+struct GbtTransaction {
+    std::optional<std::string> data;
+    std::optional<std::string> txid;
+    std::optional<std::string> hash;
+};
 
-BlockTemplate BlockTemplate::from_json(const nlohmann::json& result) {
-    BlockTemplate block_template;
-    block_template.height = result.at("height").get<int64_t>();
-    block_template.version = require_header_u32(result.at("version").get<int64_t>(), "version");
-    block_template.curtime = require_header_u32(result.at("curtime").get<int64_t>(), "curtime");
-    block_template.bits_hex = result.at("bits").get<std::string>();
-    block_template.bits = util::parse_hex_u32(block_template.bits_hex);
-    block_template.coinbase_value = result.at("coinbasevalue").get<uint64_t>();
-    block_template.previousblockhash = result.at("previousblockhash").get<std::string>();
+struct GbtReply {
+    std::optional<int64_t> height;
+    std::optional<int64_t> version;
+    std::optional<int64_t> curtime;
+    std::optional<std::string> bits;
+    std::optional<uint64_t> coinbasevalue;
+    std::optional<std::string> previousblockhash;
+    std::optional<std::vector<glz::generic>> rules;
+    std::optional<std::string> default_witness_commitment;
+    std::optional<std::vector<GbtTransaction>> transactions;
+};
 
-    if (const auto rules = result.find("rules"); rules != result.end() && rules->is_array())
-        for (const auto& rule : *rules) {
-            if (!rule.is_string())
-                continue;
-            check_mandatory_rule(rule.get_ref<const std::string&>());
-        }
+struct GbtEnvelope {
+    std::optional<GbtReply> result;
+    glz::generic error; // null when the call succeeded
+};
 
-    const auto commitment = result.find("default_witness_commitment");
-    if (commitment != result.end() && commitment->is_string())
-        block_template.witness_commitment = util::from_hex(commitment->get_ref<const std::string&>());
-
-    const auto transactions = result.find("transactions");
-    if (transactions != result.end() && transactions->is_array()) {
-        block_template.txn_count = static_cast<uint32_t>(transactions->size());
-        block_template.txids_internal.reserve(transactions->size());
-        // Size the multi-MB blob once to avoid geometric-growth recopies.
-        const size_t total_hex = std::ranges::fold_left(
-            *transactions, size_t{0}, [](size_t running_total, const nlohmann::json& tx) {
-                return running_total + tx.at("data").get_ref<const std::string&>().size();
-            });
-        block_template.txn_data.reserve(total_hex / 2);
-        for (const auto& tx : *transactions) {
-            std::optional<std::string_view> txid;
-            std::optional<std::string_view> hash;
-            if (const auto it = tx.find("txid"); it != tx.end())
-                txid = it->get_ref<const std::string&>();
-            if (const auto it = tx.find("hash"); it != tx.end() && it->is_string())
-                hash = it->get_ref<const std::string&>();
-            append_transaction(block_template, tx.at("data").get_ref<const std::string&>(), txid,
-                               hash);
-        }
-    }
-    return block_template;
+template <typename T>
+const T& require_field(const std::optional<T>& field, const char* name) {
+    if (!field)
+        throw std::invalid_argument(std::string("getblocktemplate missing field: ") + name);
+    return *field;
 }
 
-BlockTemplate BlockTemplate::from_simdjson(const simdjson::dom::element& result) {
-    // Throw std::invalid_argument with field context (the exception family the refresh loop catches).
-    const auto require = [](auto value_result, const char* what) {
-        if (value_result.error())
-            throw std::invalid_argument(std::string("getblocktemplate field missing/invalid: ") +
-                                        what);
-        return std::move(value_result).value();
-    };
+} // namespace
+
+BlockTemplate BlockTemplate::from_gbt(const std::string& response_json) {
+    GbtEnvelope envelope;
+    // Lenient: ignore the envelope "id" + the GBT fields we don't use.
+    constexpr glz::opts opts{.error_on_unknown_keys = false};
+    if (const auto ec = glz::read<opts>(envelope, response_json))
+        throw std::invalid_argument("getblocktemplate reply is not valid JSON: " +
+                                    glz::format_error(ec, response_json));
+    if (!envelope.error.is_null())
+        throw RpcError(glz::write_json(envelope.error).value_or("getblocktemplate error"));
+    if (!envelope.result)
+        throw std::invalid_argument("getblocktemplate reply has no result");
+    const GbtReply& reply = *envelope.result;
 
     BlockTemplate block_template;
-    block_template.height = require(result["height"].get_int64(), "height");
-    block_template.version =
-        require_header_u32(require(result["version"].get_int64(), "version"), "version");
-    block_template.curtime =
-        require_header_u32(require(result["curtime"].get_int64(), "curtime"), "curtime");
-    block_template.bits_hex = std::string(require(result["bits"].get_string(), "bits"));
+    block_template.height = require_field(reply.height, "height");
+    block_template.version = require_header_u32(require_field(reply.version, "version"), "version");
+    block_template.curtime = require_header_u32(require_field(reply.curtime, "curtime"), "curtime");
+    block_template.bits_hex = require_field(reply.bits, "bits");
     block_template.bits = util::parse_hex_u32(block_template.bits_hex);
-    block_template.coinbase_value =
-        require(result["coinbasevalue"].get_uint64(), "coinbasevalue");
-    block_template.previousblockhash =
-        std::string(require(result["previousblockhash"].get_string(), "previousblockhash"));
+    block_template.coinbase_value = require_field(reply.coinbasevalue, "coinbasevalue");
+    block_template.previousblockhash = require_field(reply.previousblockhash, "previousblockhash");
 
-    simdjson::dom::array rules;
-    if (!result["rules"].get(rules))
-        for (const simdjson::dom::element rule : rules) {
-            std::string_view name;
-            if (rule.get(name)) // skip non-string entries
-                continue;
-            check_mandatory_rule(name);
-        }
+    if (reply.rules)
+        for (const auto& rule : *reply.rules)
+            if (rule.is_string()) // skip non-string entries (parity with the Python pool's isinstance guard)
+                check_mandatory_rule(rule.get<std::string>());
 
     // Present-and-string gate; an empty string still marks a segwit-aware server (drives the txid gate).
-    std::string_view commitment;
-    if (!result["default_witness_commitment"].get(commitment))
-        block_template.witness_commitment = util::from_hex(commitment);
+    if (reply.default_witness_commitment)
+        block_template.witness_commitment = util::from_hex(*reply.default_witness_commitment);
 
-    simdjson::dom::array transactions;
-    if (!result["transactions"].get(transactions)) {
+    if (reply.transactions) {
+        const auto& transactions = *reply.transactions;
         block_template.txn_count = static_cast<uint32_t>(transactions.size());
         block_template.txids_internal.reserve(transactions.size());
         size_t total_hex = 0;
-        for (const simdjson::dom::element tx : transactions)
-            total_hex += require(tx["data"].get_string(), "transaction data").size();
+        for (const auto& tx : transactions)
+            total_hex += require_field(tx.data, "transaction data").size();
         block_template.txn_data.reserve(total_hex / 2);
-        for (const simdjson::dom::element tx : transactions) {
+        for (const auto& tx : transactions) {
             std::optional<std::string_view> txid;
             std::optional<std::string_view> hash;
-            std::string_view value;
-            if (!tx["txid"].get(value))
-                txid = value;
-            if (!tx["hash"].get(value))
-                hash = value;
-            append_transaction(block_template,
-                               require(tx["data"].get_string(), "transaction data"), txid, hash);
+            if (tx.txid)
+                txid = *tx.txid;
+            if (tx.hash)
+                hash = *tx.hash;
+            append_transaction(block_template, require_field(tx.data, "transaction data"), txid,
+                               hash);
         }
     }
     return block_template;

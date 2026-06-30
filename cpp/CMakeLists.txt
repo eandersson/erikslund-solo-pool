@@ -46,12 +46,10 @@ if(SANITIZE)
 endif()
 
 # ---- dependencies ------------------------------------------------------------
-# nlohmann/json and doctest are header-only and installed on the default include
-# path by their -dev packages, so they need no find_package(). libcurl needs a
-# link target.
+# Glaze (JSON/YAML) and doctest are header-only, installed on the default include path by their
+# -dev packages, so they need no find_package(). libcurl + zmq need link targets.
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
-find_package(simdjson CONFIG REQUIRED)  # fast Stratum JSON parsing (hot path)
 find_library(ZMQ_LIBRARY zmq REQUIRED)
 # yaml-cpp: config files + on-disk stats (pool.status / users/) are YAML. The
 # HTTP API stays JSON. Prefer the package's CMake config; fall back to a plain
@@ -94,7 +92,7 @@ list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
 
 add_library(erikslund_core STATIC ${CORE_SOURCES} ${BTC_CRYPTO_SOURCES})
 target_include_directories(erikslund_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${BTC_DIR})
-target_link_libraries(erikslund_core PUBLIC Threads::Threads CURL::libcurl ${ZMQ_LIBRARY} simdjson::simdjson)
+target_link_libraries(erikslund_core PUBLIC Threads::Threads CURL::libcurl ${ZMQ_LIBRARY})
 # yaml-cpp: prefer the imported target from find_package; else the raw library.
 if(yaml-cpp_FOUND)
     target_link_libraries(erikslund_core PUBLIC yaml-cpp)

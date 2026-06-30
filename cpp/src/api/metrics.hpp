@@ -3,7 +3,7 @@
 #include <optional>
 #include <string>
 
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 #include "api/snapshot.hpp"
 
@@ -11,15 +11,15 @@ namespace erikslund::api {
 
 std::string build_prometheus(const PoolSnapshot& snapshot);
 
-nlohmann::json status_json(const PoolSnapshot& snapshot);
-nlohmann::json pool_stats_json(const PoolSnapshot& snapshot);
-nlohmann::json stratifier_stats_json(const PoolSnapshot& snapshot);
-nlohmann::json connector_stats_json(const PoolSnapshot& snapshot);
-nlohmann::json generator_stats_json(const PoolSnapshot& snapshot);
-nlohmann::json metrics_json(const PoolSnapshot& snapshot);
+glz::generic status_json(const PoolSnapshot& snapshot);
+glz::generic pool_stats_json(const PoolSnapshot& snapshot);
+glz::generic stratifier_stats_json(const PoolSnapshot& snapshot);
+glz::generic connector_stats_json(const PoolSnapshot& snapshot);
+glz::generic generator_stats_json(const PoolSnapshot& snapshot);
+glz::generic metrics_json(const PoolSnapshot& snapshot);
 
-std::optional<nlohmann::json> client_stats_json(const PoolSnapshot& snapshot,
-                                                const std::string& address);
+std::optional<glz::generic> client_stats_json(const PoolSnapshot& snapshot,
+                                              const std::string& address);
 
 std::string dashboard_html(const PoolSnapshot& snapshot);
 

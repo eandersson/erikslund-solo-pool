@@ -4,8 +4,6 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "bitcoin/rpc_endpoint.hpp"
 
 namespace erikslund {
@@ -97,7 +95,7 @@ struct Config {
         return bind_ports.empty() ? std::vector<uint16_t>{bind_port} : bind_ports;
     }
 
-    static Config from_json(const nlohmann::json& object);
+    static Config from_string(const std::string& text);
     static Config from_file(const std::string& path);
 };
 

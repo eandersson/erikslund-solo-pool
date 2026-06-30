@@ -21,8 +21,6 @@
 #include <thread>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "api/snapshot.hpp"
 #include "bitcoin/network.hpp"
 #include "bitcoin/rpc_client.hpp"

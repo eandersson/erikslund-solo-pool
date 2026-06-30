@@ -63,6 +63,10 @@ bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
+std::string redacted_rpc_url(const PoolSnapshot& s) {
+    return generator_stats_json(s)["rpc_url"].get<std::string>();
+}
+
 } // namespace
 
 TEST_CASE("prometheus emits every expected metric name + TYPE") {
@@ -106,47 +110,46 @@ TEST_CASE("optional gauges are omitted with no job, counters remain") {
 TEST_CASE("JSON bodies match the C/Python contract") {
     const auto s = sample();
 
-    const auto st = status_json(s);
-    CHECK(st["name"] == "erikslund-solo-pool");
+    auto st = status_json(s);
+    CHECK(st["name"].get<std::string>() == "erikslund-solo-pool");
     CHECK_FALSE(st.contains("mode"));
-    CHECK(st["bitcoind_connected"] == true);
-    CHECK(st["work_ready"] == true);
-    CHECK(st["accepting_connections"] == true);
-    CHECK(st["ready"] == true);
+    CHECK(st["bitcoind_connected"].get<bool>() == true);
+    CHECK(st["work_ready"].get<bool>() == true);
+    CHECK(st["accepting_connections"].get<bool>() == true);
+    CHECK(st["ready"].get<bool>() == true);
 
-    const auto ps = pool_stats_json(s);
-    CHECK(ps["height"] == 200);
-    CHECK(ps["blocks_found"] == 3);
-    CHECK(ps["workers"] == 2);
-    CHECK(ps["shares_rejected"] == 1);
-    CHECK(ps["best_share_percent"] == doctest::Approx(750.0)); // best_share 7.5 / network_diff 1.0
-    CHECK(ps["hashrate_estimate"] == doctest::Approx(12345.0));
+    auto ps = pool_stats_json(s);
+    CHECK(ps["height"].get<double>() == 200);
+    CHECK(ps["blocks_found"].get<double>() == 3);
+    CHECK(ps["workers"].get<double>() == 2);
+    CHECK(ps["shares_rejected"].get<double>() == 1);
+    CHECK(ps["best_share_percent"].get<double>() == doctest::Approx(750.0)); // 7.5 / 1.0 * 100
+    CHECK(ps["hashrate_estimate"].get<double>() == doctest::Approx(12345.0));
 
-    const auto cs = connector_stats_json(s);
-    CHECK(cs["workers"] == 2);
-    CHECK(cs["subscribed"] == 1);
-    CHECK(cs["authorized"] == 1);
+    auto cs = connector_stats_json(s);
+    CHECK(cs["workers"].get<double>() == 2);
+    CHECK(cs["subscribed"].get<double>() == 1);
+    CHECK(cs["authorized"].get<double>() == 1);
 
-    const auto m = metrics_json(s);
+    auto m = metrics_json(s);
     CHECK_FALSE(m.contains("mode"));
-    CHECK(m["bitcoind_connected"] == true);
-    CHECK(m["pool"]["height"] == 200);
-    CHECK(m["generator"]["chain"] == "regtest");
-    CHECK(m["stratifier"]["txns_in_job"] == 2);
+    CHECK(m["bitcoind_connected"].get<bool>() == true);
+    CHECK(m["pool"]["height"].get<double>() == 200);
+    CHECK(m["generator"]["chain"].get<std::string>() == "regtest");
+    CHECK(m["stratifier"]["txns_in_job"].get<double>() == 2);
 }
 
 TEST_CASE("generator rpc_url is redacted of embedded credentials") {
     PoolSnapshot s = sample();
     s.rpc_url = "http://user:secretpass@node:18443";
-    const auto gen = generator_stats_json(s);
-    const std::string url = gen["rpc_url"];
+    const std::string url = redacted_rpc_url(s);
     CHECK(url == "http://node:18443");
     CHECK_FALSE(contains(url, "secretpass"));
     CHECK_FALSE(contains(url, "@"));
 
     // A URL without userinfo is passed through unchanged.
     s.rpc_url = "http://node:18443";
-    CHECK(generator_stats_json(s)["rpc_url"] == "http://node:18443");
+    CHECK(redacted_rpc_url(s) == "http://node:18443");
 }
 
 TEST_CASE("bitcoind nodes are listed with the active one flagged and credentials redacted") {
@@ -154,12 +157,13 @@ TEST_CASE("bitcoind nodes are listed with the active one flagged and credentials
     s.bitcoind_nodes = {"http://primary:18443", "http://user:secretpass@backup:18443"};
     s.bitcoind_active_index = 1; // failed over to the backup
 
-    const auto nodes = generator_stats_json(s)["bitcoind_nodes"];
+    auto gen = generator_stats_json(s);
+    auto& nodes = gen["bitcoind_nodes"].get_array();
     REQUIRE(nodes.size() == 2);
-    CHECK(nodes[0]["address"] == "http://primary:18443");
-    CHECK(nodes[0]["active"] == false);
-    CHECK(nodes[1]["address"] == "http://backup:18443"); // userinfo stripped
-    CHECK(nodes[1]["active"] == true);
+    CHECK(nodes[0]["address"].get<std::string>() == "http://primary:18443");
+    CHECK(nodes[0]["active"].get<bool>() == false);
+    CHECK(nodes[1]["address"].get<std::string>() == "http://backup:18443"); // userinfo stripped
+    CHECK(nodes[1]["active"].get<bool>() == true);
 
     const std::string m = build_prometheus(s);
     CHECK(contains(m, "# TYPE erikslundpool_bitcoind_node_active gauge"));
@@ -175,19 +179,20 @@ TEST_CASE("bitcoind nodes are listed with the active one flagged and credentials
 
 TEST_CASE("client stats strip the worker suffix and 404 on miss") {
     const auto s = sample();
-    const auto client = client_stats_json(s, "bc1qaddr.w1");
+    auto client = client_stats_json(s, "bc1qaddr.w1");
     REQUIRE(client.has_value());
-    CHECK((*client)["address"] == "bc1qaddr");
-    CHECK((*client)["workers"] == 1);
-    CHECK((*client)["shares_rejected"] == 1);
-    CHECK((*client)["sessions"][0]["user_agent"] == "cgminer");
-    CHECK((*client)["sessions"][0]["shares_rejected"] == 1);
+    CHECK((*client)["address"].get<std::string>() == "bc1qaddr");
+    CHECK((*client)["workers"].get<double>() == 1);
+    CHECK((*client)["shares_rejected"].get<double>() == 1);
+    auto& sessions = (*client)["sessions"].get_array();
+    CHECK(sessions[0]["user_agent"].get<std::string>() == "cgminer");
+    CHECK(sessions[0]["shares_rejected"].get<double>() == 1);
     CHECK_FALSE(client_stats_json(s, "bc1qother").has_value());
 }
 
 TEST_CASE("null fields when there is no job") {
     PoolSnapshot s; // empty
-    const auto ps = pool_stats_json(s);
+    auto ps = pool_stats_json(s);
     CHECK(ps["height"].is_null());
     CHECK(ps["network_diff"].is_null());
     CHECK(ps["current_job"].is_null());
@@ -198,25 +203,25 @@ TEST_CASE("redact_url strips userinfo in several URL shapes") {
     {
         PoolSnapshot s = sample();
         s.rpc_url = "http://u:p@host:8332";
-        CHECK(generator_stats_json(s)["rpc_url"] == "http://host:8332");
+        CHECK(redacted_rpc_url(s) == "http://host:8332");
     }
     // username only (no colon password) still gets stripped.
     {
         PoolSnapshot s = sample();
         s.rpc_url = "http://justuser@host:8332";
-        CHECK(generator_stats_json(s)["rpc_url"] == "http://host:8332");
+        CHECK(redacted_rpc_url(s) == "http://host:8332");
     }
     // https scheme is handled the same way.
     {
         PoolSnapshot s = sample();
         s.rpc_url = "https://a:b@example.com";
-        CHECK(generator_stats_json(s)["rpc_url"] == "https://example.com");
+        CHECK(redacted_rpc_url(s) == "https://example.com");
     }
     // A password containing an '@' must be stripped WHOLE (cut at the last '@', not the first).
     {
         PoolSnapshot s = sample();
         s.rpc_url = "http://u:p@ss@host:8332";
-        const std::string redacted = generator_stats_json(s)["rpc_url"];
+        const std::string redacted = redacted_rpc_url(s);
         CHECK(redacted == "http://host:8332");
         CHECK_FALSE(contains(redacted, "@"));
     }
@@ -224,13 +229,13 @@ TEST_CASE("redact_url strips userinfo in several URL shapes") {
     {
         PoolSnapshot s = sample();
         s.rpc_url = "user:pass@host:8332";
-        CHECK(generator_stats_json(s)["rpc_url"] == "host:8332");
+        CHECK(redacted_rpc_url(s) == "host:8332");
     }
     // userinfo only in the authority -- an '@' after the path must NOT be treated as userinfo.
     {
         PoolSnapshot s = sample();
         s.rpc_url = "http://host:8332/path@x";
-        CHECK(generator_stats_json(s)["rpc_url"] == "http://host:8332/path@x");
+        CHECK(redacted_rpc_url(s) == "http://host:8332/path@x");
     }
 }
 
@@ -240,27 +245,27 @@ TEST_CASE("subscribed/authorized counts sum only the matching clients") {
     half.subscribed = true;
     half.authorized = false; // subscribed but not yet authorized
     s.clients.push_back(half);
-    const auto cs = connector_stats_json(s);
-    CHECK(cs["subscribed"] == 2);
-    CHECK(cs["authorized"] == 1);
+    auto cs = connector_stats_json(s);
+    CHECK(cs["subscribed"].get<double>() == 2);
+    CHECK(cs["authorized"].get<double>() == 1);
 }
 
 TEST_CASE("connector stats are zero with no clients") {
     PoolSnapshot s; // no clients
-    const auto cs = connector_stats_json(s);
-    CHECK(cs["workers"] == 0);
-    CHECK(cs["subscribed"] == 0);
-    CHECK(cs["authorized"] == 0);
+    auto cs = connector_stats_json(s);
+    CHECK(cs["workers"].get<double>() == 0);
+    CHECK(cs["subscribed"].get<double>() == 0);
+    CHECK(cs["authorized"].get<double>() == 0);
 }
 
 TEST_CASE("stratifier null fields when there is no job") {
     PoolSnapshot s; // no txns_in_job / merkle_branch_len set
-    const auto ss = stratifier_stats_json(s);
+    auto ss = stratifier_stats_json(s);
     CHECK(ss["current_job"].is_null());
     CHECK(ss["height"].is_null());
     CHECK(ss["txns_in_job"].is_null());
     CHECK(ss["merkle_branch_len"].is_null());
-    CHECK(ss["jobs_created"] == 0);
+    CHECK(ss["jobs_created"].get<double>() == 0);
 }
 
 TEST_CASE("client_stats_json aggregates multiple workers of one address") {
@@ -279,14 +284,14 @@ TEST_CASE("client_stats_json aggregates multiple workers of one address") {
     w2.last_share_ts = 200;
     s.clients = {w1, w2};
 
-    const auto client = client_stats_json(s, "addr.w1"); // worker suffix is stripped to "addr"
+    auto client = client_stats_json(s, "addr.w1"); // worker suffix is stripped to "addr"
     REQUIRE(client.has_value());
-    CHECK((*client)["address"] == "addr");
-    CHECK((*client)["workers"] == 2);
-    CHECK((*client)["shares_accepted"] == 7);          // 3 + 4
-    CHECK((*client)["best_diff"] == doctest::Approx(9.0)); // max
-    CHECK((*client)["last_share_ts"] == 200);          // max
-    CHECK((*client)["sessions"].size() == 2);
+    CHECK((*client)["address"].get<std::string>() == "addr");
+    CHECK((*client)["workers"].get<double>() == 2);
+    CHECK((*client)["shares_accepted"].get<double>() == 7);          // 3 + 4
+    CHECK((*client)["best_diff"].get<double>() == doctest::Approx(9.0)); // max
+    CHECK((*client)["last_share_ts"].get<double>() == 200);          // max
+    CHECK((*client)["sessions"].get_array().size() == 2);
 }
 
 TEST_CASE("prometheus omits height/network_difficulty individually") {
@@ -332,11 +337,11 @@ TEST_CASE("dashboard shows the best share, abbreviated + raw (like difficulty)")
 }
 
 TEST_CASE("metrics_json nests every subsystem block") {
-    const auto m = metrics_json(sample());
+    auto m = metrics_json(sample());
     CHECK(m.contains("pool"));
     CHECK(m.contains("stratifier"));
     CHECK(m.contains("connector"));
     CHECK(m.contains("generator"));
-    CHECK(m["generator"]["bitcoind_reachable"] == true);
-    CHECK(m["ready"] == true);
+    CHECK(m["generator"]["bitcoind_reachable"].get<bool>() == true);
+    CHECK(m["ready"].get<bool>() == true);
 }

@@ -120,10 +120,10 @@ public:
 
 private:
     void dispatch(const Request& request);
-    void handle_subscribe(const json& id, const std::vector<std::string>& params);
+    void handle_subscribe(const glz::generic& id, const std::vector<std::string>& params);
     void handle_configure(const Request& request);
-    void handle_authorize(const json& id, const std::vector<std::string>& params);
-    void handle_submit(const json& id, const std::vector<std::string>& params);
+    void handle_authorize(const glz::generic& id, const std::vector<std::string>& params);
+    void handle_submit(const glz::generic& id, const std::vector<std::string>& params);
     void handle_suggest_difficulty(const Request& request);
 
     // Caller holds mutex_; the public send_* wrap these.
@@ -135,10 +135,10 @@ private:
 
     void begin_difficulty_change(double new_difficulty);
 
-    void send(const json& message);
-    void send_result(const json& id, json result);
-    void send_result(const json& id, bool result); // fast path: serializes straight to the wire
-    void send_error(const json& id, const StratumError& error);
+    void send(const glz::generic& message);
+    void send_result(const glz::generic& id, glz::generic result);
+    void send_result(const glz::generic& id, bool result); // fast path: straight to the wire
+    void send_error(const glz::generic& id, const StratumError& error);
 
     // Canonical (lowercase, fixed-width) dedup key so different spellings of one share collapse;
     // see make_dedup_key in the .cpp for why it stays an exact string.

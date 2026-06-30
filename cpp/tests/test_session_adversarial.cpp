@@ -9,31 +9,31 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "bitcoin/block_template.hpp"
+#include "gbt_fixture.hpp"
 #include "stratum/job.hpp"
 #include "stratum/session.hpp"
 #include "util/hex.hpp"
 
 using namespace erikslund;
 using namespace erikslund::stratum;
-using json = nlohmann::json;
+using namespace erikslund::test;
+using json = glz::generic;
 
 namespace {
 
 const Bytes kPayoutScript = util::from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
 
 std::shared_ptr<Job> make_fake_job(uint32_t curtime) {
-    nlohmann::json t;
+    gbt_json t = gbt_json::object_t{};
     t["height"] = 200;
     t["version"] = 0x20000000;
     t["curtime"] = curtime;
-    t["bits"] = "207fffff"; // regtest-easy
+    t["bits"] = std::string("207fffff"); // regtest-easy
     t["coinbasevalue"] = 5000000000LL;
     t["previousblockhash"] = std::string(64, '0');
-    t["transactions"] = nlohmann::json::array();
-    const auto tmpl = bitcoin::BlockTemplate::from_json(t);
+    t["transactions"] = gbt_json::array_t{};
+    const auto tmpl = from_template(t);
     const Bytes tag{'/', 'e', 'p', '/'};
     return std::make_shared<Job>("job1", tmpl, tag, 4, 4, 1);
 }
@@ -41,18 +41,23 @@ std::shared_ptr<Job> make_fake_job(uint32_t curtime) {
 class FakeConnection : public Connection {
 public:
     std::vector<json> sent;
-    void send_line(std::string_view line) override { sent.push_back(json::parse(line)); }
+    void send_line(std::string_view line) override {
+        json parsed;
+        if (!glz::read_json(parsed, line)) // wire output is always valid JSON
+            sent.push_back(std::move(parsed));
+    }
     std::string peer() const override { return "test-peer"; }
 
-    std::optional<json> by_id(const json& id) const {
+    std::optional<json> by_id(double id) const {
         for (const auto& m : sent)
-            if (m.contains("id") && m["id"] == id)
+            if (m.contains("id") && m["id"].is_number() && m["id"].get<double>() == id)
                 return std::make_optional(m);
         return std::nullopt;
     }
     std::optional<json> by_method(std::string_view method) const {
         for (const auto& m : sent)
-            if (m.contains("method") && m["method"] == method)
+            if (m.contains("method") && m["method"].is_string() &&
+                m["method"].get<std::string>() == method)
                 return std::make_optional(m);
         return std::nullopt;
     }
@@ -122,7 +127,7 @@ TEST_CASE("submit before subscribe AND before authorize is unauthorized (auth ch
         f.submit("job1", "01020304", f.pool.job->ntime_hex(), "00000000"));
     const auto reply = f.conn.by_id(6);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 24); // ERR_UNAUTHORIZED
+    CHECK((*reply)["error"][0].get<double>() == 24); // ERR_UNAUTHORIZED
     CHECK(f.pool.accepted == 0);
 }
 
@@ -142,7 +147,7 @@ TEST_CASE("authorize before subscribe still validates the address (no crash)") {
     f.session.handle_line(R"({"id":3,"method":"mining.authorize","params":["validaddr.w","x"]})");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == true);
+    CHECK((*reply)["result"].get<bool>() == true);
 }
 
 TEST_CASE("submit with fewer than 5 params is an other-error") {
@@ -161,7 +166,7 @@ TEST_CASE("submit with fewer than 5 params is an other-error") {
             std::format(R"({{"id":7,"method":"mining.submit","params":{}}})", params));
         const auto reply = f.conn.by_id(7);
         REQUIRE(reply.has_value());
-        CHECK((*reply)["error"][0] == 20); // ERR_OTHER
+        CHECK((*reply)["error"][0].get<double>() == 20); // ERR_OTHER
     }
 }
 
@@ -172,7 +177,7 @@ TEST_CASE("submit to an unknown / stale job id is rejected as stale and counted 
     f.session.handle_line(f.submit("does-not-exist", "01020304", f.pool.job->ntime_hex(), "00000000"));
     const auto reply = f.conn.by_id(6);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 21); // ERR_STALE
+    CHECK((*reply)["error"][0].get<double>() == 21); // ERR_STALE
     CHECK(f.pool.rejected == 1);
     CHECK(f.pool.accepted == 0);
 }
@@ -185,7 +190,7 @@ TEST_CASE("submit with non-hex extranonce2 is rejected (other-error), no crash")
     const auto reply = f.conn.by_id(6);
     REQUIRE(reply.has_value());
     // malformed share field -> not "above target" -> ERR_OTHER.
-    CHECK((*reply)["error"][0] == 20);
+    CHECK((*reply)["error"][0].get<double>() == 20);
     CHECK(f.pool.rejected == 1);
 }
 
@@ -196,12 +201,12 @@ TEST_CASE("submit with wrong-length extranonce2 is rejected") {
     // expected 4 bytes (8 hex). Try 2 bytes and 6 bytes.
     f.session.handle_line(f.submit("job1", "0102", f.pool.job->ntime_hex(), "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 
     f.conn.sent.clear();
     f.session.handle_line(f.submit("job1", "010203040506", f.pool.job->ntime_hex(), "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 }
 
 TEST_CASE("submit with non-hex / wrong-length ntime is rejected gracefully") {
@@ -211,14 +216,14 @@ TEST_CASE("submit with non-hex / wrong-length ntime is rejected gracefully") {
 
     f.session.handle_line(f.submit("job1", "01020304", "nothexxx", "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 
     f.conn.sent.clear();
     // ntime longer than 8 hex digits -> parse_hex_u32 throws internally; validate_share
     // must catch and report "malformed share field", not propagate.
     f.session.handle_line(f.submit("job1", "01020304", "00000000ff", "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 }
 
 TEST_CASE("submit with non-hex / oversized nonce is rejected gracefully") {
@@ -228,13 +233,13 @@ TEST_CASE("submit with non-hex / oversized nonce is rejected gracefully") {
 
     f.session.handle_line(f.submit("job1", "01020304", f.pool.job->ntime_hex(), "xyz!"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 
     f.conn.sent.clear();
     // 9 hex digits overflows parse_hex_u32's 8-digit cap.
     f.session.handle_line(f.submit("job1", "01020304", f.pool.job->ntime_hex(), "123456789"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 }
 
 TEST_CASE("submit with an empty-string field is rejected, not crashed") {
@@ -244,7 +249,7 @@ TEST_CASE("submit with an empty-string field is rejected, not crashed") {
     // empty extranonce2 (size mismatch), empty ntime, empty nonce.
     f.session.handle_line(f.submit("job1", "", f.pool.job->ntime_hex(), "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 }
 
 TEST_CASE("an exact-duplicate submit (even of a rejected share) is flagged duplicate") {
@@ -263,7 +268,7 @@ TEST_CASE("an exact-duplicate submit (even of a rejected share) is flagged dupli
     f.session.handle_line(line);
     const auto second = f.conn.by_id(6);
     REQUIRE(second.has_value());
-    CHECK((*second)["error"][0] == 22); // ERR_DUPLICATE
+    CHECK((*second)["error"][0].get<double>() == 22); // ERR_DUPLICATE
     CHECK(f.pool.rejected == rejected_after_first + 1);
 }
 
@@ -276,14 +281,14 @@ TEST_CASE("an over-width submit field is rejected before the dedup set (never re
     const std::string huge(4096, 'a');
     f.session.handle_line(f.submit("job1", huge, f.pool.job->ntime_hex(), "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20); // ERR_OTHER
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20); // ERR_OTHER
 
     // Resubmitting the identical over-width share is STILL other-error, never DUPLICATE (22) --
     // proof it was rejected before insertion into the seen-set.
     f.conn.sent.clear();
     f.session.handle_line(f.submit("job1", huge, f.pool.job->ntime_hex(), "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 20);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 20);
 }
 
 TEST_CASE("submit with version bits outside the negotiated mask is rejected") {
@@ -298,7 +303,7 @@ TEST_CASE("submit with version bits outside the negotiated mask is rejected") {
         f.submit("job1", "01020304", f.pool.job->ntime_hex(), "00000000", R"(,"00000001")"));
     const auto reply = f.conn.by_id(6);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20); // ERR_OTHER (version bits outside mask)
+    CHECK((*reply)["error"][0].get<double>() == 20); // ERR_OTHER (version bits outside mask)
 }
 
 TEST_CASE("submit with malformed version bits hex is rejected, not crashed") {
@@ -311,7 +316,7 @@ TEST_CASE("submit with malformed version bits hex is rejected, not crashed") {
         f.submit("job1", "01020304", f.pool.job->ntime_hex(), "00000000", R"(,"zz")"));
     const auto reply = f.conn.by_id(6);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20);
+    CHECK((*reply)["error"][0].get<double>() == 20);
 }
 
 TEST_CASE("authorize with an empty username is an other-error and stays unauthorized") {
@@ -320,7 +325,7 @@ TEST_CASE("authorize with an empty username is an other-error and stays unauthor
     f.session.handle_line(R"({"id":3,"method":"mining.authorize","params":[""]})");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20);
+    CHECK((*reply)["error"][0].get<double>() == 20);
     CHECK_FALSE(f.session.authorized());
 }
 
@@ -330,7 +335,7 @@ TEST_CASE("authorize with no params is an other-error") {
     f.session.handle_line(R"({"id":3,"method":"mining.authorize","params":[]})");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20);
+    CHECK((*reply)["error"][0].get<double>() == 20);
     CHECK_FALSE(f.session.authorized());
 }
 
@@ -340,13 +345,13 @@ TEST_CASE("authorize with an address the pool rejects returns result=false, not 
     f.session.handle_line(R"({"id":3,"method":"mining.authorize","params":["badaddr.w","x"]})");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == false);
+    CHECK((*reply)["result"].get<bool>() == false);
     CHECK_FALSE(f.session.authorized());
     // A submit afterward is still unauthorized.
     f.conn.sent.clear();
     f.session.handle_line(f.submit("job1", "01020304", f.pool.job->ntime_hex(), "00000000"));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["error"][0] == 24);
+    CHECK((*f.conn.by_id(6))["error"][0].get<double>() == 24);
 }
 
 TEST_CASE("authorize with a username that is just a dot yields an empty address (rejected)") {
@@ -356,7 +361,7 @@ TEST_CASE("authorize with a username that is just a dot yields an empty address 
     f.session.handle_line(R"({"id":3,"method":"mining.authorize","params":["."]})");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == false);
+    CHECK((*reply)["result"].get<bool>() == false);
     CHECK_FALSE(f.session.authorized());
 }
 
@@ -367,7 +372,7 @@ TEST_CASE("an unknown method with an id gets ERR_OTHER; with null id it is silen
     f.session.handle_line(R"({"id":99,"method":"mining.frobnicate","params":[]})");
     const auto reply = f.conn.by_id(99);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20);
+    CHECK((*reply)["error"][0].get<double>() == 20);
 
     f.conn.sent.clear();
     f.session.handle_line(R"({"method":"mining.frobnicate","params":[]})"); // no id

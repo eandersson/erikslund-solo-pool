@@ -9,9 +9,8 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "bitcoin/block_template.hpp"
+#include "gbt_fixture.hpp"
 #include "stratum/job.hpp"
 #include "stratum/session.hpp"
 #include "util/difficulty.hpp"
@@ -19,7 +18,8 @@
 
 using namespace erikslund;
 using namespace erikslund::stratum;
-using json = nlohmann::json;
+using namespace erikslund::test;
+using json = glz::generic;
 
 namespace erikslund::stratum {
 // Test-only window into Session's private dedup internals (friend of Session).
@@ -35,15 +35,15 @@ namespace {
 const Bytes kPayoutScript = util::from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
 
 std::shared_ptr<Job> make_fake_job(uint32_t curtime) {
-    nlohmann::json t;
+    gbt_json t = gbt_json::object_t{};
     t["height"] = 200;
     t["version"] = 0x20000000;
     t["curtime"] = curtime;
-    t["bits"] = "207fffff"; // regtest-easy, so a share is cheap to accept
+    t["bits"] = std::string("207fffff"); // regtest-easy, so a share is cheap to accept
     t["coinbasevalue"] = 5000000000LL;
     t["previousblockhash"] = std::string(64, '0');
-    t["transactions"] = nlohmann::json::array();
-    const auto tmpl = bitcoin::BlockTemplate::from_json(t);
+    t["transactions"] = gbt_json::array_t{};
+    const auto tmpl = from_template(t);
     const Bytes tag{'/', 'e', 'p', '/'};
     return std::make_shared<Job>("job1", tmpl, tag, 4, 4, 1);
 }
@@ -51,18 +51,23 @@ std::shared_ptr<Job> make_fake_job(uint32_t curtime) {
 class FakeConnection : public Connection {
 public:
     std::vector<json> sent;
-    void send_line(std::string_view line) override { sent.push_back(json::parse(line)); }
+    void send_line(std::string_view line) override {
+        json parsed;
+        if (!glz::read_json(parsed, line)) // wire output is always valid JSON
+            sent.push_back(std::move(parsed));
+    }
     std::string peer() const override { return "test-peer"; }
 
-    std::optional<json> by_id(const json& id) const {
+    std::optional<json> by_id(double id) const {
         for (const auto& m : sent)
-            if (m.contains("id") && m["id"] == id)
+            if (m.contains("id") && m["id"].is_number() && m["id"].get<double>() == id)
                 return std::make_optional(m); // explicit: json -> optional<json> is ambiguous
         return std::nullopt;
     }
     std::optional<json> by_method(std::string_view method) const {
         for (const auto& m : sent)
-            if (m.contains("method") && m["method"] == method)
+            if (m.contains("method") && m["method"].is_string() &&
+                m["method"].get<std::string>() == method)
                 return std::make_optional(m);
         return std::nullopt;
     }
@@ -156,8 +161,8 @@ TEST_CASE("subscribe returns enonce1 + enonce2 size and sets state") {
     f.subscribe();
     const auto reply = f.conn.by_id(1);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"][1] == f.session.extranonce1_hex());
-    CHECK((*reply)["result"][2] == 4);
+    CHECK((*reply)["result"][1].get<std::string>() == f.session.extranonce1_hex());
+    CHECK((*reply)["result"][2].get<double>() == 4);
     CHECK(f.session.subscribed());
 }
 
@@ -167,8 +172,8 @@ TEST_CASE("configure negotiates the version-rolling mask down to the server mask
         R"({"id":2,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"ffffffff"}]})");
     const auto reply = f.conn.by_id(2);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"]["version-rolling"] == true);
-    CHECK((*reply)["result"]["version-rolling.mask"] == "1fffe000");
+    CHECK((*reply)["result"]["version-rolling"].get<bool>() == true);
+    CHECK((*reply)["result"]["version-rolling.mask"].get<std::string>() == "1fffe000");
     CHECK(f.session.version_mask() == 0x1fffe000u);
 }
 
@@ -180,8 +185,8 @@ TEST_CASE("configure answers version-rolling=false when the negotiated mask is e
         R"({"id":2,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"00000001"}]})");
     const auto reply = f.conn.by_id(2);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"]["version-rolling"] == false);
-    CHECK((*reply)["result"]["version-rolling.mask"] == "00000000");
+    CHECK((*reply)["result"]["version-rolling"].get<bool>() == false);
+    CHECK((*reply)["result"]["version-rolling.mask"].get<std::string>() == "00000000");
     CHECK(f.session.version_mask() == 0u);
 }
 
@@ -192,7 +197,7 @@ TEST_CASE("authorize accepts a valid address and pushes difficulty + a job") {
 
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == true);
+    CHECK((*reply)["result"].get<bool>() == true);
     CHECK(f.session.authorized());
     CHECK(f.session.address() == "validaddr");
     CHECK(f.conn.by_method("mining.set_difficulty").has_value());
@@ -206,7 +211,7 @@ TEST_CASE("authorize allows an empty or absent worker name (address only)") {
         f.authorize("validaddr");
         const auto reply = f.conn.by_id(3);
         REQUIRE(reply.has_value());
-        CHECK((*reply)["result"] == true);
+        CHECK((*reply)["result"].get<bool>() == true);
         CHECK(f.session.authorized());
         CHECK(f.session.address() == "validaddr");
         CHECK(f.session.worker() == ""); // no worker name
@@ -217,7 +222,7 @@ TEST_CASE("authorize allows an empty or absent worker name (address only)") {
         f.authorize("validaddr.");
         const auto reply = f.conn.by_id(3);
         REQUIRE(reply.has_value());
-        CHECK((*reply)["result"] == true);
+        CHECK((*reply)["result"].get<bool>() == true);
         CHECK(f.session.authorized());
         CHECK(f.session.address() == "validaddr");
         CHECK(f.session.worker() == ""); // empty worker name
@@ -230,7 +235,7 @@ TEST_CASE("authorize rejects an invalid address") {
     f.authorize("badaddr.worker1");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == false);
+    CHECK((*reply)["result"].get<bool>() == false);
     CHECK_FALSE(f.session.authorized());
 }
 
@@ -241,7 +246,7 @@ TEST_CASE("submit before authorize is rejected as unauthorized") {
         R"({"id":4,"method":"mining.submit","params":["w","job1","01020304","00000000","00000000"]})");
     const auto reply = f.conn.by_id(4);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 24); // unauthorized
+    CHECK((*reply)["error"][0].get<double>() == 24); // unauthorized
 }
 
 TEST_CASE("submit to an unknown job is stale") {
@@ -252,7 +257,7 @@ TEST_CASE("submit to an unknown job is stale") {
         R"({"id":5,"method":"mining.submit","params":["w","nope","01020304","00000000","00000000"]})");
     const auto reply = f.conn.by_id(5);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 21); // stale
+    CHECK((*reply)["error"][0].get<double>() == 21); // stale
 }
 
 TEST_CASE("a valid share is accepted and counted; a resubmit is a duplicate") {
@@ -271,7 +276,7 @@ TEST_CASE("a valid share is accepted and counted; a resubmit is a duplicate") {
     f.session.handle_line(submit);
     const auto first = f.conn.by_id(6);
     REQUIRE(first.has_value());
-    CHECK((*first)["result"] == true);
+    CHECK((*first)["result"].get<bool>() == true);
     CHECK(f.pool.accepted == 1);
     CHECK(f.session.shares_accepted() == 1);
 
@@ -280,7 +285,7 @@ TEST_CASE("a valid share is accepted and counted; a resubmit is a duplicate") {
     f.session.handle_line(submit);
     const auto second = f.conn.by_id(6);
     REQUIRE(second.has_value());
-    CHECK((*second)["error"][0] == 22); // duplicate
+    CHECK((*second)["error"][0].get<double>() == 22); // duplicate
     CHECK(f.pool.accepted == 1);        // not double-counted
     CHECK(f.pool.rejected == 1);        // the duplicate was counted as rejected
 }
@@ -301,7 +306,7 @@ TEST_CASE("a duplicate resubmitted across a clean job is still rejected (generat
 
     f.session.handle_line(submit);
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["result"] == true);
+    CHECK((*f.conn.by_id(6))["result"].get<bool>() == true);
 
     f.session.send_notify(*f.pool.job, /*clean=*/true); // rotation point (new clean work)
 
@@ -309,7 +314,7 @@ TEST_CASE("a duplicate resubmitted across a clean job is still rejected (generat
     f.session.handle_line(submit);
     const auto replay = f.conn.by_id(6);
     REQUIRE(replay.has_value());
-    CHECK((*replay)["error"][0] == 22); // still a duplicate, not double-credited
+    CHECK((*replay)["error"][0].get<double>() == 22); // still a duplicate, not double-credited
     CHECK(f.pool.accepted == 1);
 }
 
@@ -348,7 +353,7 @@ TEST_CASE("the duplicate guard is insensitive to hex casing (same canonical shar
         R"({{"id":6,"method":"mining.submit","params":["w","job1","01020304","{}","{}"]}})", ntime,
         nonce));
     REQUIRE(f.conn.by_id(6).has_value());
-    CHECK((*f.conn.by_id(6))["result"] == true);
+    CHECK((*f.conn.by_id(6))["result"].get<bool>() == true);
 
     // Resubmit the identical share with the hex fields upper-cased. It is the same work, so the
     // canonical dedup key must match and the resubmit must be rejected as a duplicate (not credited).
@@ -364,7 +369,7 @@ TEST_CASE("the duplicate guard is insensitive to hex casing (same canonical shar
         upper(ntime), upper(nonce)));
     const auto dup = f.conn.by_id(7);
     REQUIRE(dup.has_value());
-    CHECK((*dup)["error"][0] == 22); // duplicate despite the different spelling
+    CHECK((*dup)["error"][0].get<double>() == 22); // duplicate despite the different spelling
     CHECK(f.pool.accepted == 1);     // the upper-cased resubmit was NOT counted again
 }
 
@@ -389,7 +394,8 @@ TEST_CASE("a short malformed extranonce2 does not shadow a valid full-width shar
         ntime));
     const auto second = f.conn.by_id(2);
     REQUIRE(second.has_value());
-    const bool is_duplicate = !(*second)["error"].is_null() && (*second)["error"][0] == 22;
+    const bool is_duplicate =
+        !(*second)["error"].is_null() && (*second)["error"][0].get<double>() == 22;
     CHECK_FALSE(is_duplicate);
 }
 
@@ -428,7 +434,7 @@ TEST_CASE("a difficulty change takes effect only from the next job (grace window
 
     // Baseline: no pending change -> credited at the current difficulty.
     submit(10, nonces[0]);
-    CHECK((*f.conn.by_id(10))["result"] == true);
+    CHECK((*f.conn.by_id(10))["result"].get<bool>() == true);
     CHECK(f.pool.last_share_difficulty == doctest::Approx(start_diff));
 
     // Raise difficulty far above the share's actual difficulty, with NO new job. The in-flight
@@ -438,13 +444,13 @@ TEST_CASE("a difficulty change takes effect only from the next job (grace window
         std::format(R"({{"id":11,"method":"mining.suggest_difficulty","params":[{}]}})", high));
     CHECK(f.session.difficulty() == doctest::Approx(high)); // advertised value changed immediately
     submit(12, nonces[1]);
-    CHECK((*f.conn.by_id(12))["result"] == true);                       // accepted, not "above target"
+    CHECK((*f.conn.by_id(12))["result"].get<bool>() == true); // accepted, not "above target"
     CHECK(f.pool.last_share_difficulty == doctest::Approx(start_diff)); // credited the OLD difficulty
 
     // The next job ends the grace window; subsequent shares credit the NEW difficulty.
     f.session.send_notify(*f.pool.job, /*clean=*/true);
     submit(13, nonces[2]);
-    CHECK((*f.conn.by_id(13))["result"] == true);
+    CHECK((*f.conn.by_id(13))["result"].get<bool>() == true);
     CHECK(f.pool.last_share_difficulty == doctest::Approx(high)); // credited the NEW difficulty
 }
 
@@ -518,12 +524,12 @@ TEST_CASE("difficulty-grace crediting: LOWER direction and the meets-the-harder-
     // A share meeting the harder OLD target credits at hi (= previous), not the new lo -- this is
     // the `result.difficulty >= hi ? hi : lo` true branch the base test never reaches.
     submit(21, lucky);
-    CHECK((*conn.by_id(21))["result"] == true);
+    CHECK((*conn.by_id(21))["result"].get<bool>() == true);
     CHECK(pool.last_share_difficulty == doctest::Approx(hi));
 
     // A share that only meets the easier NEW target credits at lo.
     submit(22, easy);
-    CHECK((*conn.by_id(22))["result"] == true);
+    CHECK((*conn.by_id(22))["result"].get<bool>() == true);
     CHECK(pool.last_share_difficulty == doctest::Approx(lo));
 }
 
@@ -546,7 +552,7 @@ TEST_CASE("a valid share clears the accumulated protocol-error budget") {
         f.pool.job->ntime_hex(), nonce);
     f.session.handle_line(submit);
     REQUIRE(f.conn.by_id(3).has_value());
-    CHECK(f.conn.by_id(3).value()["result"] == true);
+    CHECK(f.conn.by_id(3).value()["result"].get<bool>() == true);
     CHECK(f.session.protocol_errors() == 0);
 }
 
@@ -599,11 +605,11 @@ TEST_CASE("suggest_difficulty adopts the clamped value and pushes set_difficulty
 
     const auto reply = f.conn.by_id(9);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == true);
+    CHECK((*reply)["result"].get<bool>() == true);
     CHECK(f.session.difficulty() == doctest::Approx(256.0)); // FakePool min 0.001, no max
     const auto setdiff = f.conn.by_method("mining.set_difficulty");
     REQUIRE(setdiff.has_value());
-    CHECK((*setdiff)["params"][0] == doctest::Approx(256.0));
+    CHECK((*setdiff)["params"][0].get<double>() == doctest::Approx(256.0));
 }
 
 TEST_CASE("suggest_difficulty with a non-positive value is acked but ignored") {
@@ -614,7 +620,7 @@ TEST_CASE("suggest_difficulty with a non-positive value is acked but ignored") {
 
     const auto reply = f.conn.by_id(10);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == true);                        // still acknowledged
+    CHECK((*reply)["result"].get<bool>() == true);            // still acknowledged
     CHECK(f.session.difficulty() == doctest::Approx(before)); // difficulty unchanged (no zero-out)
 }
 
@@ -625,8 +631,8 @@ TEST_CASE("configure echoes false for a requested extension it does not support 
     const auto reply = f.conn.by_id(2);
     REQUIRE(reply.has_value());
     CHECK((*reply)["result"].is_object());
-    CHECK((*reply)["result"]["minimum-difficulty"] == false); // requested but unsupported
-    CHECK(f.session.version_mask() == 0u);                    // version-rolling not requested
+    CHECK((*reply)["result"]["minimum-difficulty"].get<bool>() == false); // requested but unsupported
+    CHECK(f.session.version_mask() == 0u); // version-rolling not requested
 }
 
 TEST_CASE("configure with a malformed mask negotiates an empty (zero) mask -> rolling disabled") {
@@ -637,8 +643,8 @@ TEST_CASE("configure with a malformed mask negotiates an empty (zero) mask -> ro
         R"({"id":2,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"nothex"}]})");
     const auto reply = f.conn.by_id(2);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"]["version-rolling"] == false);
-    CHECK((*reply)["result"]["version-rolling.mask"] == "00000000");
+    CHECK((*reply)["result"]["version-rolling"].get<bool>() == false);
+    CHECK((*reply)["result"]["version-rolling.mask"].get<std::string>() == "00000000");
     CHECK(f.session.version_mask() == 0u);
 }
 
@@ -649,7 +655,7 @@ TEST_CASE("configure with no mask field defaults the client to all-ones, capped 
     const auto reply = f.conn.by_id(2);
     REQUIRE(reply.has_value());
     // client_mask 0xffffffff & server 0x1fffe000 = 0x1fffe000.
-    CHECK((*reply)["result"]["version-rolling.mask"] == "1fffe000");
+    CHECK((*reply)["result"]["version-rolling.mask"].get<std::string>() == "1fffe000");
     CHECK(f.session.version_mask() == 0x1fffe000u);
 }
 
@@ -664,8 +670,8 @@ TEST_CASE("every present-but-invalid version-rolling mask disables rolling (mask
             mask_param));
         const auto reply = f.conn.by_id(2);
         REQUIRE(reply.has_value());
-        CHECK((*reply)["result"]["version-rolling"] == false);
-        CHECK((*reply)["result"]["version-rolling.mask"] == "00000000");
+        CHECK((*reply)["result"]["version-rolling"].get<bool>() == false);
+        CHECK((*reply)["result"]["version-rolling.mask"].get<std::string>() == "00000000");
         CHECK(f.session.version_mask() == 0u);
     };
     SUBCASE("empty string") { expect_disabled(R"("")"); }
@@ -687,7 +693,7 @@ TEST_CASE("an unknown method is answered with ERR_OTHER but does NOT count towar
     f.session.handle_line(R"({"id":8,"method":"get_transactions","params":[]})");
     const auto reply = f.conn.by_id(7);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20); // ERR_OTHER, still answered
+    CHECK((*reply)["error"][0].get<double>() == 20); // ERR_OTHER, still answered
     CHECK(f.session.protocol_errors() == 0);
 }
 
@@ -707,7 +713,8 @@ TEST_CASE("a notify whose publication seq is older than the last delivered one i
     f.session.send_notify(*newer, /*clean=*/true);  // delivered, records seq 6
     f.session.send_notify(*older, /*clean=*/true);  // seq 5 < 6 -> dropped
     const auto notifies = std::count_if(f.conn.sent.begin(), f.conn.sent.end(), [](const json& m) {
-        return m.contains("method") && m["method"] == "mining.notify";
+        return m.contains("method") && m["method"].is_string() &&
+               m["method"].get<std::string>() == "mining.notify";
     });
     CHECK(notifies == 1);
 
@@ -715,7 +722,8 @@ TEST_CASE("a notify whose publication seq is older than the last delivered one i
     const auto unstamped = make_fake_job(f.curtime);
     f.session.send_notify(*unstamped, /*clean=*/false);
     const auto after = std::count_if(f.conn.sent.begin(), f.conn.sent.end(), [](const json& m) {
-        return m.contains("method") && m["method"] == "mining.notify";
+        return m.contains("method") && m["method"].is_string() &&
+               m["method"].get<std::string>() == "mining.notify";
     });
     CHECK(after == 2);
 }
@@ -732,9 +740,10 @@ TEST_CASE("subscribe after authorize immediately pushes difficulty + a single cl
     CHECK(f.conn.by_method("mining.set_difficulty").has_value());
     const auto notify = f.conn.by_method("mining.notify");
     REQUIRE(notify.has_value());
-    CHECK((*notify)["params"][8] == true); // clean_jobs flag
+    CHECK((*notify)["params"][8].get<bool>() == true); // clean_jobs flag
     const auto notifies = std::count_if(f.conn.sent.begin(), f.conn.sent.end(), [](const json& m) {
-        return m.contains("method") && m["method"] == "mining.notify";
+        return m.contains("method") && m["method"].is_string() &&
+               m["method"].get<std::string>() == "mining.notify";
     });
     CHECK(notifies == 1);
 }
@@ -745,7 +754,7 @@ TEST_CASE("authorize requires a non-empty username") {
     f.session.handle_line(R"({"id":3,"method":"mining.authorize","params":[""]})");
     const auto reply = f.conn.by_id(3);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20); // ERR_OTHER
+    CHECK((*reply)["error"][0].get<double>() == 20); // ERR_OTHER
     CHECK_FALSE(f.session.authorized());
 }
 
@@ -756,7 +765,7 @@ TEST_CASE("submit with too few params is an other-error") {
     f.session.handle_line(R"({"id":7,"method":"mining.submit","params":["w","job1"]})");
     const auto reply = f.conn.by_id(7);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20); // ERR_OTHER (needs >= 5 params)
+    CHECK((*reply)["error"][0].get<double>() == 20); // ERR_OTHER (needs >= 5 params)
 }
 
 TEST_CASE("mining.extranonce.subscribe is acknowledged") {
@@ -765,7 +774,7 @@ TEST_CASE("mining.extranonce.subscribe is acknowledged") {
     f.session.handle_line(R"({"id":11,"method":"mining.extranonce.subscribe","params":[]})");
     const auto reply = f.conn.by_id(11);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["result"] == true);
+    CHECK((*reply)["result"].get<bool>() == true);
 }
 
 TEST_CASE("an unknown method with an id gets an other-error; with a null id, silence") {
@@ -775,7 +784,7 @@ TEST_CASE("an unknown method with an id gets an other-error; with a null id, sil
     f.session.handle_line(R"({"id":12,"method":"mining.unheard_of","params":[]})");
     const auto reply = f.conn.by_id(12);
     REQUIRE(reply.has_value());
-    CHECK((*reply)["error"][0] == 20);
+    CHECK((*reply)["error"][0].get<double>() == 20);
 
     // A notification-style call (null id) produces no response at all.
     f.conn.sent.clear();
@@ -823,8 +832,8 @@ TEST_CASE("external send_notify pushes a mining.notify once subscribed + authori
     const auto notify = f.conn.by_method("mining.notify");
     REQUIRE(notify.has_value());
     // params: [job_id, prevhash, coinbase1, coinbase2, branch, version, nbits, ntime, clean].
-    CHECK((*notify)["params"][0] == "job1");
-    CHECK((*notify)["params"][8] == true); // clean flag
+    CHECK((*notify)["params"][0].get<std::string>() == "job1");
+    CHECK((*notify)["params"][8].get<bool>() == true); // clean flag
 }
 
 TEST_CASE("send_notify is a no-op for an unauthorized session") {
@@ -851,5 +860,5 @@ TEST_CASE("send_set_difficulty pushes the current difficulty") {
     f.session.send_set_difficulty();
     const auto setdiff = f.conn.by_method("mining.set_difficulty");
     REQUIRE(setdiff.has_value());
-    CHECK((*setdiff)["params"][0] == doctest::Approx(f.session.difficulty()));
+    CHECK((*setdiff)["params"][0].get<double>() == doctest::Approx(f.session.difficulty()));
 }

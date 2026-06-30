@@ -22,6 +22,8 @@
 #include <thread>
 #include <utility>
 
+#include <glaze/glaze.hpp>
+
 #include "bitcoin/address.hpp"
 #include "bitcoin/block_template.hpp"
 #include "core/errors.hpp"
@@ -92,18 +94,42 @@ Pool::Pool(Config config, bitcoin::RpcClient& rpc)
     submit_thread_ = std::jthread([this](const std::stop_token& stop) { submit_loop(stop); });
 }
 
+namespace {
+std::string json_str(glz::generic& obj, const char* key, const std::string& fallback) {
+    if (obj.contains(key) && obj[key].is_string())
+        return obj[key].get<std::string>();
+    return fallback;
+}
+int64_t json_int(glz::generic& obj, const char* key, int64_t fallback) {
+    if (obj.contains(key) && obj[key].is_number())
+        return static_cast<int64_t>(obj[key].get<double>());
+    return fallback;
+}
+int64_t json_require_int(glz::generic& obj, const char* key) {
+    if (!obj.contains(key) || !obj[key].is_number())
+        throw RpcError(std::string("bitcoind reply missing numeric field: ") + key);
+    return static_cast<int64_t>(obj[key].get<double>());
+}
+std::string json_require_str(glz::generic& obj, const char* key) {
+    if (!obj.contains(key) || !obj[key].is_string())
+        throw RpcError(std::string("bitcoind reply missing string field: ") + key);
+    return obj[key].get<std::string>();
+}
+} // namespace
+
 void Pool::detect_network() {
-    const auto info = rpc_.getblockchaininfo();
-    const std::string chain = info.value("chain", "regtest");
+    auto info = rpc_.getblockchaininfo();
+    const std::string chain = json_str(info, "chain", "regtest");
     const auto detected = bitcoin::network_from_string(chain);
     if (!detected)
         log::warning("Unrecognized bitcoind chain '{}'; using regtest address rules -- "
                      "donation/payout addresses for other networks will be rejected", chain);
     network_ = detected.value_or(bitcoin::Network::Regtest);
     chain_name_ = chain; // raw chain string for display (keeps testnet3 vs testnet4 distinct)
-    chain_blocks_.store(info.value("blocks", int64_t{0}));
+    const int64_t blocks = json_int(info, "blocks", 0);
+    chain_blocks_.store(blocks);
     generator_ready_.store(true);
-    log::info("Connected to bitcoind: chain={} blocks={}", chain, info.value("blocks", 0));
+    log::info("Connected to bitcoind: chain={} blocks={}", chain, blocks);
 
     if (config_.donation_percent > 0.0 && !config_.donation_address.empty()) {
         if (auto script = bitcoin::address_to_script(config_.donation_address, network_)) {
@@ -269,11 +295,12 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                 // One header fetch grounds the empty job in consensus: the true next height (BIP34
                 // coinbase height + exact subsidy across halvings), confirmations == 1 (active
                 // tip), the new tip's nBits, and its median-time-past for the ntime floor.
-                const auto header = rpc_.getblockheader(block_hash_display); // RPC: off the lock
-                const int64_t next_height = header.at("height").get<int64_t>() + 1;
-                const int64_t confirmations = header.value("confirmations", int64_t{-1});
-                const std::string bits_hex = header.at("bits").get<std::string>();
-                const uint32_t mediantime = header.at("mediantime").get<uint32_t>();
+                auto header = rpc_.getblockheader(block_hash_display); // RPC: off the lock
+                const int64_t next_height = json_require_int(header, "height") + 1;
+                const int64_t confirmations = json_int(header, "confirmations", -1);
+                const std::string bits_hex = json_require_str(header, "bits");
+                const uint32_t mediantime =
+                    static_cast<uint32_t>(json_require_int(header, "mediantime"));
 
                 bool eligible = false;
                 uint32_t version = 0;
@@ -290,20 +317,18 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                     }
                 }
                 if (eligible) {
-                    nlohmann::json empty;
-                    empty["height"] = next_height;
-                    empty["version"] = version;
+                    bitcoin::BlockTemplate block_template;
+                    block_template.height = next_height;
+                    block_template.version = version;
                     // ntime must exceed the new tip's MTP; floor at MTP+1 so neither a lagging host
                     // clock nor a frozen-clock chain can synthesize a "time-too-old" block.
-                    empty["curtime"] =
+                    block_template.curtime =
                         std::max(static_cast<uint32_t>(std::time(nullptr)), mediantime + 1);
-                    empty["bits"] = bits_hex;
-                    empty["coinbasevalue"] = block_subsidy(next_height, halving_interval);
-                    empty["previousblockhash"] = block_hash_display;
-                    empty["default_witness_commitment"] = empty_commitment_;
-                    empty["transactions"] = nlohmann::json::array();
-
-                    auto block_template = bitcoin::BlockTemplate::from_json(empty);
+                    block_template.bits_hex = bits_hex;
+                    block_template.bits = util::parse_hex_u32(bits_hex);
+                    block_template.coinbase_value = block_subsidy(next_height, halving_interval);
+                    block_template.previousblockhash = block_hash_display;
+                    block_template.witness_commitment = util::from_hex(empty_commitment_);
                     const auto job = make_job(std::move(block_template), /*clean=*/true);
                     const auto outcome =
                         broadcast_job(job, /*clean=*/true, /*require_new_prevhash=*/true);
@@ -349,8 +374,6 @@ void Pool::refresh_work(const std::stop_token& stop) {
                 }
             }
             if (fetch) {
-                // simdjson-direct parse: the multi-MB template parses straight into the compact
-                // BlockTemplate (no nlohmann DOM), then MOVED through make_job into the Job.
                 auto block_template = rpc_.getblocktemplate_parsed();
                 generator_ready_.store(true);
                 bool new_block = false;

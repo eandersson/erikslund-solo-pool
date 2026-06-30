@@ -16,17 +16,24 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get dist-upgrade -y && apt-get install -y --no-install-recommends \
         cmake \
         make \
+        git \
         clang-tidy \
         cppcheck \
         libcurl4-openssl-dev \
         libzmq3-dev \
         libmimalloc-dev \
-        nlohmann-json3-dev \
-        libsimdjson-dev \
         libyaml-cpp-dev \
         doctest-dev \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Glaze (header-only: JSON/YAML/CBOR/... serialization + compile-time reflection): the JSON
+# parser/serializer the pool builds against. Header-only -> drop the include tree onto the
+# default search path (/usr/local/include); no link step.
+ARG GLAZE_VERSION=v7.8.3
+RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenberry/glaze.git /tmp/glaze \
+    && cp -r /tmp/glaze/include/glaze /usr/local/include/glaze \
+    && rm -rf /tmp/glaze
 
 COPY build-entrypoint.sh /usr/local/bin/build-entrypoint.sh
 COPY clang-tidy.sh /usr/local/bin/clang-tidy.sh

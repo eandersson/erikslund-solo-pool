@@ -4,7 +4,7 @@
 // auth header, and URL normalization all execute. Invariants pinned:
 //   * call_one extracts the "result" subtree; a present+non-null "error" becomes RpcError;
 //     a missing/null "error" is success; an unparseable body becomes RpcConnectionError (HTTP code
-//     preserved); a missing "result" yields a null json.
+//     preserved); a missing "result" yields a null value.
 //   * submitblock: null result = accepted (nullopt); a string = the reject reason verbatim;
 //     anything else = its dump. The payload carries method "submitblock" and the block hex.
 //   * call(method, params) builds a jsonrpc-1.0 envelope and the request id strictly increases.
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include <glaze/glaze.hpp>
 
 #include "bitcoin/rpc_client.hpp"
 #include "bitcoin/rpc_endpoint.hpp"
@@ -23,7 +23,6 @@
 
 using namespace erikslund;
 using namespace erikslund::bitcoin;
-using json = nlohmann::json;
 
 namespace {
 
@@ -54,18 +53,24 @@ protected:
     }
 };
 
+glz::generic parse(const std::string& text) {
+    glz::generic value;
+    (void)glz::read_json(value, text);
+    return value;
+}
+
 } // namespace
 
 TEST_CASE("call_one returns the result subtree, not the whole envelope") {
     BodyRpc rpc;
     rpc.body = R"({"result":{"blocks":170,"chain":"main"},"error":null,"id":1})";
-    const json result = rpc.call("getblockchaininfo");
-    CHECK(result["blocks"] == 170);
-    CHECK(result["chain"] == "main");
+    glz::generic result = rpc.call("getblockchaininfo");
+    CHECK(result["blocks"].get<double>() == 170);
+    CHECK(result["chain"].get<std::string>() == "main");
     CHECK_FALSE(result.contains("id")); // the envelope id/error are stripped
 }
 
-TEST_CASE("call_one yields a null json when the reply has no result key") {
+TEST_CASE("call_one yields a null value when the reply has no result key") {
     BodyRpc rpc;
     rpc.body = R"({"error":null,"id":1})";
     CHECK(rpc.call("getblockcount").is_null());
@@ -75,11 +80,11 @@ TEST_CASE("a null/absent error field is NOT treated as a failure") {
     BodyRpc rpc;
     SUBCASE("error explicitly null") {
         rpc.body = R"({"result":42,"error":null,"id":1})";
-        CHECK(rpc.call("getblockcount") == 42);
+        CHECK(rpc.call("getblockcount").get<double>() == 42);
     }
     SUBCASE("error key absent entirely") {
         rpc.body = R"({"result":42,"id":1})";
-        CHECK(rpc.call("getblockcount") == 42);
+        CHECK(rpc.call("getblockcount").get<double>() == 42);
     }
 }
 
@@ -111,11 +116,17 @@ TEST_CASE("an unparseable body is a connection error that preserves the HTTP sta
 TEST_CASE("call() builds a jsonrpc-1.0 envelope with method + params") {
     BodyRpc rpc;
     rpc.body = R"({"result":"ok","error":null,"id":1})";
-    rpc.call("getblockheader", json::array({"e06ae06a", true}));
-    const json sent = json::parse(rpc.last_payload);
-    CHECK(sent["jsonrpc"] == "1.0");
-    CHECK(sent["method"] == "getblockheader");
-    CHECK(sent["params"] == json::array({"e06ae06a", true}));
+    glz::generic params = glz::generic::array_t{};
+    params.get_array().emplace_back("e06ae06a");
+    params.get_array().emplace_back(true);
+    rpc.call("getblockheader", params);
+    glz::generic sent = parse(rpc.last_payload);
+    CHECK(sent["jsonrpc"].get<std::string>() == "1.0");
+    CHECK(sent["method"].get<std::string>() == "getblockheader");
+    REQUIRE(sent["params"].is_array());
+    REQUIRE(sent["params"].get_array().size() == 2);
+    CHECK(sent["params"].get_array()[0].get<std::string>() == "e06ae06a");
+    CHECK(sent["params"].get_array()[1].get<bool>() == true);
     CHECK(sent["id"].is_number());
 }
 
@@ -123,9 +134,9 @@ TEST_CASE("each request gets a strictly increasing id") {
     BodyRpc rpc;
     rpc.body = R"({"result":1,"error":null,"id":1})";
     rpc.call("a");
-    const int id1 = json::parse(rpc.last_payload)["id"].get<int>();
+    const double id1 = parse(rpc.last_payload)["id"].get<double>();
     rpc.call("b");
-    const int id2 = json::parse(rpc.last_payload)["id"].get<int>();
+    const double id2 = parse(rpc.last_payload)["id"].get<double>();
     CHECK(id2 > id1);
 }
 
@@ -161,18 +172,18 @@ TEST_CASE("submitblock payload carries the submitblock method and the block hex"
     BodyRpc rpc;
     rpc.body = R"({"result":null,"error":null,"id":1})";
     rpc.submitblock("0011aabbccdd");
-    const json sent = json::parse(rpc.last_payload);
-    CHECK(sent["method"] == "submitblock");
+    glz::generic sent = parse(rpc.last_payload);
+    CHECK(sent["method"].get<std::string>() == "submitblock");
     REQUIRE(sent["params"].is_array());
-    CHECK(sent["params"][0] == "0011aabbccdd");
+    CHECK(sent["params"].get_array()[0].get<std::string>() == "0011aabbccdd");
 }
 
 TEST_CASE("getbestblockhash returns the result string and uses the right method") {
     BodyRpc rpc;
     const std::string tip(64, 'a');
-    rpc.body = json{{"result", tip}, {"error", nullptr}, {"id", 1}}.dump();
+    rpc.body = R"({"result":")" + tip + R"(","error":null,"id":1})";
     CHECK(rpc.getbestblockhash() == tip);
-    CHECK(json::parse(rpc.last_payload)["method"] == "getbestblockhash");
+    CHECK(parse(rpc.last_payload)["method"].get<std::string>() == "getbestblockhash");
 }
 
 TEST_CASE("the auth header is HTTP Basic base64(user:pass)") {
@@ -200,7 +211,7 @@ TEST_CASE("failover-driving polls use a shorter timeout than submitblock") {
     rpc.submitblock("00");
     const long submit_timeout = rpc.last_timeout;
 
-    rpc.body = json{{"result", std::string(64, 'a')}, {"error", nullptr}, {"id", 1}}.dump();
+    rpc.body = R"({"result":")" + std::string(64, 'a') + R"(","error":null,"id":1})";
     rpc.getbestblockhash();
     const long poll_timeout = rpc.last_timeout;
 

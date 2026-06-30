@@ -15,8 +15,8 @@ namespace erikslund::api {
 namespace {
 
 template <class T>
-nlohmann::json or_null(const std::optional<T>& value) {
-    return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+glz::generic or_null(const std::optional<T>& value) {
+    return value ? glz::generic(*value) : glz::generic{};
 }
 
 std::string html_escape(std::string_view value) {
@@ -160,88 +160,103 @@ std::string build_prometheus(const PoolSnapshot& snapshot) {
     return out;
 }
 
-nlohmann::json status_json(const PoolSnapshot& snapshot) {
-    return {{"name", "erikslund-solo-pool"},
-            {"version", snapshot.version},
-            {"pid", snapshot.pid},
-            {"starttime", snapshot.starttime},
-            {"uptime", snapshot.uptime},
-            {"bitcoind_connected", snapshot.generator_ready},
-            {"work_ready", snapshot.stratifier_ready},
-            {"accepting_connections", snapshot.connector_ready},
-            {"ready", snapshot.ready}};
+glz::generic status_json(const PoolSnapshot& snapshot) {
+    glz::generic j;
+    j["name"] = "erikslund-solo-pool";
+    j["version"] = snapshot.version;
+    j["pid"] = static_cast<double>(snapshot.pid);
+    j["starttime"] = static_cast<double>(snapshot.starttime);
+    j["uptime"] = static_cast<double>(snapshot.uptime);
+    j["bitcoind_connected"] = snapshot.generator_ready;
+    j["work_ready"] = snapshot.stratifier_ready;
+    j["accepting_connections"] = snapshot.connector_ready;
+    j["ready"] = snapshot.ready;
+    return j;
 }
 
-nlohmann::json pool_stats_json(const PoolSnapshot& snapshot) {
-    nlohmann::json best_share_percent = nullptr;
+glz::generic pool_stats_json(const PoolSnapshot& snapshot) {
+    glz::generic j;
+    j["runtime"] = static_cast<double>(snapshot.uptime);
+    j["height"] = or_null(snapshot.height);
+    j["network_diff"] = or_null(snapshot.network_diff);
+    j["current_job"] = or_null(snapshot.current_job);
+    j["workers"] = static_cast<double>(snapshot.connected);
+    j["users"] = static_cast<double>(snapshot.users);
+    j["blocks_found"] = static_cast<double>(snapshot.blocks_found);
+    j["last_block_found"] = snapshot.last_block_found > 0
+                                ? glz::generic(stats::format_rfc9557(snapshot.last_block_found))
+                                : glz::generic{};
+    j["shares_accepted"] = static_cast<double>(snapshot.shares_accepted);
+    j["shares_rejected"] = static_cast<double>(snapshot.shares_rejected);
+    j["accepted_diff"] = snapshot.accepted_diff;
+    j["best_share"] = snapshot.best_share;
     if (snapshot.network_diff && *snapshot.network_diff > 0.0)
-        best_share_percent = snapshot.best_share / *snapshot.network_diff * 100.0;
-    return {{"runtime", snapshot.uptime},
-            {"height", or_null(snapshot.height)},
-            {"network_diff", or_null(snapshot.network_diff)},
-            {"current_job", or_null(snapshot.current_job)},
-            {"workers", snapshot.connected},
-            {"users", snapshot.users},
-            {"blocks_found", snapshot.blocks_found},
-            {"last_block_found", snapshot.last_block_found > 0
-                                     ? nlohmann::json(stats::format_rfc9557(snapshot.last_block_found))
-                                     : nlohmann::json(nullptr)},
-            {"shares_accepted", snapshot.shares_accepted},
-            {"shares_rejected", snapshot.shares_rejected},
-            {"accepted_diff", snapshot.accepted_diff},
-            {"best_share", snapshot.best_share},
-            {"best_share_percent", best_share_percent},
-            {"hashrate_estimate", snapshot.hashrate_estimate}};
+        j["best_share_percent"] = snapshot.best_share / *snapshot.network_diff * 100.0;
+    else
+        j["best_share_percent"] = glz::generic{};
+    j["hashrate_estimate"] = snapshot.hashrate_estimate;
+    return j;
 }
 
-nlohmann::json stratifier_stats_json(const PoolSnapshot& snapshot) {
-    return {{"jobs_created", snapshot.jobs_created},
-            {"recent_jobs_cached", snapshot.recent_jobs_cached},
-            {"current_job", or_null(snapshot.current_job)},
-            {"height", or_null(snapshot.height)},
-            {"txns_in_job", or_null(snapshot.txns_in_job)},
-            {"merkle_branch_len", or_null(snapshot.merkle_branch_len)}};
+glz::generic stratifier_stats_json(const PoolSnapshot& snapshot) {
+    glz::generic j;
+    j["jobs_created"] = static_cast<double>(snapshot.jobs_created);
+    j["recent_jobs_cached"] = static_cast<double>(snapshot.recent_jobs_cached);
+    j["current_job"] = or_null(snapshot.current_job);
+    j["height"] = or_null(snapshot.height);
+    j["txns_in_job"] = or_null(snapshot.txns_in_job);
+    j["merkle_branch_len"] = or_null(snapshot.merkle_branch_len);
+    return j;
 }
 
-nlohmann::json connector_stats_json(const PoolSnapshot& snapshot) {
+glz::generic connector_stats_json(const PoolSnapshot& snapshot) {
     const auto subscribed = static_cast<size_t>(
         std::ranges::count_if(snapshot.clients, [](const auto& client) { return client.subscribed; }));
     const auto authorized = static_cast<size_t>(
         std::ranges::count_if(snapshot.clients, [](const auto& client) { return client.authorized; }));
-    return {{"workers", snapshot.connected},
-            {"subscribed", subscribed},
-            {"authorized", authorized}};
+    glz::generic j;
+    j["workers"] = static_cast<double>(snapshot.connected);
+    j["subscribed"] = static_cast<double>(subscribed);
+    j["authorized"] = static_cast<double>(authorized);
+    return j;
 }
 
-nlohmann::json generator_stats_json(const PoolSnapshot& snapshot) {
-    nlohmann::json nodes = nlohmann::json::array();
-    for (size_t i = 0; i < snapshot.bitcoind_nodes.size(); ++i)
-        nodes.push_back({{"address", util::redact_url(snapshot.bitcoind_nodes[i])},
-                         {"active", i == snapshot.bitcoind_active_index}});
-    return {{"bitcoind_reachable", snapshot.bitcoind_reachable},
-            {"chain", snapshot.chain},
-            {"tip_height", or_null(snapshot.tip_height)},
-            {"last_template_age_sec", or_null(snapshot.last_template_age_sec)},
-            {"rpc_url", util::redact_url(snapshot.rpc_url)},
-            {"bitcoind_nodes", nodes}};
+glz::generic generator_stats_json(const PoolSnapshot& snapshot) {
+    glz::generic nodes = glz::generic::array_t{};
+    for (size_t i = 0; i < snapshot.bitcoind_nodes.size(); ++i) {
+        glz::generic node;
+        node["address"] = util::redact_url(snapshot.bitcoind_nodes[i]);
+        node["active"] = (i == snapshot.bitcoind_active_index);
+        nodes.get_array().push_back(std::move(node));
+    }
+    glz::generic j;
+    j["bitcoind_reachable"] = snapshot.bitcoind_reachable;
+    j["chain"] = snapshot.chain;
+    j["tip_height"] = or_null(snapshot.tip_height);
+    j["last_template_age_sec"] = or_null(snapshot.last_template_age_sec);
+    j["rpc_url"] = util::redact_url(snapshot.rpc_url);
+    j["bitcoind_nodes"] = std::move(nodes);
+    return j;
 }
 
-nlohmann::json metrics_json(const PoolSnapshot& snapshot) {
-    return {{"uptime_seconds", snapshot.uptime},
-            {"ready", snapshot.ready},
-            {"bitcoind_connected", snapshot.generator_ready},
-            {"work_ready", snapshot.stratifier_ready},
-            {"accepting_connections", snapshot.connector_ready},
-            {"pool", pool_stats_json(snapshot)},
-            {"stratifier", stratifier_stats_json(snapshot)},
-            {"connector", connector_stats_json(snapshot)},
-            {"generator", generator_stats_json(snapshot)}};
+glz::generic metrics_json(const PoolSnapshot& snapshot) {
+    glz::generic j;
+    j["uptime_seconds"] = static_cast<double>(snapshot.uptime);
+    j["ready"] = snapshot.ready;
+    j["bitcoind_connected"] = snapshot.generator_ready;
+    j["work_ready"] = snapshot.stratifier_ready;
+    j["accepting_connections"] = snapshot.connector_ready;
+    j["pool"] = pool_stats_json(snapshot);
+    j["stratifier"] = stratifier_stats_json(snapshot);
+    j["connector"] = connector_stats_json(snapshot);
+    j["generator"] = generator_stats_json(snapshot);
+    return j;
 }
 
-std::optional<nlohmann::json> client_stats_json(const PoolSnapshot& snapshot,
-                                                const std::string& address) {
+std::optional<glz::generic> client_stats_json(const PoolSnapshot& snapshot,
+                                              const std::string& address) {
     const std::string base_address = address.substr(0, address.find('.'));
-    nlohmann::json sessions = nlohmann::json::array();
+    glz::generic sessions = glz::generic::array_t{};
     uint64_t accepted_shares = 0;
     uint64_t rejected_shares = 0;
     double best_difficulty = 0.0;
@@ -255,26 +270,30 @@ std::optional<nlohmann::json> client_stats_json(const PoolSnapshot& snapshot,
         rejected_shares += client.shares_rejected;
         best_difficulty = std::max(best_difficulty, client.best_difficulty);
         last_share_timestamp = std::max(last_share_timestamp, client.last_share_ts);
-        sessions.push_back({{"address", client.address},
-                            {"worker", client.worker},
-                            {"peer", client.peer},
-                            {"user_agent", client.user_agent},
-                            {"difficulty", client.difficulty},
-                            {"shares_accepted", client.shares_accepted},
-                            {"shares_rejected", client.shares_rejected},
-                            {"best_diff", client.best_difficulty},
-                            {"last_share_ts", client.last_share_ts},
-                            {"connected_for", client.connected_for}});
+        glz::generic session;
+        session["address"] = client.address;
+        session["worker"] = client.worker;
+        session["peer"] = client.peer;
+        session["user_agent"] = client.user_agent;
+        session["difficulty"] = client.difficulty;
+        session["shares_accepted"] = static_cast<double>(client.shares_accepted);
+        session["shares_rejected"] = static_cast<double>(client.shares_rejected);
+        session["best_diff"] = client.best_difficulty;
+        session["last_share_ts"] = static_cast<double>(client.last_share_ts);
+        session["connected_for"] = static_cast<double>(client.connected_for);
+        sessions.get_array().push_back(std::move(session));
     }
     if (workers == 0)
         return std::nullopt;
-    return nlohmann::json{{"address", base_address},
-                          {"workers", workers},
-                          {"shares_accepted", accepted_shares},
-                          {"shares_rejected", rejected_shares},
-                          {"best_diff", best_difficulty},
-                          {"last_share_ts", last_share_timestamp},
-                          {"sessions", sessions}};
+    glz::generic j;
+    j["address"] = base_address;
+    j["workers"] = static_cast<double>(workers);
+    j["shares_accepted"] = static_cast<double>(accepted_shares);
+    j["shares_rejected"] = static_cast<double>(rejected_shares);
+    j["best_diff"] = best_difficulty;
+    j["last_share_ts"] = static_cast<double>(last_share_timestamp);
+    j["sessions"] = std::move(sessions);
+    return j;
 }
 
 std::string dashboard_html(const PoolSnapshot& snapshot) {

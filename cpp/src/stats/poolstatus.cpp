@@ -22,6 +22,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <glaze/glaze.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include "core/logging.hpp"
@@ -82,46 +83,33 @@ void atomic_write(const std::filesystem::path& path, const std::string& text) {
     }
 }
 
-// Render a nlohmann::json value as YAML (the API serves JSON; disk is YAML).
-void emit_json_as_yaml(YAML::Emitter& out, const nlohmann::json& value) {
-    switch (value.type()) {
-    case nlohmann::json::value_t::object:
+// Render a glz::generic value as YAML through yaml-cpp's Emitter (the API serves JSON; disk is
+// YAML).
+void emit_json_as_yaml(YAML::Emitter& out, const glz::generic& value) {
+    if (value.is_object()) {
         out << YAML::BeginMap;
-        for (const auto& [key, child] : value.items()) {
+        for (const auto& [key, child] : value.get_object()) {
             out << YAML::Key << key << YAML::Value;
             emit_json_as_yaml(out, child);
         }
         out << YAML::EndMap;
-        break;
-    case nlohmann::json::value_t::array:
+    } else if (value.is_array()) {
         out << YAML::BeginSeq;
-        for (const auto& element : value)
+        for (const auto& element : value.get_array())
             emit_json_as_yaml(out, element);
         out << YAML::EndSeq;
-        break;
-    case nlohmann::json::value_t::string:
+    } else if (value.is_string()) {
         out << value.get<std::string>();
-        break;
-    case nlohmann::json::value_t::boolean:
+    } else if (value.is_boolean()) {
         out << value.get<bool>();
-        break;
-    case nlohmann::json::value_t::number_integer:
-        out << value.get<int64_t>();
-        break;
-    case nlohmann::json::value_t::number_unsigned:
-        out << value.get<uint64_t>();
-        break;
-    case nlohmann::json::value_t::number_float:
+    } else if (value.is_number()) {
         out << value.get<double>();
-        break;
-    case nlohmann::json::value_t::null:
-    default:
+    } else {
         out << YAML::Null;
-        break;
     }
 }
 
-std::string to_yaml(const nlohmann::json& value) {
+std::string to_yaml(const glz::generic& value) {
     YAML::Emitter out;
     emit_json_as_yaml(out, value);
     return std::string(out.c_str()) + "\n";
@@ -138,8 +126,8 @@ int64_t days_from_civil(int64_t y, unsigned m, unsigned d) {
 }
 
 // Per-window diff/s -> {"hashrate1m": "43.4M", ...} in H/s.
-nlohmann::json hashrate_fields(const std::array<double, kHashrateWindows.size()>& windows) {
-    nlohmann::json out = nlohmann::json::object();
+glz::generic hashrate_fields(const std::array<double, kHashrateWindows.size()>& windows) {
+    glz::generic out = glz::generic::object_t{};
     for (std::size_t i = 0; i < kHashrateWindows.size(); ++i)
         out[std::string("hashrate") + kHashrateLabels[i]] =
             suffix_string(windows[i] * kHashesPerDiff1Share);
@@ -250,35 +238,44 @@ std::string suffix_string(double value, int significant_digits) {
                        suffix);
 }
 
-nlohmann::json build_pool_status(const api::PoolSnapshot& snapshot) {
+glz::generic build_pool_status(const api::PoolSnapshot& snapshot) {
     const double uptime = std::max<double>(static_cast<double>(snapshot.uptime), 1e-9);
 
     double best_share_percent = 0.0;
     if (snapshot.network_diff && *snapshot.network_diff > 0.0)
         best_share_percent = std::round(snapshot.best_share / *snapshot.network_diff * 1e8) / 1e6;
 
-    nlohmann::json status;
-    status["pool_stat"] = {{"runtime", static_cast<int64_t>(uptime)},
-                           {"lastupdate", format_rfc9557(snapshot.starttime + snapshot.uptime)},
-                           {"users", snapshot.users},
-                           {"workers", snapshot.connected},
-                           {"blocks_found", snapshot.blocks_found},
-                           {"last_block_found", format_rfc9557(snapshot.last_block_found)}};
-    status["blocks_by_address"] = snapshot.blocks_by_address;
-    status["hashrate"] = hashrate_fields(snapshot.hashrate_windows);
-    nlohmann::json shares = {{"best_share_percent", best_share_percent},
-                             {"accepted", static_cast<int64_t>(snapshot.accepted_diff)},
-                             {"rejected", static_cast<int64_t>(snapshot.shares_rejected)},
-                             {"bestshare", static_cast<int64_t>(snapshot.best_share)}};
+    glz::generic pool_stat = glz::generic::object_t{};
+    pool_stat["runtime"] = static_cast<double>(static_cast<int64_t>(uptime));
+    pool_stat["lastupdate"] = format_rfc9557(snapshot.starttime + snapshot.uptime);
+    pool_stat["users"] = static_cast<double>(snapshot.users);
+    pool_stat["workers"] = static_cast<double>(snapshot.connected);
+    pool_stat["blocks_found"] = static_cast<double>(snapshot.blocks_found);
+    pool_stat["last_block_found"] = format_rfc9557(snapshot.last_block_found);
+
+    glz::generic blocks = glz::generic::object_t{};
+    for (const auto& [addr, count] : snapshot.blocks_by_address)
+        blocks[addr] = static_cast<double>(count);
+
+    glz::generic shares = glz::generic::object_t{};
+    shares["best_share_percent"] = best_share_percent;
+    shares["accepted"] = static_cast<double>(static_cast<int64_t>(snapshot.accepted_diff));
+    shares["rejected"] = static_cast<double>(static_cast<int64_t>(snapshot.shares_rejected));
+    shares["bestshare"] = static_cast<double>(static_cast<int64_t>(snapshot.best_share));
     for (std::size_t i = 0; i < kSpsWindows.size(); ++i)
         shares[std::string("shares_per_second_") + kSpsLabels[i]] = round5(snapshot.sps_windows[i]);
+
+    glz::generic status = glz::generic::object_t{};
+    status["pool_stat"] = std::move(pool_stat);
+    status["blocks_by_address"] = std::move(blocks);
+    status["hashrate"] = hashrate_fields(snapshot.hashrate_windows);
     status["shares"] = std::move(shares);
     return status;
 }
 
-nlohmann::json build_user_stats_from(const std::string& address,
-                                     const std::vector<const api::WorkerSnapshot*>& workers,
-                                     size_t connection_count, const api::PoolSnapshot& snapshot) {
+glz::generic build_user_stats_from(const std::string& address,
+                                   const std::vector<const api::WorkerSnapshot*>& workers,
+                                   size_t connection_count, const api::PoolSnapshot& snapshot) {
     const int64_t wall_now = snapshot.starttime + snapshot.uptime;
     const auto age = [wall_now](int64_t ts) -> int64_t {
         return ts > 0 ? std::max<int64_t>(0, wall_now - ts) : 0;
@@ -292,7 +289,7 @@ nlohmann::json build_user_stats_from(const std::string& address,
     std::vector<const api::WorkerSnapshot*> ordered(workers.begin(), workers.end());
     std::ranges::sort(ordered, {}, [](const api::WorkerSnapshot* entry) { return entry->worker; });
 
-    nlohmann::json worker_rows = nlohmann::json::array();
+    glz::generic worker_rows = glz::generic::array_t{};
     for (const auto* worker_ptr : ordered) {
         const auto& w = *worker_ptr;
         for (std::size_t i = 0; i < user_windows.size(); ++i)
@@ -302,30 +299,36 @@ nlohmann::json build_user_stats_from(const std::string& address,
         best_difficulty = std::max(best_difficulty, w.best_difficulty);
         last_share_timestamp = std::max(last_share_timestamp, w.last_share_ts);
 
-        nlohmann::json row = {{"workername", w.worker.empty() ? address : w.worker}};
-        row.update(hashrate_fields(w.hashrate_windows));
-        row["shares_accepted"] = w.shares_accepted;
-        row["shares_rejected"] = w.shares_rejected;
+        glz::generic row = glz::generic::object_t{};
+        row["workername"] = w.worker.empty() ? address : w.worker;
+        // Merge the hashrate fields after "workername" (preserving the historical key order).
+        glz::generic hashrate = hashrate_fields(w.hashrate_windows);
+        for (const auto& [key, child] : hashrate.get_object())
+            row[key] = child;
+        row["shares_accepted"] = static_cast<double>(w.shares_accepted);
+        row["shares_rejected"] = static_cast<double>(w.shares_rejected);
         row["bestshare"] = w.best_difficulty;
         row["lastshare"] = format_rfc9557(w.last_share_ts);
-        row["last_share_age"] = age(w.last_share_ts);
-        worker_rows.push_back(std::move(row));
+        row["last_share_age"] = static_cast<double>(age(w.last_share_ts));
+        worker_rows.get_array().push_back(std::move(row));
     }
 
-    nlohmann::json out = hashrate_fields(user_windows);
+    glz::generic out = hashrate_fields(user_windows);
     out["lastshare"] = format_rfc9557(last_share_timestamp);
-    out["last_share_age"] = age(last_share_timestamp);
-    out["workers"] = connection_count; // live connections (registry rows persist past disconnect)
-    out["shares_accepted"] = total_shares;
-    out["shares_rejected"] = total_rejected;
+    out["last_share_age"] = static_cast<double>(age(last_share_timestamp));
+    // live connections (registry rows persist past disconnect)
+    out["workers"] = static_cast<double>(connection_count);
+    out["shares_accepted"] = static_cast<double>(total_shares);
+    out["shares_rejected"] = static_cast<double>(total_rejected);
     out["bestshare"] = best_difficulty;
     const auto blocks_it = snapshot.blocks_by_address.find(address);
-    out["blocks"] = blocks_it != snapshot.blocks_by_address.end() ? blocks_it->second : uint64_t{0};
-    out["worker"] = worker_rows;
+    out["blocks"] = static_cast<double>(
+        blocks_it != snapshot.blocks_by_address.end() ? blocks_it->second : uint64_t{0});
+    out["worker"] = std::move(worker_rows);
     return out;
 }
 
-nlohmann::json build_user_stats(const std::string& address, const api::PoolSnapshot& snapshot) {
+glz::generic build_user_stats(const std::string& address, const api::PoolSnapshot& snapshot) {
     std::vector<const api::WorkerSnapshot*> workers;
     for (const auto& worker : snapshot.workers)
         if (worker.address == address)
