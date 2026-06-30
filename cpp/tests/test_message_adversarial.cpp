@@ -254,7 +254,8 @@ TEST_CASE("suggest_difficulty: an enormous number is captured without overflow/t
     REQUIRE(huge->suggested_difficulty.has_value());
     CHECK(*huge->suggested_difficulty > 1e307);
 
-    // A 30-digit integer string overflows int64; std::stod still yields a finite double.
+    // A 30-digit integer string overflows int64 but is a valid (whole-string) decimal; from_chars
+    // still yields a finite double.
     const auto bigstr = parse_request(
         R"({"method":"mining.suggest_difficulty","params":["123456789012345678901234567890"]})");
     REQUIRE(bigstr.has_value());
@@ -262,21 +263,21 @@ TEST_CASE("suggest_difficulty: an enormous number is captured without overflow/t
     CHECK(*bigstr->suggested_difficulty > 0.0);
 }
 
-TEST_CASE("suggest_difficulty: a string with trailing junk after a number is tolerated by stod") {
-    // std::stod parses the leading number and ignores the rest -> captured value.
+TEST_CASE("suggest_difficulty: a string with trailing junk after a number is rejected") {
+    // Whole-string parse (std::from_chars): a difficulty must be a bare number, matching the Python
+    // pool's float(), so "256xyz" is rejected outright rather than read as 256 with the tail ignored.
     const auto req = parse_request(
         R"({"method":"mining.suggest_difficulty","params":["256xyz"]})");
     REQUIRE(req.has_value());
-    REQUIRE(req->suggested_difficulty.has_value());
-    CHECK(*req->suggested_difficulty == doctest::Approx(256.0));
+    CHECK_FALSE(req->suggested_difficulty.has_value());
 }
 
-TEST_CASE("suggest_difficulty: 'inf'/'nan' strings parse via stod to non-finite (rejected later)") {
+TEST_CASE("suggest_difficulty: 'inf'/'nan' strings parse to non-finite (rejected later)") {
     // These must not throw at parse time; clamp_suggested_difficulty rejects non-finite.
     const auto inf = parse_request(
         R"({"method":"mining.suggest_difficulty","params":["inf"]})");
     REQUIRE(inf.has_value());
-    // std::stod("inf") == +infinity; capture must not throw.
+    // from_chars("inf") == +infinity; capture stays non-finite (rejected downstream, never throws).
     if (inf->suggested_difficulty)
         CHECK_FALSE(std::isfinite(*inf->suggested_difficulty));
 

@@ -173,6 +173,11 @@ TEST_CASE("suggest_difficulty leaves the value unset for non-numeric input") {
     r = parse_request(R"({"method":"mining.suggest_difficulty","params":[""]})");
     REQUIRE(r.has_value());
     CHECK_FALSE(r->suggested_difficulty.has_value());
+    // Trailing garbage: a difficulty string must be a bare number (whole-string parse, matching the
+    // Python pool's float()), so "12.5abc" is rejected rather than silently read as 12.5.
+    r = parse_request(R"({"method":"mining.suggest_difficulty","params":["12.5abc"]})");
+    REQUIRE(r.has_value());
+    CHECK_FALSE(r->suggested_difficulty.has_value());
 }
 
 TEST_CASE("mining.configure without a mask leaves the mask unset but flags the extension") {

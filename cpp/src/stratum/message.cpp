@@ -1,9 +1,10 @@
 #include "stratum/message.hpp"
 
+#include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <exception>
 #include <string>
+#include <system_error>
 
 #include <glaze/glaze.hpp>
 
@@ -111,11 +112,12 @@ std::optional<Request> parse_request(std::string_view line) {
         if (first.is_number()) {
             request.suggested_difficulty = first.get<double>();
         } else if (first.is_string()) {
-            try {
-                request.suggested_difficulty = std::stod(first.get<std::string>());
-            } catch (const std::exception&) { // NOLINT(bugprone-empty-catch): deliberate
-                // non-numeric string: leave unset (acked but ignored downstream)
-            }
+            const std::string& text = first.get<std::string>();
+            const char* const end = text.data() + text.size();
+            double value = 0.0;
+            if (const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+                ec == std::errc{} && ptr == end)
+                request.suggested_difficulty = value;
         }
     }
     return request;
