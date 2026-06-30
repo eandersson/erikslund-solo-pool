@@ -21,7 +21,6 @@ RUN apt-get update && apt-get dist-upgrade -y && apt-get install -y --no-install
         cppcheck \
         libcurl4-openssl-dev \
         libzmq3-dev \
-        libmimalloc-dev \
         libyaml-cpp-dev \
         doctest-dev \
         ca-certificates \
@@ -34,6 +33,17 @@ ARG GLAZE_VERSION=v7.8.3
 RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenberry/glaze.git /tmp/glaze \
     && cp -r /tmp/glaze/include/glaze /usr/local/include/glaze \
     && rm -rf /tmp/glaze
+
+# mimalloc (Microsoft): the interposed allocator. Built from a pinned release (like Glaze) instead
+# of the distro package -- installs libmimalloc.so + mimalloc.h to /usr/local (MI_INSTALL_TOPLEVEL).
+ARG MIMALLOC_VERSION=v3.3.2
+RUN git clone --depth 1 --branch "${MIMALLOC_VERSION}" https://github.com/microsoft/mimalloc.git /tmp/mimalloc \
+    && cmake -S /tmp/mimalloc -B /tmp/mimalloc/build -DCMAKE_BUILD_TYPE=Release \
+        -DMI_INSTALL_TOPLEVEL=ON -DMI_BUILD_TESTS=OFF \
+    && cmake --build /tmp/mimalloc/build -j"$(nproc)" \
+    && cmake --install /tmp/mimalloc/build \
+    && rm -rf /tmp/mimalloc \
+    && ldconfig
 
 COPY build-entrypoint.sh /usr/local/bin/build-entrypoint.sh
 COPY clang-tidy.sh /usr/local/bin/clang-tidy.sh

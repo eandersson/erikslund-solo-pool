@@ -24,7 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         libcurl4-openssl-dev \
         libzmq3-dev \
-        libmimalloc-dev \
         libyaml-cpp-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,6 +35,18 @@ RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenbe
     && cp -r /tmp/glaze/include/glaze /usr/local/include/glaze \
     && rm -rf /tmp/glaze
 
+# mimalloc (Microsoft): the allocator interposed for the share path's many small concurrent
+# allocations. Built from a pinned release (like Glaze) instead of the distro package -- installs
+# libmimalloc.so + mimalloc.h to /usr/local (MI_INSTALL_TOPLEVEL) for find_library/<mimalloc.h>.
+ARG MIMALLOC_VERSION=v3.3.2
+RUN git clone --depth 1 --branch "${MIMALLOC_VERSION}" https://github.com/microsoft/mimalloc.git /tmp/mimalloc \
+    && cmake -S /tmp/mimalloc -B /tmp/mimalloc/build -DCMAKE_BUILD_TYPE=Release \
+        -DMI_INSTALL_TOPLEVEL=ON -DMI_BUILD_TESTS=OFF \
+    && cmake --build /tmp/mimalloc/build -j"$(nproc)" \
+    && cmake --install /tmp/mimalloc/build \
+    && rm -rf /tmp/mimalloc \
+    && ldconfig
+
 WORKDIR /src
 COPY . .
 
@@ -45,16 +56,13 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNATIVE_ARCH=${NATIVE_ARCH} 
     && cmake --build build --target erikslund-pool -j"$(nproc)" \
     && test -x build/erikslund-pool
 
-RUN set -eux; \
-    triplet="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
-    mkdir -p /staging/lib; \
-    cp -a "/usr/lib/${triplet}"/libmimalloc.so* /staging/lib/
+RUN mkdir -p /staging/lib && cp -a /usr/local/lib/libmimalloc.so* /staging/lib/
 
 # ---- runtime ---------------------------------------------------------------
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libcurl4 libzmq5 libyaml-cpp0.8 curl \
+        libcurl4 libzmq5 libyaml-cpp0.8 libatomic1 curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 pool \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /var/lib/erikslund-pool \

@@ -92,10 +92,11 @@ int main(int argc, char** argv) {
     log::info("Max clients: {} (open file limit of {})", config.max_clients, open_file_limit_text);
 #ifdef HAVE_MIMALLOC
     const int mimalloc_version = mi_version();
-    log::info("allocator: mimalloc {}.{}.{}", mimalloc_version / 100, (mimalloc_version / 10) % 10,
-                mimalloc_version % 10);
-    // Return freed pages to the OS promptly; lower RSS beats page reuse here.
-    mi_option_set(mi_option_purge_delay, 0);
+    const bool mi_v3 = mimalloc_version >= 10000;
+    const int mi_major = mi_v3 ? mimalloc_version / 10000 : mimalloc_version / 100;
+    const int mi_minor = mi_v3 ? (mimalloc_version / 100) % 100 : (mimalloc_version / 10) % 10;
+    const int mi_patch = mi_v3 ? mimalloc_version % 100 : mimalloc_version % 10;
+    log::info("allocator: mimalloc {}.{}.{}", mi_major, mi_minor, mi_patch);
 #endif
     log::info("sha256 backend: {}", util::sha256_init());
 
