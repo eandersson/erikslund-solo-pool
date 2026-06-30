@@ -6,6 +6,7 @@
 #include <cmath>
 #include <ctime>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -504,7 +505,7 @@ std::string Session::make_dedup_key(const std::string& job_id, std::string_view 
     if (version_bits)
         append_canonical_hex(key, *version_bits, 8);
     key.push_back('|');
-    key += std::format("{:08x}", version_mask_);
+    std::format_to(std::back_inserter(key), "{:08x}", version_mask_);
     return key;
 }
 

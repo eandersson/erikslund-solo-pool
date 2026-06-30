@@ -28,7 +28,7 @@ uint256 uint256::from_display_hex(std::string_view hex) {
 }
 
 std::string uint256::to_display_hex() const {
-    return to_hex(reversed(bytes_));
+    return to_hex_reversed(bytes_);
 }
 
 bool uint256::is_zero() const {

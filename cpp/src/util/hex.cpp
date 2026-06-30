@@ -37,6 +37,17 @@ std::string to_hex(std::span<const uint8_t> data) {
     return out;
 }
 
+std::string to_hex_reversed(std::span<const uint8_t> data) {
+    std::string out(data.size() * 2, '\0');
+    size_t j = 0;
+    for (size_t index = data.size(); index-- > 0;) {
+        const uint8_t byte = data[index];
+        out[j++] = kHexChars[byte >> 4];
+        out[j++] = kHexChars[byte & 0x0f];
+    }
+    return out;
+}
+
 bool is_hex(std::string_view text) noexcept {
     if (text.empty() || (text.size() % 2) != 0)
         return false;
@@ -98,6 +109,19 @@ uint32_t parse_hex_u32(std::string_view text) {
     if (const auto value = try_parse_hex_u32(text))
         return *value;
     throw std::invalid_argument("hex u32: empty, longer than 8 digits, or non-hex");
+}
+
+bool from_hex_into(std::span<uint8_t> out, std::string_view text) noexcept {
+    if (text.size() != out.size() * 2)
+        return false;
+    for (size_t index = 0; index < out.size(); ++index) {
+        const int high_nibble = kHexTable[static_cast<uint8_t>(text[2 * index])];
+        const int low_nibble = kHexTable[static_cast<uint8_t>(text[2 * index + 1])];
+        if (high_nibble < 0 || low_nibble < 0)
+            return false;
+        out[index] = static_cast<uint8_t>((high_nibble << 4) | low_nibble);
+    }
+    return true;
 }
 
 } // namespace erikslund::util

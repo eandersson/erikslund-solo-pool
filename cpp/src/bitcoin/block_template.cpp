@@ -35,11 +35,10 @@ void append_transaction(BlockTemplate& block_template, std::string_view data_hex
     } else {
         throw std::invalid_argument("template transaction has neither txid nor hash");
     }
-    const Bytes internal = util::reversed(util::from_hex(id_hex));
-    if (internal.size() != 32)
-        throw std::invalid_argument("template txid is not 32 bytes");
     util::Hash256 txid_internal{};
-    std::copy(internal.begin(), internal.end(), txid_internal.begin());
+    if (!util::from_hex_into(txid_internal, id_hex))
+        throw std::invalid_argument("template txid is not a 32-byte hex string");
+    std::ranges::reverse(txid_internal);
     block_template.txids_internal.push_back(txid_internal);
 }
 

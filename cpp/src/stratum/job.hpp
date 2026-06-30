@@ -80,7 +80,7 @@ public:
 
     // Identity of the mining work (ignores job_id/clean): equal signature => identical headers
     // for any extranonce/nonce, so rebroadcasting the second only resets miners.
-    std::string work_signature() const;
+    const std::string& work_signature() const { return work_signature_; }
 
     Bytes build_coinbase2(ByteView payout_script) const;
 
@@ -125,6 +125,7 @@ private:
     std::string version_hex_;
     std::string nbits_hex_;
     std::string ntime_hex_;
+    std::string work_signature_;
 
     mutable std::atomic<uint64_t> publish_seq_{0}; // see publish_seq()
 };

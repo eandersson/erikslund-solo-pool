@@ -12,6 +12,8 @@ namespace erikslund::util {
 
 std::string to_hex(std::span<const uint8_t> data);
 
+std::string to_hex_reversed(std::span<const uint8_t> data);
+
 // True iff non-empty, even-length, and all hex digits.
 bool is_hex(std::string_view text) noexcept;
 
@@ -27,5 +29,7 @@ uint32_t parse_hex_u32(std::string_view text);
 
 std::optional<Bytes> try_from_hex(std::string_view text);
 std::optional<uint32_t> try_parse_hex_u32(std::string_view text) noexcept;
+
+bool from_hex_into(std::span<uint8_t> out, std::string_view text) noexcept;
 
 } // namespace erikslund::util

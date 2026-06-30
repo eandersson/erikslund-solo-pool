@@ -87,6 +87,17 @@ Job::Job(std::string job_id, bitcoin::BlockTemplate block_template, ByteView tag
     coinbase1_hex_ = util::to_hex(coinbase1_);
     version_hex_ = std::format("{:08x}", version_);
     ntime_hex_ = std::format("{:08x}", curtime_);
+
+    work_signature_ = prevhash_stratum_;
+    work_signature_ += '|' + version_hex_;
+    work_signature_ += '|' + nbits_hex_;
+    work_signature_ += '|' + ntime_hex_;
+    work_signature_ += '|' + coinbase1_hex_;
+    work_signature_ += '|' + std::to_string(coinbase_value_);
+    if (witness_commitment_)
+        work_signature_ += '|' + util::to_hex(*witness_commitment_);
+    for (const auto& branch : merkle_branch_hex_)
+        work_signature_ += '|' + branch;
 }
 
 Bytes Job::build_coinbase2(ByteView payout_script) const {
@@ -113,21 +124,6 @@ bool Job::mines_on(const std::string& tip_display_hex) const {
     } catch (const std::invalid_argument&) {
         return false; // malformed hex can't be our parent
     }
-}
-
-std::string Job::work_signature() const {
-    // Every field a miner hashes plus the coinbase_value + witness commitment that drive coinbase2.
-    std::string sig = prevhash_stratum_;
-    sig += '|' + version_hex_;
-    sig += '|' + nbits_hex_;
-    sig += '|' + ntime_hex_;
-    sig += '|' + coinbase1_hex_;
-    sig += '|' + std::to_string(coinbase_value_);
-    if (witness_commitment_)
-        sig += '|' + util::to_hex(*witness_commitment_);
-    for (const auto& branch : merkle_branch_hex_)
-        sig += '|' + branch;
-    return sig;
 }
 
 Bytes Job::build_header(const util::Hash256& merkle_root, uint32_t ntime, uint32_t nonce,
@@ -203,7 +199,7 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
     ShareResult result;
     result.difficulty = difficulty;
     result.is_block = is_block;
-    result.block_hash_hex = util::to_hex(util::reversed(block_hash));
+    result.block_hash_hex = util::to_hex_reversed(block_hash);
     result.header = std::move(header);
     result.legacy_coinbase = std::move(coinbase);
     return result;
