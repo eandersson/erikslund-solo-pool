@@ -55,20 +55,21 @@ HttpResponse json_ok(std::string body) {
     return {200, "application/json; charset=utf-8", std::move(body)};
 }
 
-std::string to_lower(std::string s) {
-    for (char& ch : s)
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return s;
+bool ci_contains(std::string_view haystack, std::string_view needle) {
+    return std::ranges::search(haystack, needle, [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) ==
+                      std::tolower(static_cast<unsigned char>(b));
+           }).begin() != haystack.end();
 }
 
 bool wants_keep_alive(const std::string& head, size_t header_end) {
-    const std::string lower = to_lower(head.substr(0, header_end));
-    if (lower.find("connection: close") != std::string::npos)
+    const std::string_view section(head.data(), header_end);
+    if (ci_contains(section, "connection: close"))
         return false;
-    if (lower.find("connection: keep-alive") != std::string::npos)
+    if (ci_contains(section, "connection: keep-alive"))
         return true;
-    const size_t line_end = lower.find("\r\n");
-    return lower.substr(0, line_end).find("http/1.1") != std::string::npos;
+    const size_t line_end = section.find("\r\n");
+    return ci_contains(section.substr(0, line_end), "http/1.1");
 }
 
 std::string build_response(const std::string& method, const HttpResponse& response,

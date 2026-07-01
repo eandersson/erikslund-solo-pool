@@ -99,6 +99,7 @@ std::string format_difficulty(double difficulty) {
 
 std::string build_prometheus(const PoolSnapshot& snapshot) {
     std::string out;
+    out.reserve(2048 + 128 * snapshot.bitcoind_nodes.size());
     const auto metric = [&out](std::string_view name, std::string_view type, std::string_view help,
                                auto value, std::string_view labels = "") {
         out += std::format("# HELP {} {}\n# TYPE {} {}\n{}{} {}\n", name, help, name, type, name,

@@ -460,10 +460,13 @@ std::string Pool::resolve_worker_key(const std::map<std::string, WorkerStat>& wo
 
 Pool::WorkerStat* Pool::worker_entry(const std::string& address, const std::string& worker) {
     // Caller holds user_stats_mutex_. The "" key is the bare-address bucket: always present-able.
-    const auto addr_it = user_stats_.find(address);
-    if (addr_it == user_stats_.end() && user_stats_.size() >= stats::kMaxUserFiles)
-        return nullptr; // registry address cap (defense-in-depth vs an address-cycling attacker)
-    auto& workers = user_stats_[address];
+    auto addr_it = user_stats_.find(address);
+    if (addr_it == user_stats_.end()) {
+        if (user_stats_.size() >= stats::kMaxUserFiles)
+            return nullptr; // registry address cap (defense-in-depth vs an address-cycling attacker)
+        addr_it = user_stats_.try_emplace(address).first;
+    }
+    auto& workers = addr_it->second;
     const std::string key = resolve_worker_key(workers, worker);
     return &workers.try_emplace(key, started_steady_).first->second;
 }
@@ -888,20 +891,16 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     // path skips this O(registry) walk under the share lock. (best_share is the runtime scalar.)
     if (include_workers) {
         // Live (address, worker) pairs, resolved to registry keys so a worker folded into the ""
-        // bucket still marks that bucket connected.
-        std::vector<std::pair<std::string, std::string>> live;
-        for (const auto& client : clients) {
-            const auto session_stats = client->session->stats();
-            if (!session_stats.address.empty())
-                live.emplace_back(session_stats.address, session_stats.worker);
-        }
         const std::scoped_lock lock(user_stats_mutex_);
         std::set<std::string> connected_keys;
-        for (const auto& [address, worker] : live) {
-            const auto ai = user_stats_.find(address);
-            const std::string key =
-                ai != user_stats_.end() ? resolve_worker_key(ai->second, worker) : worker;
-            connected_keys.insert(worker_key(address, key));
+        for (const auto& client_snapshot : snapshot.clients) {
+            if (client_snapshot.address.empty())
+                continue;
+            const auto ai = user_stats_.find(client_snapshot.address);
+            const std::string key = ai != user_stats_.end()
+                                        ? resolve_worker_key(ai->second, client_snapshot.worker)
+                                        : client_snapshot.worker;
+            connected_keys.insert(worker_key(client_snapshot.address, key));
         }
         for (const auto& [address, workers] : user_stats_)
             for (const auto& [worker, stat] : workers) {

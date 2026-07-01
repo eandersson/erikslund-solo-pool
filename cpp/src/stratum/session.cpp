@@ -36,6 +36,11 @@ void append_canonical_hex(std::string& out, std::string_view value, size_t width
         out.append(width - value.size(), '0');
     append_lower(out, value);
 }
+
+const std::string& or_empty(const std::optional<std::string>& value) {
+    static const std::string kEmpty;
+    return value ? *value : kEmpty;
+}
 } // namespace
 
 double vardiff_next(double current, double shares_per_minute, double target, double min_difficulty,
@@ -408,7 +413,7 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     const auto job = pool_.recent_job(job_id);
     if (!job) [[unlikely]] {
         ++shares_rejected_;
-        pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
         send_error(id, ERR_STALE);
         return;
     }
@@ -416,14 +421,14 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     if (extranonce2.size() > pool_.extranonce2_size() * 2 || ntime.size() > 8 || nonce.size() > 8 ||
         (version_bits && version_bits->size() > 8)) [[unlikely]] {
         ++shares_rejected_;
-        pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
         send_error(id, ERR_OTHER);
         return;
     }
 
     if (!remember(make_dedup_key(job_id, extranonce2, ntime, nonce, version_bits))) [[unlikely]] {
         ++shares_rejected_;
-        pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
         send_error(id, ERR_DUPLICATE);
         return;
     }
@@ -437,16 +442,16 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     const double accept_difficulty =
         pending_difficulty_change_ ? std::min(difficulty_, previous_difficulty_) : difficulty_;
     input.share_target = util::target_from_difficulty(accept_difficulty);
-    input.version_bits_hex = version_bits;
+    input.version_bits_hex = std::move(version_bits);
     input.version_mask = version_mask_;
     input.now_unix = static_cast<int64_t>(std::time(nullptr));
 
     const auto result = job->validate_share(input);
     if (!result) {
         ++shares_rejected_;
-        pool_.note_rejected_share(address_.value_or(""), worker_.value_or(""));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
         if (log::level() <= log::Level::Debug)
-            log::debug("Rejected share from {} ({})", address_.value_or(""),
+            log::debug("Rejected share from {} ({})", or_empty(address_),
                        reject_reason(result.error().reason));
         send_error(id,
                    result.error().reason == ShareReject::AboveTarget ? ERR_LOW_DIFFICULTY : ERR_OTHER);
@@ -479,10 +484,9 @@ void Session::record_accepted_share(const ShareResult& result) {
     last_share_timestamp_ = now_wall;
     hashrate_.add(credited, now_steady);
     best_difficulty_ = std::max(best_difficulty_, result.difficulty);
-    pool_.note_accepted_share(address_.value_or(""), worker_.value_or(""), credited,
-                              result.difficulty);
+    pool_.note_accepted_share(or_empty(address_), or_empty(worker_), credited, result.difficulty);
     if (log::level() <= log::Level::Debug)
-        log::debug("Accepted share from {} diff {}/{}", address_.value_or(""),
+        log::debug("Accepted share from {} diff {}/{}", or_empty(address_),
                    util::format_difficulty(result.difficulty), util::format_difficulty(credited));
 }
 

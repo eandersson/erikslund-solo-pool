@@ -173,11 +173,12 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     const auto handle_readable = [&](ClientConnection* connection) -> bool {
         char chunk[kReadChunkBytes];
         size_t consumed_this_event = 0;
+        const auto event_time = std::chrono::steady_clock::now();
         while (true) {
             const ssize_t n = ::recv(connection->fd, chunk, sizeof(chunk), 0);
             if (n > 0) {
                 consumed_this_event += static_cast<size_t>(n);
-                connection->last_activity = std::chrono::steady_clock::now();
+                connection->last_activity = event_time;
                 connection->buffer.append(chunk, static_cast<size_t>(n));
                 // Scan with a moving offset and erase the consumed prefix once at the end, not
                 // per line (which would be quadratic on a pipelined burst). handle_line copies out
