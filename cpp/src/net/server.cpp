@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sched.h>
 #include <sys/epoll.h>
@@ -57,7 +58,7 @@ namespace {
 constexpr int kMaxEventsPerWait = 64;        // epoll_event batch size
 constexpr int kEpollWaitTimeoutMs = 500;     // wakes the loop to honor stop + run the idle sweep
 constexpr size_t kReadChunkBytes = 4096;     // per-recv() read buffer
-constexpr size_t kMaxReadBytesPerEvent = size_t{256} * 1024;
+constexpr size_t kMaxReadBytesPerEvent = size_t{32} * 1024;
 constexpr int kListenBacklog = 1024;
 constexpr int kProxyHeaderTimeoutMs = 2000;  // PROXY header read deadline
 // PROXY-header reads run on this bounded pool, off the acceptor thread, so a stalled/partial header
@@ -79,6 +80,10 @@ int bind_listener(const std::string& host, uint16_t port) {
 
     int one = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#ifdef TCP_DEFER_ACCEPT
+    const int defer_accept_seconds = 10;
+    ::setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer_accept_seconds, sizeof(defer_accept_seconds));
+#endif
 
     sockaddr_in bind_address{};
     bind_address.sin_family = AF_INET;
@@ -183,6 +188,7 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
                 // Scan with a moving offset and erase the consumed prefix once at the end, not
                 // per line (which would be quadratic on a pipelined burst). handle_line copies out
                 // what it keeps, so a view is safe.
+                connection->socket->cork();
                 size_t start = 0;
                 size_t newline;
                 while ((newline = connection->buffer.find('\n', start)) != std::string::npos) {
@@ -197,11 +203,13 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
                             log::info("Client {} exceeded the protocol-error budget ({}); "
                                       "disconnecting",
                                       connection->socket->peer(), max_protocol_errors_);
+                            connection->socket->uncork(); // flush the error reply before dropping
                             remove_connection(connection);
                             return false;
                         }
                     }
                 }
+                connection->socket->uncork(); // one send() for every ack produced by this chunk
                 if (start > 0)
                     connection->buffer.erase(0, start);
                 if (connection->buffer.size() > max_line_bytes_) {

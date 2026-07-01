@@ -142,6 +142,7 @@ private:
     std::atomic<uint64_t> job_counter_{0};
     uint32_t job_id_prefix_ = 0;
     std::atomic<uint64_t> extranonce1_counter_{0};
+    std::atomic<uint64_t> broadcast_cursor_{0};
     std::atomic<uint64_t> accepted_shares_{0};
     std::atomic<uint64_t> rejected_shares_{0};
     std::atomic<uint64_t> blocks_found_{0};

@@ -194,8 +194,12 @@ Pool::PublishOutcome Pool::broadcast_job(const std::shared_ptr<const stratum::Jo
         const std::scoped_lock lock(mutex_);
         recipients = clients_;
     }
-    for (const auto& client : recipients)
-        client->session->send_notify(*job, clean);
+    if (!recipients.empty()) {
+        const size_t count = recipients.size();
+        const size_t begin = broadcast_cursor_.fetch_add(1, std::memory_order_relaxed) % count;
+        for (size_t offset = 0; offset < count; ++offset)
+            recipients[(begin + offset) % count]->session->send_notify(*job, clean);
+    }
     return PublishOutcome::Published;
 }
 

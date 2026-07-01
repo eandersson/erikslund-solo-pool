@@ -25,6 +25,9 @@ public:
     void send_lines(std::span<const std::string_view> lines) override; // coalesced; never blocks
     std::string peer() const override { return peer_; }
 
+    void cork();
+    void uncork();
+
     int fd() const { return fd_; }
 
     void attach_reactor(int epoll_fd, void* epoll_data);
@@ -46,6 +49,7 @@ private:
     std::string outbox_;         // framed bytes awaiting the socket
     std::size_t outbox_pos_ = 0; // bytes already written from the front of outbox_
     bool epollout_armed_ = false;
+    bool corked_ = false;
     int epoll_fd_ = -1;
     void* epoll_data_ = nullptr;
     std::atomic<bool> dead_{false};

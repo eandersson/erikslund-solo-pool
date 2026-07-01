@@ -107,6 +107,25 @@ void SocketConnection::send_lines(std::span<const std::string_view> lines) {
         fail_locked(); // peer cannot keep up; drop it rather than buffer unboundedly
         return;
     }
+    if (corked_)
+        return;
+    if (!drain_locked()) {
+        fail_locked();
+        return;
+    }
+    arm_write_interest_locked(outbox_pos_ < outbox_.size());
+}
+
+void SocketConnection::cork() {
+    const std::scoped_lock lock(write_mutex_);
+    corked_ = true;
+}
+
+void SocketConnection::uncork() {
+    const std::scoped_lock lock(write_mutex_);
+    corked_ = false;
+    if (dead_.load(std::memory_order_relaxed))
+        return;
     if (!drain_locked()) {
         fail_locked();
         return;
