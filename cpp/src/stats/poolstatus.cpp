@@ -143,13 +143,14 @@ double round5(double value) {
 // RFC 9557 / RFC 3339 UTC timestamp -> epoch (0 if unparseable). Trailing 'Z' and [tz] are
 // ignored; components read as UTC.
 int64_t parse_rfc9557(const std::string& value) {
-    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
-    if (std::sscanf(value.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6)
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (std::sscanf(value.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute,
+                    &second) != 6)
         return 0;
-    if (mo < 1 || mo > 12 || d < 1 || d > 31)
+    if (month < 1 || month > 12 || day < 1 || day > 31)
         return 0;
-    return days_from_civil(y, static_cast<unsigned>(mo), static_cast<unsigned>(d)) * 86400 +
-           static_cast<int64_t>(h) * 3600 + static_cast<int64_t>(mi) * 60 + s;
+    return days_from_civil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400 +
+           static_cast<int64_t>(hour) * 3600 + static_cast<int64_t>(minute) * 60 + second;
 }
 
 double parse_suffix(std::string_view text) {
@@ -291,25 +292,25 @@ glz::generic build_user_stats_from(const std::string& address,
 
     glz::generic worker_rows = glz::generic::array_t{};
     for (const auto* worker_ptr : ordered) {
-        const auto& w = *worker_ptr;
+        const auto& entry = *worker_ptr;
         for (std::size_t i = 0; i < user_windows.size(); ++i)
-            user_windows[i] += w.hashrate_windows[i];
-        total_shares += w.shares_accepted;
-        total_rejected += w.shares_rejected;
-        best_difficulty = std::max(best_difficulty, w.best_difficulty);
-        last_share_timestamp = std::max(last_share_timestamp, w.last_share_ts);
+            user_windows[i] += entry.hashrate_windows[i];
+        total_shares += entry.shares_accepted;
+        total_rejected += entry.shares_rejected;
+        best_difficulty = std::max(best_difficulty, entry.best_difficulty);
+        last_share_timestamp = std::max(last_share_timestamp, entry.last_share_ts);
 
         glz::generic row = glz::generic::object_t{};
-        row["workername"] = w.worker.empty() ? address : w.worker;
+        row["workername"] = entry.worker.empty() ? address : entry.worker;
         // Merge the hashrate fields after "workername" (preserving the historical key order).
-        glz::generic hashrate = hashrate_fields(w.hashrate_windows);
+        glz::generic hashrate = hashrate_fields(entry.hashrate_windows);
         for (const auto& [key, child] : hashrate.get_object())
             row[key] = child;
-        row["shares_accepted"] = static_cast<double>(w.shares_accepted);
-        row["shares_rejected"] = static_cast<double>(w.shares_rejected);
-        row["bestshare"] = w.best_difficulty;
-        row["lastshare"] = format_rfc9557(w.last_share_ts);
-        row["last_share_age"] = static_cast<double>(age(w.last_share_ts));
+        row["shares_accepted"] = static_cast<double>(entry.shares_accepted);
+        row["shares_rejected"] = static_cast<double>(entry.shares_rejected);
+        row["bestshare"] = entry.best_difficulty;
+        row["lastshare"] = format_rfc9557(entry.last_share_ts);
+        row["last_share_age"] = static_cast<double>(age(entry.last_share_ts));
         worker_rows.get_array().push_back(std::move(row));
     }
 

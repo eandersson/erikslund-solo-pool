@@ -39,16 +39,16 @@ bool valid_ipv6(std::string_view ip) {
     return inet_pton(AF_INET6, std::string(ip).c_str(), &a) == 1;
 }
 
-bool valid_port(std::string_view p) {
-    if (p.empty() || p.size() > 5)
+bool valid_port(std::string_view port) {
+    if (port.empty() || port.size() > 5)
         return false;
-    int v = 0;
-    for (const char c : p) {
+    int value = 0;
+    for (const char c : port) {
         if (c < '0' || c > '9')
             return false;
-        v = v * 10 + (c - '0');
+        value = value * 10 + (c - '0');
     }
-    return v >= 0 && v <= 65535;
+    return value >= 0 && value <= 65535;
 }
 
 // (ip & mask) == (net & mask), IPv4. Returns false on any parse error.
@@ -187,15 +187,15 @@ bool read_exact(int fd, uint8_t* buf, size_t n, Clock::time_point deadline) {
         pollfd pfd{fd, POLLIN, 0};
         if (::poll(&pfd, 1, ms) <= 0)
             return false;
-        const ssize_t r = ::recv(fd, buf + got, n - got, 0);
-        if (r < 0) {
+        const ssize_t received = ::recv(fd, buf + got, n - got, 0);
+        if (received < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                 continue;
             return false;
         }
-        if (r == 0)
+        if (received == 0)
             return false;
-        got += static_cast<size_t>(r);
+        got += static_cast<size_t>(received);
     }
     return true;
 }

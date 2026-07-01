@@ -303,9 +303,11 @@ std::string dashboard_html(const PoolSnapshot& snapshot) {
     const std::string chain = snapshot.chain.empty() ? "&mdash;" : html_escape(snapshot.chain);
     std::string height = "&mdash;";
     if (snapshot.height) {
-        const int64_t h = *snapshot.height;
-        height = h < 1000 ? group_digits(h)
-                          : stats::suffix_string(static_cast<double>(h)) + " (" + group_digits(h) + ")";
+        const int64_t block_height = *snapshot.height;
+        height = block_height < 1000
+                     ? group_digits(block_height)
+                     : stats::suffix_string(static_cast<double>(block_height)) + " (" +
+                           group_digits(block_height) + ")";
     }
     const std::string network_difficulty =
         snapshot.network_diff ? format_difficulty(*snapshot.network_diff) : "&mdash;";

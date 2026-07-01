@@ -715,9 +715,9 @@ void Pool::write_stats() {
         }
         std::vector<std::pair<std::string, std::string>> live;
         for (const auto& client : clients_copy) {
-            const auto s = client->session->stats();
-            if (!s.address.empty())
-                live.emplace_back(s.address, s.worker);
+            const auto session_stats = client->session->stats();
+            if (!session_stats.address.empty())
+                live.emplace_back(session_stats.address, session_stats.worker);
         }
         prune_user_stats(live);
 

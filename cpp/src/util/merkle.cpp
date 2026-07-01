@@ -11,11 +11,11 @@
 
 namespace erikslund::util {
 
-Hash256 hash_pair(const Hash256& a, const Hash256& b) {
-    // a||b is the 64-byte blob the fused SHA256D64 kernel consumes; keep it on the stack.
+Hash256 hash_pair(const Hash256& left, const Hash256& right) {
+    // left||right is the 64-byte blob the fused SHA256D64 kernel consumes; keep it on the stack.
     uint8_t buffer[64];
-    std::memcpy(buffer, a.data(), 32);
-    std::memcpy(buffer + 32, b.data(), 32);
+    std::memcpy(buffer, left.data(), 32);
+    std::memcpy(buffer + 32, right.data(), 32);
     Hash256 out;
     SHA256D64(out.data(), buffer, 1);
     return out;

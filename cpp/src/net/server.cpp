@@ -464,8 +464,8 @@ void Server::run(const std::stop_token& stop) {
                 // for a PROXY header (proxy_pending_) against the cap, else a burst between accept
                 // and adoption overshoots max_clients.
                 size_t pending_total = proxy_pending_.load(std::memory_order_relaxed);
-                for (const auto& w : workers_)
-                    pending_total += w->pending.load(std::memory_order_relaxed);
+                for (const auto& worker : workers_)
+                    pending_total += worker->pending.load(std::memory_order_relaxed);
                 if (pool_.client_count() + pending_total >= static_cast<size_t>(max_clients_)) {
                     log::warning("Max clients ({}) reached; dropping connection", max_clients_);
                     ::close(fd);

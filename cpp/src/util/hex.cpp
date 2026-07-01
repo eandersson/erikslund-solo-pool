@@ -29,21 +29,21 @@ constexpr auto kHexTable = make_hex_table();
 
 std::string to_hex(std::span<const uint8_t> data) {
     std::string out(data.size() * 2, '\0');
-    size_t j = 0;
+    size_t out_pos = 0;
     for (uint8_t byte : data) {
-        out[j++] = kHexChars[byte >> 4];
-        out[j++] = kHexChars[byte & 0x0f];
+        out[out_pos++] = kHexChars[byte >> 4];
+        out[out_pos++] = kHexChars[byte & 0x0f];
     }
     return out;
 }
 
 std::string to_hex_reversed(std::span<const uint8_t> data) {
     std::string out(data.size() * 2, '\0');
-    size_t j = 0;
+    size_t out_pos = 0;
     for (size_t index = data.size(); index-- > 0;) {
         const uint8_t byte = data[index];
-        out[j++] = kHexChars[byte >> 4];
-        out[j++] = kHexChars[byte & 0x0f];
+        out[out_pos++] = kHexChars[byte >> 4];
+        out[out_pos++] = kHexChars[byte & 0x0f];
     }
     return out;
 }
