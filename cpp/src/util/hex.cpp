@@ -39,13 +39,18 @@ std::string to_hex(std::span<const uint8_t> data) {
 
 std::string to_hex_reversed(std::span<const uint8_t> data) {
     std::string out(data.size() * 2, '\0');
+    to_hex_reversed_into(out, data);
+    return out;
+}
+
+void to_hex_reversed_into(std::span<char> out, std::span<const uint8_t> data) noexcept {
+    // Precondition (documented in the header): out.size() == 2 * data.size().
     size_t out_pos = 0;
     for (size_t index = data.size(); index-- > 0;) {
         const uint8_t byte = data[index];
         out[out_pos++] = kHexChars[byte >> 4];
         out[out_pos++] = kHexChars[byte & 0x0f];
     }
-    return out;
 }
 
 bool is_hex(std::string_view text) noexcept {

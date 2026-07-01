@@ -471,6 +471,8 @@ Pool::WorkerStat* Pool::worker_entry(const std::string& address, const std::stri
         addr_it = user_stats_.try_emplace(address).first;
     }
     auto& workers = addr_it->second;
+    if (const auto worker_it = workers.find(worker); worker_it != workers.end())
+        return &worker_it->second;
     const std::string key = resolve_worker_key(workers, worker);
     return &workers.try_emplace(key, started_steady_).first->second;
 }
@@ -947,8 +949,9 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
     const std::string address = session.address().value_or("?");
     const std::string worker = session.worker().value_or(""); // empty if the miner sent no worker
     log::info("BLOCK CANDIDATE height={} hash={} diff={:.3f} address={} worker={}", job.height(),
-                result.block_hash_hex, result.difficulty, address, worker);
-    PendingBlock block{job.height(), result.block_hash_hex,
+                result.block_hash_hex(), result.difficulty, address, worker);
+    // PendingBlock outlives the ShareResult via submit_queue_, so materialize the hash view.
+    PendingBlock block{job.height(), std::string(result.block_hash_hex()),
                        job.build_block_hex(result.legacy_coinbase, result.header), address, worker};
     // Spool before submit so a solved block is never lost if submitblock fails.
     spool_block(block);

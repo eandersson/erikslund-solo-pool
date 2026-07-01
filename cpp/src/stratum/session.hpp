@@ -198,6 +198,9 @@ private:
     // Highest publication seq delivered to this miner (under mutex_); drops out-of-order older
     // jobs so a slow sender can't leave the miner grinding superseded work.
     uint64_t last_notified_seq_ = 0;
+    // Reused response-line buffer for the per-share ack/error fast paths (guarded by mutex_);
+    // capacity persists so steady-state responses allocate nothing.
+    std::string response_scratch_;
 
     mutable std::mutex mutex_; // serializes handle_line vs. send_* across threads
 };

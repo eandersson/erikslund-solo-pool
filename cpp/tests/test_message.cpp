@@ -305,3 +305,64 @@ TEST_CASE("make_notify_line is byte-identical to make_notification(...) serializ
     CHECK(make_notify_line(job_id, prevhash, cb1, cb2, two, version, nbits, ntime, false) ==
           reference(two, false));
 }
+
+namespace {
+
+// The typed fast path and the DOM path must agree on every field AND on the response bytes the
+// echoed id produces. Called for lines that take the fast path and lines that fall back alike.
+void check_parse_paths_agree(const std::string& line) {
+    CAPTURE(line);
+    const auto fast = parse_request(line);
+    const auto dom = detail::parse_request_dom(line);
+    REQUIRE(fast.has_value() == dom.has_value());
+    if (!fast)
+        return;
+    CHECK(fast->method == dom->method);
+    CHECK(fast->params == dom->params);
+    // The id is compared through its wire echo: that is the byte contract that matters.
+    CHECK(make_result_line(fast->id, true) == make_result_line(dom->id, true));
+    CHECK(make_error_line(fast->id, ERR_OTHER) == make_error_line(dom->id, ERR_OTHER));
+    CHECK(fast->configure_extensions == dom->configure_extensions);
+    CHECK(fast->configure_version_rolling == dom->configure_version_rolling);
+    CHECK(fast->version_rolling_mask_present == dom->version_rolling_mask_present);
+    CHECK(fast->version_rolling_mask == dom->version_rolling_mask);
+    CHECK(fast->suggested_difficulty == dom->suggested_difficulty);
+}
+
+} // namespace
+
+TEST_CASE("typed parse fast path matches the DOM path across id/params spellings") {
+    // id spellings on a hot-path submit line: integers echo, string echoes, everything else nulls.
+    for (const char* id : {"1", "-1", "0", "9007199254740992", "1.0", "1e2", "1.5", "-0.5",
+                           "\"abc\"", "\"\"", "null", "true", "false", "[1]", "{\"a\":1}"}) {
+        check_parse_paths_agree(std::string(R"({"id":)") + id +
+                                R"(,"method":"mining.submit","params":["w","j","0001","6553f100","2a2a2a2a"]})");
+    }
+    // Structural spellings: params shapes, unknown keys, duplicates, malformed tails.
+    for (const char* line : {
+             R"({"method":"mining.submit"})",                                  // no id, no params
+             R"({"method":"mining.submit","params":[]})",                      // empty params
+             R"({"method":"mining.submit","params":null})",                    // null params
+             R"({"method":"mining.submit","params":{"a":1}})",                 // params object
+             R"({"method":"mining.submit","params":["w",null,3,"x"]})",        // non-string elements
+             R"({"id":1,"jsonrpc":"2.0","method":"mining.submit","params":["w"],"vendor":5})",
+             R"({"id":1,"id":2,"method":"mining.submit","params":["w"]})",     // duplicate id
+             R"({"method":"a","method":"mining.submit","params":["w"]})",      // duplicate method
+             R"({"method":""})",                                               // empty method: valid
+             R"({"method":null})",                                             // null method: reject
+             R"({"id":1,"params":["w"]})",                                     // missing method
+             R"({"method":123})",                                              // non-string method
+             R"([1,2,3])",                                                     // not an object
+             R"("just a string")",                                             // not an object
+             R"({"method":"mining.submit","params":["w"]} trailing)",          // trailing garbage
+             R"({"method":"mining.subscribe","params":["agent/1.0"]})",
+             R"({"method":"mining.authorize","params":["addr.worker","x"]})",
+             R"({"id":9,"method":"mining.suggest_difficulty","params":[12.5]})",
+             R"({"id":9,"method":"mining.suggest_difficulty","params":["12.5"]})",
+             R"({"id":3,"method":"mining.configure","params":[["version-rolling"],)"
+             R"({"version-rolling.mask":"1fffe000"}]})",
+             R"({"method":"mining.extranonce.subscribe","params":[]})",
+         }) {
+        check_parse_paths_agree(line);
+    }
+}

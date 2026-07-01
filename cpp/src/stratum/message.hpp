@@ -39,6 +39,10 @@ struct Request {
 // Returns nullopt unless it's a JSON object with a string method.
 std::optional<Request> parse_request(std::string_view line);
 
+namespace detail {
+std::optional<Request> parse_request_dom(std::string_view line);
+} // namespace detail
+
 glz::generic make_result(const glz::generic& id, glz::generic result);
 glz::generic make_error(const glz::generic& id, const StratumError& error);
 glz::generic make_notification(std::string_view method, glz::generic params);
@@ -47,6 +51,9 @@ glz::generic make_notification(std::string_view method, glz::generic params);
 // tree). Byte-identical to make_result/make_error dumped (key order error < id < result).
 std::string make_result_line(const glz::generic& id, bool result);
 std::string make_error_line(const glz::generic& id, const StratumError& error);
+
+void make_result_line_into(std::string& out, const glz::generic& id, bool result);
+void make_error_line_into(std::string& out, const glz::generic& id, const StratumError& error);
 
 // Fast path for mining.notify (highest-fanout, re-serialized per client per broadcast):
 // concatenate the wire line from the job's already-hex fields. All values are hex, so no JSON

@@ -138,7 +138,7 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
     CHECK(to_hex(result->header) ==
           "00000020452301efcdab8967452301efcdab8967452301efcdab0000000000000000000074185af0df"
           "59583eea8894ec1e7fbe700acf31e90df110c0f85c77687184423500f15365ffff001d2a2a2a2a");
-    CHECK(result->block_hash_hex ==
+    CHECK(result->block_hash_hex() ==
           "ba5564b906d836b684db96f29da3c63a87694ee4542d5f8350b08c4e09ea24f9");
 
     // legacy coinbase = coinbase1 || extranonce1 || extranonce2 || coinbase2 (each golden above).

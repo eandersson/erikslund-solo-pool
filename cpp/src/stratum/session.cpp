@@ -136,7 +136,8 @@ void Session::send_result(const json& id, json result) {
 }
 
 void Session::send_result(const json& id, bool result) {
-    connection_.send_line(make_result_line(id, result));
+    make_result_line_into(response_scratch_, id, result); // reused buffer: no alloc at steady state
+    connection_.send_line(response_scratch_);
 }
 
 void Session::send_error(const json& id, const StratumError& error) {
@@ -145,7 +146,8 @@ void Session::send_error(const json& id, const StratumError& error) {
     if (error.code == ERR_OTHER.code || error.code == ERR_UNAUTHORIZED.code ||
         error.code == ERR_NOT_SUBSCRIBED.code)
         ++protocol_errors_;
-    connection_.send_line(make_error_line(id, error));
+    make_error_line_into(response_scratch_, id, error);
+    connection_.send_line(response_scratch_);
 }
 
 const Session::Coinbase2Cache& Session::coinbase2_for(const Job& job) {

@@ -47,12 +47,53 @@ std::string id_wire(const json& id) {
     return glz::write_json(id).value_or("null");
 }
 
+void normalize_request_id(json& request_id, const json& raw_id) {
+    if (raw_id.is_string()) {
+        request_id = raw_id;
+    } else if (raw_id.is_number()) {
+        const double value = raw_id.get<double>();
+        if (std::isfinite(value) && value == std::floor(value))
+            request_id = raw_id;
+    }
+}
+
+struct RequestWire {
+    json id{};
+    std::optional<std::string> method{};
+    std::optional<std::vector<std::string>> params{};
+};
+
+constexpr glz::opts kWireOpts{.error_on_unknown_keys = false};
+
 } // namespace
 
 std::optional<Request> parse_request(std::string_view line) {
     if (!within_depth(line))
         return std::nullopt;
 
+    // Fast path
+    {
+        RequestWire wire;
+        if (!glz::read<kWireOpts>(wire, line)) {
+            if (!wire.method)
+                return std::nullopt; // missing or null method: the DOM path rejects these too
+            // configure/suggest_difficulty carry non-flat params the typed shape can't represent
+            // (nested arrays; a numeric difficulty): let the DOM path extract them.
+            if (*wire.method != "mining.configure" && *wire.method != "mining.suggest_difficulty") {
+                Request request;
+                request.method = std::move(*wire.method);
+                normalize_request_id(request.id, wire.id);
+                if (wire.params)
+                    request.params = std::move(*wire.params);
+                return request;
+            }
+        }
+    }
+
+    return detail::parse_request_dom(line);
+}
+
+std::optional<Request> detail::parse_request_dom(std::string_view line) {
     json doc;
     if (glz::read_json(doc, line))   // parse error
         return std::nullopt;
@@ -64,17 +105,8 @@ std::optional<Request> parse_request(std::string_view line) {
     Request request;
     request.method = doc["method"].get<std::string>();
 
-    if (doc.contains("id")) {
-        const json& id = doc["id"];
-        if (id.is_string()) {
-            request.id = id;
-        } else if (id.is_number()) {
-            const double value = id.get<double>();
-            if (std::isfinite(value) && value == std::floor(value))
-                request.id = id;
-        }
-        // bool / array / object / fractional number: id stays null
-    }
+    if (doc.contains("id"))
+        normalize_request_id(request.id, doc["id"]);
 
     json::array_t* params = nullptr;
     if (doc.contains("params") && doc["params"].is_array())
@@ -151,10 +183,17 @@ json make_notification(std::string_view method, json params) {
     return out;
 }
 
-std::string make_result_line(const json& id, bool result) {
-    std::string out = "{\"error\":null,\"id\":";
+void make_result_line_into(std::string& out, const json& id, bool result) {
+    out.clear(); // capacity persists: after the first response this path allocates nothing
+    out += "{\"error\":null,\"id\":";
     out += id_wire(id);
     out += result ? ",\"result\":true}" : ",\"result\":false}";
+}
+
+std::string make_result_line(const json& id, bool result) {
+    std::string out;
+    out.reserve(48); // covers the frame + any numeric id; string ids may grow once
+    make_result_line_into(out, id, result);
     return out;
 }
 
@@ -198,15 +237,22 @@ std::string make_notify_line(const std::string& job_id, const std::string& prevh
     return out;
 }
 
-std::string make_error_line(const json& id, const StratumError& error) {
+void make_error_line_into(std::string& out, const json& id, const StratumError& error) {
     // error.message is a compile-time constant with no JSON-special chars; embed without escaping.
-    std::string out = "{\"error\":[";
+    out.clear(); // capacity persists across calls (see make_result_line_into)
+    out += "{\"error\":[";
     out += std::to_string(error.code);
     out += ",\"";
     out += error.message;
     out += "\",null],\"id\":";
     out += id_wire(id);
     out += ",\"result\":null}";
+}
+
+std::string make_error_line(const json& id, const StratumError& error) {
+    std::string out;
+    out.reserve(80); // frame + longest error message + any numeric id
+    make_error_line_into(out, id, error);
     return out;
 }
 

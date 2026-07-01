@@ -1,5 +1,7 @@
 #include "stratum/job.hpp"
 
+#include <algorithm>
+#include <array>
 #include <expected>
 #include <format>
 #include <optional>
@@ -126,16 +128,17 @@ bool Job::mines_on(const std::string& tip_display_hex) const {
     }
 }
 
-Bytes Job::build_header(const util::Hash256& merkle_root, uint32_t ntime, uint32_t nonce,
-                        uint32_t version) const {
-    Bytes header;
-    header.reserve(80);
-    util::append_le32(header, version);
-    append(header, prevhash_internal_);
-    append(header, merkle_root);
-    util::append_le32(header, ntime);
-    util::append_le32(header, bits_);
-    util::append_le32(header, nonce);
+std::array<uint8_t, 80> Job::build_header(const util::Hash256& merkle_root, uint32_t ntime,
+                                          uint32_t nonce, uint32_t version) const {
+    // version(4) || prevhash(32) || merkle_root(32) || ntime(4) || nbits(4) || nonce(4), all LE.
+    // Fixed-size stack write: this runs per submitted share, so no heap traffic.
+    std::array<uint8_t, 80> header;
+    util::write_le32(header.data(), version);
+    std::copy_n(prevhash_internal_.data(), 32, header.data() + 4);
+    std::copy_n(merkle_root.data(), 32, header.data() + 36);
+    util::write_le32(header.data() + 68, ntime);
+    util::write_le32(header.data() + 72, bits_);
+    util::write_le32(header.data() + 76, nonce);
     return header;
 }
 
@@ -186,7 +189,7 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
 
     const util::Hash256 coinbase_txid = util::sha256d(coinbase);
     const util::Hash256 root = util::merkle_root_from_branch(coinbase_txid, merkle_branch_);
-    Bytes header = build_header(root, ntime, nonce, version);
+    const std::array<uint8_t, 80> header = build_header(root, ntime, nonce, version);
     const util::Hash256 block_hash = util::sha256d(header);
     const util::uint256 hash_value = util::uint256::from_le_bytes(block_hash);
 
@@ -199,8 +202,8 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
     ShareResult result;
     result.difficulty = difficulty;
     result.is_block = is_block;
-    result.block_hash_hex = util::to_hex_reversed(block_hash);
-    result.header = std::move(header);
+    result.header = header;
+    util::to_hex_reversed_into(result.block_hash_chars, block_hash);
     result.legacy_coinbase = std::move(coinbase);
     return result;
 }

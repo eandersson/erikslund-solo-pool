@@ -14,6 +14,8 @@ std::string to_hex(std::span<const uint8_t> data);
 
 std::string to_hex_reversed(std::span<const uint8_t> data);
 
+void to_hex_reversed_into(std::span<char> out, std::span<const uint8_t> data) noexcept;
+
 // True iff non-empty, even-length, and all hex digits.
 bool is_hex(std::string_view text) noexcept;
 

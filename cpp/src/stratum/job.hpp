@@ -1,6 +1,7 @@
 #pragma once
 // One block template as mineable work + share validation. Per-template state is shared;
 // coinbase2 (payout) is per miner. Immutable + pure validate_share().
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <expected>
@@ -36,11 +37,16 @@ struct ShareRejection {
 };
 
 struct ShareResult {
-    double difficulty = 0.0;    // pool difficulty this hash satisfies
-    bool is_block = false;      // hash <= network target
-    std::string block_hash_hex; // canonical (display) hash
-    Bytes header;
+    double difficulty = 0.0;             // pool difficulty this hash satisfies
+    bool is_block = false;               // hash <= network target
+    std::array<uint8_t, 80> header{};    // fixed-size: no per-share heap traffic
     Bytes legacy_coinbase;
+    // Canonical (display) hash as hex. Stored inline (a submit-rate path frees a heap string
+    // unread on every non-block share otherwise); read through the accessor.
+    std::array<char, 64> block_hash_chars{};
+    std::string_view block_hash_hex() const {
+        return {block_hash_chars.data(), block_hash_chars.size()};
+    }
 };
 
 struct ShareInput {
@@ -93,8 +99,8 @@ public:
     std::string build_block_hex(ByteView legacy_coinbase, ByteView header) const;
 
 private:
-    Bytes build_header(const util::Hash256& merkle_root, uint32_t ntime, uint32_t nonce,
-                       uint32_t version) const;
+    std::array<uint8_t, 80> build_header(const util::Hash256& merkle_root, uint32_t ntime,
+                                         uint32_t nonce, uint32_t version) const;
 
     std::string job_id_;
     bool clean_;
