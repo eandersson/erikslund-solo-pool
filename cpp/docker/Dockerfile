@@ -49,8 +49,9 @@ COPY build-entrypoint.sh /usr/local/bin/build-entrypoint.sh
 COPY clang-tidy.sh /usr/local/bin/clang-tidy.sh
 COPY cppcheck.sh /usr/local/bin/cppcheck.sh
 COPY sanitize.sh /usr/local/bin/sanitize.sh
+COPY tsan.sh /usr/local/bin/tsan.sh
 RUN chmod +x /usr/local/bin/build-entrypoint.sh /usr/local/bin/clang-tidy.sh \
-        /usr/local/bin/cppcheck.sh /usr/local/bin/sanitize.sh
+        /usr/local/bin/cppcheck.sh /usr/local/bin/sanitize.sh /usr/local/bin/tsan.sh
 
 WORKDIR /build
 ENTRYPOINT ["/usr/local/bin/build-entrypoint.sh"]

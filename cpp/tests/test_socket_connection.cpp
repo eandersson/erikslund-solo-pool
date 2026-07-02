@@ -126,6 +126,65 @@ TEST_CASE("send_lines coalesces several lines into one framed flight") {
     ::close(sv[1]);
 }
 
+TEST_CASE("cork defers the syscall; uncork delivers everything in one flight") {
+    int sv[2];
+    make_pair(sv);
+    {
+        SocketConnection conn(sv[0], 30.0, "test:cork");
+        conn.cork();
+        conn.send_line("one");
+        conn.send_line("two");
+        // Nothing on the wire while corked -- the sends only queued.
+        char buf[32] = {};
+        CHECK(::recv(sv[1], buf, sizeof(buf), MSG_DONTWAIT) < 0);
+        conn.uncork();
+        CHECK_FALSE(conn.dead());
+        const ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+        REQUIRE(n == 8);
+        CHECK(std::string(buf, 8) == "one\ntwo\n"); // framed, ordered, single flight
+    }
+    ::close(sv[1]);
+}
+
+TEST_CASE("a work-thread send during a cork window is queued and flushed by uncork") {
+    int sv[2];
+    make_pair(sv);
+    {
+        SocketConnection conn(sv[0], 30.0, "test:cork-notify");
+        conn.cork();
+        conn.send_line("ack");
+        conn.send_line("notify"); // e.g. a broadcast landing mid-chunk: deferred, not lost
+        conn.uncork();
+        char buf[32] = {};
+        const ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+        REQUIRE(n == 11);
+        CHECK(std::string(buf, 11) == "ack\nnotify\n");
+        // After uncork the connection is back to direct sends.
+        conn.send_line("direct");
+        const ssize_t m = ::recv(sv[1], buf, sizeof(buf), 0);
+        REQUIRE(m == 7);
+        CHECK(std::string(buf, 7) == "direct\n");
+    }
+    ::close(sv[1]);
+}
+
+TEST_CASE("the outbox cap still fails a flooded connection while corked") {
+    int sv[2];
+    make_pair(sv);
+    {
+        SocketConnection conn(sv[0], 30.0, "test:cork-cap");
+        conn.cork();
+        // While corked nothing drains, so the cap is the only defense; it must still fire.
+        const std::string chunk(2000, 'z');
+        for (int i = 0; i < 40 && !conn.dead(); ++i)
+            conn.send_line(chunk);
+        CHECK(conn.dead());
+        conn.uncork(); // must be safe (idempotent no-op) on a dead connection
+        CHECK(conn.dead());
+    }
+    ::close(sv[1]);
+}
+
 TEST_CASE("send_line never blocks and drops a peer that won't drain past the outbox cap") {
     int sv[2];
     make_pair(sv);

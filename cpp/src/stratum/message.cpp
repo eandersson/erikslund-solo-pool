@@ -63,8 +63,6 @@ struct RequestWire {
     std::optional<std::vector<std::string>> params{};
 };
 
-constexpr glz::opts kWireOpts{.error_on_unknown_keys = false};
-
 } // namespace
 
 std::optional<Request> parse_request(std::string_view line) {
@@ -74,7 +72,7 @@ std::optional<Request> parse_request(std::string_view line) {
     // Fast path
     {
         RequestWire wire;
-        if (!glz::read<kWireOpts>(wire, line)) {
+        if (!glz::read_json(wire, line)) {
             if (!wire.method)
                 return std::nullopt; // missing or null method: the DOM path rejects these too
             // configure/suggest_difficulty carry non-flat params the typed shape can't represent

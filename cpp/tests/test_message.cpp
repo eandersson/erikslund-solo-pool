@@ -362,6 +362,8 @@ TEST_CASE("typed parse fast path matches the DOM path across id/params spellings
              R"({"id":3,"method":"mining.configure","params":[["version-rolling"],)"
              R"({"version-rolling.mask":"1fffe000"}]})",
              R"({"method":"mining.extranonce.subscribe","params":[]})",
+             R"({"method":"mining.submit","nparams":["w",null,3,{"a":[11,2]},t4rue]})",
+             R"({"j3onrpc":".0","id":9007199254740992,"method":"mining.submit","par\ms":[]})",
          }) {
         check_parse_paths_agree(line);
     }

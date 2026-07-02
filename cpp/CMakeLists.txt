@@ -45,6 +45,18 @@ if(SANITIZE)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
+# -DSANITIZE_THREAD=ON instruments with ThreadSanitizer instead (TSan cannot combine with ASan,
+# hence the separate option). Exercised by docker/tsan.sh against the cross-thread tests
+# (reactor/work-thread write paths). Never part of Release.
+option(SANITIZE_THREAD "Instrument with ThreadSanitizer" OFF)
+if(SANITIZE_THREAD)
+    if(SANITIZE)
+        message(FATAL_ERROR "SANITIZE and SANITIZE_THREAD are mutually exclusive")
+    endif()
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
+
 # ---- dependencies ------------------------------------------------------------
 # Glaze (JSON/YAML) and doctest are header-only, installed on the default include path by their
 # -dev packages, so they need no find_package(). libcurl + zmq need link targets.
