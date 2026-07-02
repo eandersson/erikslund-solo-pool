@@ -146,8 +146,7 @@ private:
     std::string make_dedup_key(const std::string& job_id, std::string_view extranonce2,
                                std::string_view ntime, std::string_view nonce,
                                const std::optional<std::string>& version_bits) const;
-    // Apply the share-accounting side effects of a valid share (under mutex_).
-    void record_accepted_share(const ShareResult& result);
+    void record_accepted_share_locked(double credited, double share_difficulty);
 
     // Caches one job's coinbase2 bytes+hex so mining.notify doesn't re-encode per broadcast.
     struct Coinbase2Cache {
@@ -155,7 +154,7 @@ private:
         Bytes coinbase2;
         std::string coinbase2_hex;
     };
-    const Coinbase2Cache& coinbase2_for(const Job& job);
+    std::shared_ptr<const Coinbase2Cache> coinbase2_for(const Job& job);
     bool remember(std::string key);
 
     friend struct SessionTestPeek; // test-only reach into remember()/the dedup sets
@@ -192,7 +191,7 @@ private:
     // Decaying diff/s per window. Guarded by mutex_ (written on share, read in stats()).
     stats::DecayingWindows<stats::kHashrateWindows.size()> hashrate_;
 
-    std::optional<Coinbase2Cache> coinbase2_cache_;
+    std::shared_ptr<const Coinbase2Cache> coinbase2_cache_; // replaced under mutex_; see above
     std::unordered_set<std::string> seen_shares_current_;
     std::unordered_set<std::string> seen_shares_previous_;
     void rotate_seen_shares();

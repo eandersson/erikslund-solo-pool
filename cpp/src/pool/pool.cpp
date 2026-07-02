@@ -959,8 +959,8 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
                        job.build_block_hex(result.legacy_coinbase, result.header), address, worker};
     // Spool before submit so a solved block is never lost if submitblock fails.
     spool_block(block);
-    // Hand the slow submitblock RPC to the submit thread: running it here would hold the caller's
-    // session mutex across the RPC, stalling that miner's next-work push.
+    // Hand the slow submitblock RPC to the submit thread: this runs on the caller's reactor
+    // thread, and blocking it on an RPC would stall every connection that reactor serves.
     {
         const std::scoped_lock lock(submit_mutex_);
         submit_queue_.push_back(std::move(block));

@@ -7,6 +7,7 @@
 #include <ctime>
 #include <format>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -150,15 +151,16 @@ void Session::send_error(const json& id, const StratumError& error) {
     connection_.send_line(response_scratch_);
 }
 
-const Session::Coinbase2Cache& Session::coinbase2_for(const Job& job) {
+std::shared_ptr<const Session::Coinbase2Cache> Session::coinbase2_for(const Job& job) {
     if (!payout_script_)
         throw std::logic_error("coinbase2_for called before payout_script_ was set");
     if (!coinbase2_cache_ || coinbase2_cache_->job_id != job.job_id()) {
         Bytes coinbase2 = job.build_coinbase2(*payout_script_);
         std::string coinbase2_hex = util::to_hex(coinbase2);
-        coinbase2_cache_ = {job.job_id(), std::move(coinbase2), std::move(coinbase2_hex)};
+        coinbase2_cache_ = std::make_shared<const Coinbase2Cache>(
+            job.job_id(), std::move(coinbase2), std::move(coinbase2_hex));
     }
-    return *coinbase2_cache_;
+    return coinbase2_cache_;
 }
 
 void Session::rotate_seen_shares() {
@@ -183,15 +185,17 @@ void Session::handle_line(std::string_view line) {
     const auto request = parse_request(line);
     if (!request)
         return;
+    if (request->method == "mining.submit") [[likely]] {
+        handle_submit(request->id, request->params);
+        return;
+    }
     const std::scoped_lock lock(mutex_);
     dispatch(*request);
 }
 
 void Session::dispatch(const Request& request) {
     const std::string& method = request.method;
-    if (method == "mining.submit") [[likely]]
-        handle_submit(request.id, request.params);
-    else if (method == "mining.subscribe")
+    if (method == "mining.subscribe")
         handle_subscribe(request.id, request.params);
     else if (method == "mining.authorize")
         handle_authorize(request.id, request.params);
@@ -238,7 +242,7 @@ std::optional<std::string> Session::build_notify_line(const Job& job, bool clean
             return std::nullopt;
         last_notified_seq_ = seq;
     }
-    const Coinbase2Cache& coinbase2 = coinbase2_for(job);
+    const std::shared_ptr<const Coinbase2Cache> coinbase2 = coinbase2_for(job);
     // Keep one generation of lookback on a clean job (old jobs still accept shares). Skip when the
     // live set is already empty, else we'd demote the empty set and discard a live generation.
     if (clean && !seen_shares_current_.empty())
@@ -246,7 +250,7 @@ std::optional<std::string> Session::build_notify_line(const Job& job, bool clean
     // Fast path: mining.notify fans out per client per broadcast; the json-tree dump dominated the
     // broadcast loop. Byte-identical (doctest-pinned).
     std::string line = make_notify_line(job.job_id(), job.prevhash_stratum(),
-                                        job.coinbase1_hex(), coinbase2.coinbase2_hex,
+                                        job.coinbase1_hex(), coinbase2->coinbase2_hex,
                                         job.merkle_branch_hex(), job.version_hex(),
                                         job.nbits_hex(), job.ntime_hex(), clean);
     // The new difficulty (if any) is now in effect from this job on; stop honoring the old one.
@@ -391,92 +395,114 @@ void Session::handle_suggest_difficulty(const Request& request) {
 }
 
 void Session::handle_submit(const json& id, const std::vector<std::string>& params) {
-    if (!authorized_) [[unlikely]] {
-        send_error(id, ERR_UNAUTHORIZED);
-        return;
-    }
-    if (!subscribed_) [[unlikely]] {
-        send_error(id, ERR_NOT_SUBSCRIBED);
-        return;
-    }
-    if (params.size() < 5) [[unlikely]] {
-        send_error(id, ERR_OTHER);
-        return;
-    }
-
-    const std::string& job_id = params[1];
-    const std::string& extranonce2 = params[2];
-    const std::string& ntime = params[3];
-    const std::string& nonce = params[4];
+    std::shared_ptr<const Job> job;
+    std::shared_ptr<const Coinbase2Cache> coinbase2;
+    std::string address, worker;
     std::optional<std::string> version_bits;
-    if (params.size() > 5 && !params[5].empty())
-        version_bits = params[5];
+    double snap_difficulty = 0.0, snap_previous = 0.0;
+    bool snap_pending = false;
+    uint32_t snap_version_mask = 0;
+    {
+        const std::scoped_lock lock(mutex_);
+        if (!authorized_) [[unlikely]] {
+            send_error(id, ERR_UNAUTHORIZED);
+            return;
+        }
+        if (!subscribed_) [[unlikely]] {
+            send_error(id, ERR_NOT_SUBSCRIBED);
+            return;
+        }
+        if (params.size() < 5) [[unlikely]] {
+            send_error(id, ERR_OTHER);
+            return;
+        }
 
-    const auto job = pool_.recent_job(job_id);
-    if (!job) [[unlikely]] {
-        ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Stale);
-        send_error(id, ERR_STALE);
-        return;
-    }
+        const std::string& job_id = params[1];
+        const std::string& extranonce2 = params[2];
+        const std::string& ntime = params[3];
+        const std::string& nonce = params[4];
+        if (params.size() > 5 && !params[5].empty())
+            version_bits = params[5];
 
-    if (extranonce2.size() > pool_.extranonce2_size() * 2 || ntime.size() > 8 || nonce.size() > 8 ||
-        (version_bits && version_bits->size() > 8)) [[unlikely]] {
-        ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Malformed);
-        send_error(id, ERR_OTHER);
-        return;
-    }
+        job = pool_.recent_job(job_id);
+        if (!job) [[unlikely]] {
+            ++shares_rejected_;
+            pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Stale);
+            send_error(id, ERR_STALE);
+            return;
+        }
 
-    if (!remember(make_dedup_key(job_id, extranonce2, ntime, nonce, version_bits))) [[unlikely]] {
-        ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Duplicate);
-        send_error(id, ERR_DUPLICATE);
-        return;
+        if (extranonce2.size() > pool_.extranonce2_size() * 2 || ntime.size() > 8 ||
+            nonce.size() > 8 || (version_bits && version_bits->size() > 8)) [[unlikely]] {
+            ++shares_rejected_;
+            pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Malformed);
+            send_error(id, ERR_OTHER);
+            return;
+        }
+
+        if (!remember(make_dedup_key(job_id, extranonce2, ntime, nonce, version_bits))) [[unlikely]] {
+            ++shares_rejected_;
+            pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Duplicate);
+            send_error(id, ERR_DUPLICATE);
+            return;
+        }
+
+        coinbase2 = coinbase2_for(*job);
+        address = or_empty(address_);
+        worker = or_empty(worker_);
+        snap_difficulty = difficulty_;
+        snap_previous = previous_difficulty_;
+        snap_pending = pending_difficulty_change_;
+        snap_version_mask = version_mask_;
     }
 
     ShareInput input;
-    input.coinbase2 = coinbase2_for(*job).coinbase2;
-    input.extranonce1 = extranonce1_;
-    input.extranonce2_hex = extranonce2;
-    input.ntime_hex = ntime;
-    input.nonce_hex = nonce;
+    input.coinbase2 = coinbase2->coinbase2;
+    input.extranonce1 = extranonce1_; // immutable after the ctor
+    input.extranonce2_hex = params[2];
+    input.ntime_hex = params[3];
+    input.nonce_hex = params[4];
     const double accept_difficulty =
-        pending_difficulty_change_ ? std::min(difficulty_, previous_difficulty_) : difficulty_;
+        snap_pending ? std::min(snap_difficulty, snap_previous) : snap_difficulty;
     input.share_target = util::target_from_difficulty(accept_difficulty);
     input.version_bits_hex = std::move(version_bits);
-    input.version_mask = version_mask_;
+    input.version_mask = snap_version_mask;
     input.now_unix = static_cast<int64_t>(std::time(nullptr));
 
     const auto result = job->validate_share(input);
+
     if (!result) {
-        ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_),
-                                  reject_class_of(result.error().reason));
+        pool_.note_rejected_share(address, worker, reject_class_of(result.error().reason));
         if (log::level() <= log::Level::Debug)
-            log::debug("Rejected share from {} ({})", or_empty(address_),
-                       reject_reason(result.error().reason));
+            log::debug("Rejected share from {} ({})", address, reject_reason(result.error().reason));
+        const std::scoped_lock lock(mutex_);
+        ++shares_rejected_;
         send_error(id,
                    result.error().reason == ShareReject::AboveTarget ? ERR_LOW_DIFFICULTY : ERR_OTHER);
         return;
     }
 
-    record_accepted_share(*result);
-    send_result(id, true);
+    double credited = snap_difficulty;
+    if (snap_pending) {
+        const double hi = std::max(snap_difficulty, snap_previous);
+        const double lo = std::min(snap_difficulty, snap_previous);
+        credited = result->difficulty >= hi ? hi : lo;
+    }
+    pool_.note_accepted_share(address, worker, credited, result->difficulty);
+    {
+        const std::scoped_lock lock(mutex_);
+        record_accepted_share_locked(credited, result->difficulty);
+        send_result(id, true);
+    }
+    if (log::level() <= log::Level::Debug)
+        log::debug("Accepted share from {} diff {}/{}", address,
+                   util::format_difficulty(result->difficulty), util::format_difficulty(credited));
 
     if (result->is_block)
         pool_.on_block_found(*this, *job, *result);
 }
 
-void Session::record_accepted_share(const ShareResult& result) {
-    // During a difficulty-change grace window, credit the harder of {old, new} only when the hash
-    // clears it, else the easier one. Outside a change, credit the current difficulty.
-    double credited = difficulty_;
-    if (pending_difficulty_change_) {
-        const double hi = std::max(difficulty_, previous_difficulty_);
-        const double lo = std::min(difficulty_, previous_difficulty_);
-        credited = result.difficulty >= hi ? hi : lo;
-    }
+void Session::record_accepted_share_locked(double credited, double share_difficulty) {
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr)); // wall: DISPLAYED
     const double now_steady = stats::steady_seconds();                 // monotonic
 
@@ -486,11 +512,7 @@ void Session::record_accepted_share(const ShareResult& result) {
     total_share_difficulty_ += credited;
     last_share_timestamp_ = now_wall;
     hashrate_.add(credited, now_steady);
-    best_difficulty_ = std::max(best_difficulty_, result.difficulty);
-    pool_.note_accepted_share(or_empty(address_), or_empty(worker_), credited, result.difficulty);
-    if (log::level() <= log::Level::Debug)
-        log::debug("Accepted share from {} diff {}/{}", or_empty(address_),
-                   util::format_difficulty(result.difficulty), util::format_difficulty(credited));
+    best_difficulty_ = std::max(best_difficulty_, share_difficulty);
 }
 
 std::string Session::make_dedup_key(const std::string& job_id, std::string_view extranonce2,

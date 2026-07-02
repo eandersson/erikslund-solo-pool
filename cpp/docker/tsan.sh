@@ -23,6 +23,15 @@ cmake --build "$BUILD_DIR" --target erikslund_tests -j"$(nproc)"
 
 echo "==> test (TSan halt-on-error)"
 export TSAN_OPTIONS=halt_on_error=1:abort_on_error=1:second_deadlock_stack=1
-ctest --test-dir "$BUILD_DIR" --output-on-failure
+# TSan aborts ("incompatible memory layout ... unable to disable ASLR") on hosts whose ASLR
+# entropy exceeds what its shadow mapping tolerates. setarch -R disables ASLR for the process and
+# its children, so wrapping ctest sidesteps it; fall back to a plain run where setarch is missing
+# or blocked (it needs the personality() syscall -- add `--security-opt seccomp=unconfined` to the
+# docker run if setarch reports EPERM).
+if command -v setarch >/dev/null 2>&1 && setarch -R true 2>/dev/null; then
+    setarch -R ctest --test-dir "$BUILD_DIR" --output-on-failure
+else
+    ctest --test-dir "$BUILD_DIR" --output-on-failure
+fi
 
 echo "==> OK: TSan clean"
