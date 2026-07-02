@@ -62,7 +62,7 @@ class FakePool:
     def note_accepted_share(self, _address, _worker, _credited, _best):
         pass
 
-    def note_rejected_share(self, _address, _worker):
+    def note_rejected_share(self, _address, _worker, _reason):
         pass
 
     async def validate_address(self, _address):

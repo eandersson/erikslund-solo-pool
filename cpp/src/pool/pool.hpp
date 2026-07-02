@@ -5,6 +5,7 @@
 // Locks: mutex_ guards the client list; jobs_mutex_ (shared) the current/recent jobs; stats_mutex_
 // the decaying hashrate windows; per-session state has its own mutex; counters are atomics. The
 // work thread copies the client list under mutex_ then notifies lock-free, never holding two locks.
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -71,7 +72,8 @@ public:
     std::shared_ptr<const stratum::Job> recent_job(const std::string& job_id) const override;
     void note_accepted_share(const std::string& address, const std::string& worker, double credited,
                              double share_difficulty) override;
-    void note_rejected_share(const std::string& address, const std::string& worker) override;
+    void note_rejected_share(const std::string& address, const std::string& worker,
+                             stratum::RejectClass reason) override;
     void attach_worker(const std::string& address, const std::string& worker) override;
     // Seed the per-worker registry from a prior run's users/ files, decaying each worker's hashrate
     // windows by the file's age. Call once at startup before serving.
@@ -145,6 +147,7 @@ private:
     std::atomic<uint64_t> broadcast_cursor_{0};
     std::atomic<uint64_t> accepted_shares_{0};
     std::atomic<uint64_t> rejected_shares_{0};
+    std::array<std::atomic<uint64_t>, stratum::kRejectClassCount> rejected_by_class_{};
     std::atomic<uint64_t> blocks_found_{0};
     std::atomic<int64_t> last_block_found_{0}; // wall epoch of the most recent accepted block
 

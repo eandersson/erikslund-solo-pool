@@ -44,6 +44,24 @@ ERR_LOW_DIFF = (23, "Low difficulty share")
 ERR_UNAUTHORIZED = (24, "Unauthorized worker")
 ERR_NOT_SUBSCRIBED = (25, "Not subscribed")
 
+REJECT_REASONS = ("stale", "duplicate", "malformed", "ntime", "version", "low_difficulty")
+# work.validate_share's fine-grained reason string -> coarse class. Unlisted reasons fold to
+# "malformed" (the safe default for an unexpected/garbage field).
+_REJECT_CLASS_BY_REASON = {
+    "invalid extranonce2 size": "malformed",
+    "malformed share field": "malformed",
+    "nonce/ntime out of range": "malformed",
+    "ntime out of range": "ntime",
+    "version rolling not negotiated": "version",
+    "version bits outside negotiated mask": "version",
+    "above target": "low_difficulty",
+}
+
+
+def reject_class_of(reason: str | None) -> str:
+    """Map a validate_share reason string to its by-reason counter label."""
+    return _REJECT_CLASS_BY_REASON.get(reason or "", "malformed")
+
 # -- poolstatus: stats format ------------------------------------------------
 # strtod-style float prefix: the exponent group only matches when real digits follow,
 # so a trailing "E" reads as the exa suffix, not a broken exponent.

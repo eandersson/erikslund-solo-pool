@@ -56,6 +56,32 @@ std::string_view reject_reason(ShareReject reject) {
     return "unknown";
 }
 
+std::string_view reject_class_label(RejectClass cls) {
+    switch (cls) {
+    case RejectClass::Stale: return "stale";
+    case RejectClass::Duplicate: return "duplicate";
+    case RejectClass::Malformed: return "malformed";
+    case RejectClass::Ntime: return "ntime";
+    case RejectClass::Version: return "version";
+    case RejectClass::LowDifficulty: return "low_difficulty";
+    }
+    return "malformed";
+}
+
+RejectClass reject_class_of(ShareReject reject) {
+    switch (reject) {
+    case ShareReject::NtimeOutOfRange: return RejectClass::Ntime;
+    case ShareReject::MalformedVersionBits:
+    case ShareReject::VersionRollingNotNegotiated:
+    case ShareReject::VersionBitsOutsideMask: return RejectClass::Version;
+    case ShareReject::AboveTarget: return RejectClass::LowDifficulty;
+    case ShareReject::None: // not a reject; unreachable from a validation failure
+    case ShareReject::InvalidExtranonce2Size:
+    case ShareReject::MalformedField: return RejectClass::Malformed;
+    }
+    return RejectClass::Malformed;
+}
+
 Job::Job(std::string job_id, bitcoin::BlockTemplate block_template, ByteView tag,
          size_t extranonce1_size, size_t extranonce2_size, uint32_t coinbase_version, bool clean,
          ByteView donation_script, double donation_percent)

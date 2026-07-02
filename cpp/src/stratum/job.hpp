@@ -31,6 +31,19 @@ enum class ShareReject : uint8_t {
 
 std::string_view reject_reason(ShareReject reject);
 
+enum class RejectClass : uint8_t {
+    Stale,         // job not found: churn / miner lagging behind notifies
+    Duplicate,     // dedup hit: firmware resubmitting
+    Malformed,     // oversize or unparseable fields: broken firmware / garbage
+    Ntime,         // ntime out of range: clock drift
+    Version,       // version-rolling negotiation / mask violations
+    LowDifficulty, // above target: difficulty config mismatch
+};
+inline constexpr size_t kRejectClassCount = 6;
+
+std::string_view reject_class_label(RejectClass cls); // "stale", "duplicate", ... (metric labels)
+RejectClass reject_class_of(ShareReject reject);      // fine-grained reason -> coarse class
+
 struct ShareRejection {
     ShareReject reason = ShareReject::None;
     double difficulty = 0.0;

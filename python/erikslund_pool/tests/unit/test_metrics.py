@@ -13,7 +13,7 @@ class _FakePool:
             "uptime_seconds": 5, "ready": ready,
             "bitcoind_connected": ready, "work_ready": ready, "accepting_connections": True,
             "pool": {"network_diff": network_diff, "height": height, "blocks_found": 2,
-                     "shares_accepted": 10, "shares_rejected": 1, "best_share": 4.2,
+                     "shares_accepted": 10, "shares_rejected": 6, "best_share": 4.2,
                      "users": 1, "workers": 3, "hashrate_estimate": 1234.0},
         }
         if nodes is not None:
@@ -21,6 +21,10 @@ class _FakePool:
 
     def metrics(self):
         return self._data
+
+    def rejected_by_reason(self):
+        return {"stale": 1, "duplicate": 2, "malformed": 0,
+                "ntime": 0, "version": 0, "low_difficulty": 3}
 
     def hashrate_windows(self, now):
         return {window: 0.0 for window in HASHRATE_WINDOWS}
@@ -73,6 +77,17 @@ class TestRenderPrometheus(unittest.TestCase):
 
     def test_no_node_gauge_without_nodes(self):
         self.assertNotIn("erikslundpool_bitcoind_node_active", render_prometheus(_FakePool()))
+
+    def test_reject_by_reason_series_sums_to_total(self):
+        out = render_prometheus(_FakePool())
+        self.assertIn("# TYPE erikslundpool_shares_rejected_by_reason_total counter", out)
+        # Every label present (zeros included), in REJECT_REASONS order; sums to the total (6).
+        self.assertIn('erikslundpool_shares_rejected_by_reason_total{reason="stale"} 1', out)
+        self.assertIn('erikslundpool_shares_rejected_by_reason_total{reason="duplicate"} 2', out)
+        self.assertIn('erikslundpool_shares_rejected_by_reason_total{reason="malformed"} 0', out)
+        self.assertIn('erikslundpool_shares_rejected_by_reason_total{reason="ntime"} 0', out)
+        self.assertIn('erikslundpool_shares_rejected_by_reason_total{reason="version"} 0', out)
+        self.assertIn('erikslundpool_shares_rejected_by_reason_total{reason="low_difficulty"} 3', out)
 
 
 if __name__ == "__main__":

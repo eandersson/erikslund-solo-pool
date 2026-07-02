@@ -78,6 +78,7 @@ public:
     std::shared_ptr<Job> job;
     int accepted = 0;
     int rejected = 0;
+    std::optional<RejectClass> last_reject_class; // reason routing of the most recent reject
     double last_share_difficulty = 0.0;
     double last_share_best = 0.0;
     std::string last_share_address;
@@ -110,7 +111,10 @@ public:
         last_share_address = address;
         last_share_worker = worker;
     }
-    void note_rejected_share(const std::string&, const std::string&) override { ++rejected; }
+    void note_rejected_share(const std::string&, const std::string&, RejectClass reason) override {
+        ++rejected;
+        last_reject_class = reason;
+    }
     void on_block_found(Session&, const Job&, const ShareResult&) override { block_found = true; }
     bool vardiff_enabled() const override { return vardiff; }
     double min_difficulty() const override { return 0.001; }

@@ -8,6 +8,7 @@
 
 #include "stats/hashrate.hpp"
 #include "stats/poolstatus.hpp"
+#include "stratum/job.hpp" // reject_class_label for the by-reason counter labels
 #include "util/url.hpp"
 
 namespace erikslund::api {
@@ -146,6 +147,12 @@ std::string build_prometheus(const PoolSnapshot& snapshot) {
            snapshot.shares_accepted);
     metric("erikslundpool_shares_rejected_total", "counter", "Rejected shares",
            snapshot.shares_rejected);
+    out += "# HELP erikslundpool_shares_rejected_by_reason_total Rejected shares by reason\n"
+           "# TYPE erikslundpool_shares_rejected_by_reason_total counter\n";
+    for (size_t cls = 0; cls < snapshot.shares_rejected_by_class.size(); ++cls)
+        out += std::format("erikslundpool_shares_rejected_by_reason_total{{reason=\"{}\"}} {}\n",
+                           stratum::reject_class_label(static_cast<stratum::RejectClass>(cls)),
+                           snapshot.shares_rejected_by_class[cls]);
     metric("erikslundpool_best_share", "gauge", "Best share difficulty seen", snapshot.best_share);
     metric("erikslundpool_users", "gauge", "Distinct users (addresses)", snapshot.users);
     metric("erikslundpool_workers", "gauge", "Connected workers", snapshot.connected);

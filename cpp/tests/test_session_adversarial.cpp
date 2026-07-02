@@ -85,7 +85,9 @@ public:
     void note_accepted_share(const std::string&, const std::string&, double, double) override {
         ++accepted;
     }
-    void note_rejected_share(const std::string&, const std::string&) override { ++rejected; }
+    void note_rejected_share(const std::string&, const std::string&, RejectClass) override {
+        ++rejected;
+    }
     void on_block_found(Session&, const Job&, const ShareResult&) override {}
     bool vardiff_enabled() const override { return false; }
     double min_difficulty() const override { return 0.001; }

@@ -17,6 +17,7 @@ from erikslund_pool.constants import ERR_OTHER
 from erikslund_pool.constants import ERR_STALE
 from erikslund_pool.constants import ERR_UNAUTHORIZED
 from erikslund_pool.constants import MAX_SEEN_SHARES
+from erikslund_pool.constants import reject_class_of
 from erikslund_pool.exceptions import RPCError
 from erikslund_pool.hashrate import HASHRATE_WINDOWS
 from erikslund_pool.hashrate import DecayingWindows
@@ -377,10 +378,10 @@ class ClientSession:
         LOG.debug("Accepted share from %s diff %s/%s", self.address,
                   format_difficulty(result.difficulty), format_difficulty(credited))
 
-    def _record_rejected(self):
+    def _record_rejected(self, reason: str):
         with self._stats_lock:
             self.shares_rejected += 1
-        self.pool.note_rejected_share(self.address or "", self.worker or "")
+        self.pool.note_rejected_share(self.address or "", self.worker or "", reason)
 
     async def handle_submit(self, message_id, params):
         if not self.authorized:
@@ -397,17 +398,17 @@ class ClientSession:
 
         job = self.pool.recent_job(job_id)
         if job is None:
-            self._record_rejected()
+            self._record_rejected("stale")
             await self._error(message_id, ERR_STALE)
             return
         if (len(extranonce2_hex) > self.pool.config.extranonce2_size * 2
                 or len(ntime_hex) > 8 or len(nonce_hex) > 8
                 or (version_bits_hex is not None and len(version_bits_hex) > 8)):
-            self._record_rejected()
+            self._record_rejected("malformed")
             await self._error(message_id, ERR_OTHER)
             return
         if not self._remember(self._dedup_key(*parsed)):
-            self._record_rejected()
+            self._record_rejected("duplicate")
             await self._error(message_id, ERR_DUPLICATE)
             return
 
@@ -422,7 +423,7 @@ class ClientSession:
             version_bits_hex=version_bits_hex, version_mask=self.version_mask,
         )
         if not result.valid:
-            self._record_rejected()
+            self._record_rejected(reject_class_of(result.reason))
             LOG.debug("Rejected share from %s (%s)", self.address, result.reason)
             await self._error(message_id, ERR_LOW_DIFF if result.reason == "above target" else ERR_OTHER)
             return

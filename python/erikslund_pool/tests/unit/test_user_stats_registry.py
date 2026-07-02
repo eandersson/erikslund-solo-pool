@@ -34,7 +34,7 @@ class TestRegistry(unittest.TestCase):
         # Two connections share "w1"; a third is "w2" -- they MERGE by name.
         pool.note_accepted_share(ADDR, "w1", 5.0, 5.0)
         pool.note_accepted_share(ADDR, "w1", 3.0, 3.0)
-        pool.note_rejected_share(ADDR, "w1")
+        pool.note_rejected_share(ADDR, "w1", "duplicate")
         pool.note_accepted_share(ADDR, "w2", 1.0, 1.0)
 
         rows = _rows(pool, ADDR)
@@ -122,7 +122,7 @@ class TestRegistry(unittest.TestCase):
         # A rig with only rejected shares (0 accepted) is still active and must get a file.
         with tempfile.TemporaryDirectory() as temp_dir:
             pool = Pool(Settings(stats_directory=temp_dir))
-            pool.note_rejected_share(ADDR, "badrig")
+            pool.note_rejected_share(ADDR, "badrig", "stale")
             poolstatus.write_user_files(pool, temp_dir)
             self.assertTrue(os.path.exists(os.path.join(temp_dir, "users", ADDR)))
 

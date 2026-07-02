@@ -65,6 +65,8 @@ struct PoolSnapshot {
     std::map<std::string, uint64_t> blocks_by_address;
     uint64_t shares_accepted = 0;
     uint64_t shares_rejected = 0;
+    // Indexed by stratum::RejectClass; labels via reject_class_label(). Sums to shares_rejected.
+    std::array<uint64_t, 6> shares_rejected_by_class{};
     double accepted_diff = 0.0;
     double best_share = 0.0;
     double hashrate_estimate = 0.0;

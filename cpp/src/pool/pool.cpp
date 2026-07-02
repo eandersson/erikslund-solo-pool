@@ -517,8 +517,10 @@ void Pool::note_accepted_share(const std::string& address, const std::string& wo
     stat->last_activity_ts = now_wall;
 }
 
-void Pool::note_rejected_share(const std::string& address, const std::string& worker) {
+void Pool::note_rejected_share(const std::string& address, const std::string& worker,
+                               stratum::RejectClass reason) {
     ++rejected_shares_;
+    ++rejected_by_class_[static_cast<size_t>(reason)];
     if (address.empty())
         return;
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
@@ -926,6 +928,8 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     snapshot.connected = clients.size();
     snapshot.users = addresses.size();
     snapshot.shares_rejected = rejected_shares_.load();
+    for (size_t cls = 0; cls < rejected_by_class_.size(); ++cls)
+        snapshot.shares_rejected_by_class[cls] = rejected_by_class_[cls].load();
     // Pool-wide best: the runtime scalar (survives a registry prune) folded with live clients and
     // the restart baseline.
     snapshot.best_share =

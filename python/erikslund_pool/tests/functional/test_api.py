@@ -5,6 +5,7 @@ import unittest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from erikslund_pool.constants import REJECT_REASONS
 from erikslund_pool.hashrate import HASHRATE_WINDOWS
 from erikslund_pool.routers import stats
 
@@ -31,6 +32,9 @@ class FakePool:
 
     def hashrate_windows(self, now):
         return {window: 0.0 for window in HASHRATE_WINDOWS}
+
+    def rejected_by_reason(self):
+        return {reason: 0 for reason in REJECT_REASONS}
 
     def stratifier_stats(self):
         return {"jobs_created": 3, "recent_jobs_cached": 3, "current_job": "a",

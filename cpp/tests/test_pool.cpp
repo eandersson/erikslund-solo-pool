@@ -140,7 +140,7 @@ TEST_CASE("share hooks accumulate persistent per-worker stats; sessions with one
     // Two connections share worker name "w1"; a third is "w2". They must MERGE by name.
     pool.note_accepted_share(kAddr, "w1", 5.0, 5.0);
     pool.note_accepted_share(kAddr, "w1", 3.0, 3.0);
-    pool.note_rejected_share(kAddr, "w1");
+    pool.note_rejected_share(kAddr, "w1", stratum::RejectClass::Duplicate);
     pool.note_accepted_share(kAddr, "w2", 1.0, 1.0);
 
     const auto rows = workers_of(pool.snapshot(true), kAddr);

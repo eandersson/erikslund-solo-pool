@@ -24,6 +24,7 @@ from erikslund_pool.constants import _ADDRESS_CHARS
 from erikslund_pool.constants import DIFF1_TARGET
 from erikslund_pool.constants import MAX_ADDRESS_CACHE
 from erikslund_pool.constants import MAX_RECENT_JOBS
+from erikslund_pool.constants import REJECT_REASONS
 from erikslund_pool.exceptions import RPCConnectionError
 from erikslund_pool.exceptions import RPCError
 from erikslund_pool.exceptions import WorkError
@@ -108,6 +109,7 @@ class Pool:
         self._blocks_by_address: dict[str, int] = {}
         self.shares_accepted = 0
         self.shares_rejected = 0
+        self.shares_rejected_by_reason = {reason: 0 for reason in REJECT_REASONS}
         self.total_share_diff = 0.0
         self._hashrate = DecayingWindows(HASHRATE_WINDOWS, self._started_monotonic)
         self._sps = DecayingWindows(SPS_WINDOWS, self._started_monotonic)
@@ -245,9 +247,17 @@ class Pool:
             stat.last_share_ts = now_wall
             stat.last_activity_ts = now_wall
 
-    def note_rejected_share(self, address: str, worker: str):
+    def rejected_by_reason(self) -> dict:
+        """Consistent copy of the per-reason reject counts, for the by-reason Prometheus series.
+        Kept out of pool_stats()/the JSON API on purpose -- it is a metrics-only breakdown, matching
+        the C++ pool (which emits it in build_prometheus only, not the JSON builders)."""
+        with self._stats_lock:
+            return dict(self.shares_rejected_by_reason)
+
+    def note_rejected_share(self, address: str, worker: str, reason: str):
         with self._stats_lock:
             self.shares_rejected += 1
+            self.shares_rejected_by_reason[reason] += 1
         if not address:
             return
         now_wall = time.time()

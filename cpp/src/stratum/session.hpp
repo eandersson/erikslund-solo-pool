@@ -52,7 +52,8 @@ public:
     // hash difficulty met (for the per-worker best-share).
     virtual void note_accepted_share(const std::string& address, const std::string& worker,
                                      double credited, double share_difficulty) = 0;
-    virtual void note_rejected_share(const std::string& address, const std::string& worker) = 0;
+    virtual void note_rejected_share(const std::string& address, const std::string& worker,
+                                     RejectClass reason) = 0;
     // Called on a successful authorize so an idle authorized worker appears in (and persists in)
     // the registry with zero stats.
     virtual void attach_worker(const std::string& address, const std::string& worker) {

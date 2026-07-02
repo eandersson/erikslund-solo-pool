@@ -4,6 +4,7 @@ import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 
+from erikslund_pool.constants import REJECT_REASONS
 from erikslund_pool.hashrate import HASHRATE_LABELS
 from erikslund_pool.hashrate import HASHRATE_WINDOWS
 
@@ -74,6 +75,20 @@ def render_prometheus(pool) -> str:
                 "Accepted shares", pool_section.get("shares_accepted")),
         _metric("erikslundpool_shares_rejected_total", "counter",
                 "Rejected shares", pool_section.get("shares_rejected")),
+    ]
+
+    # Read the by-reason counts straight off the pool (like hashrate_windows below), keeping the
+    # breakdown out of pool_stats()/the JSON API so it stays metrics-only, matching the C++ pool.
+    by_reason = pool.rejected_by_reason()
+    lines.append(
+        "# HELP erikslundpool_shares_rejected_by_reason_total Rejected shares by reason\n"
+        "# TYPE erikslundpool_shares_rejected_by_reason_total counter\n"
+    )
+    for reason in REJECT_REASONS:
+        lines.append(f'erikslundpool_shares_rejected_by_reason_total{{reason="{reason}"}} '
+                     f'{int(by_reason.get(reason, 0))}\n')
+
+    lines += [
         _metric("erikslundpool_best_share", "gauge",
                 "Best share difficulty seen", pool_section.get("best_share")),
         _metric("erikslundpool_users", "gauge",

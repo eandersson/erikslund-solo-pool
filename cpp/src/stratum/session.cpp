@@ -415,7 +415,7 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     const auto job = pool_.recent_job(job_id);
     if (!job) [[unlikely]] {
         ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Stale);
         send_error(id, ERR_STALE);
         return;
     }
@@ -423,14 +423,14 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     if (extranonce2.size() > pool_.extranonce2_size() * 2 || ntime.size() > 8 || nonce.size() > 8 ||
         (version_bits && version_bits->size() > 8)) [[unlikely]] {
         ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Malformed);
         send_error(id, ERR_OTHER);
         return;
     }
 
     if (!remember(make_dedup_key(job_id, extranonce2, ntime, nonce, version_bits))) [[unlikely]] {
         ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Duplicate);
         send_error(id, ERR_DUPLICATE);
         return;
     }
@@ -451,7 +451,8 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     const auto result = job->validate_share(input);
     if (!result) {
         ++shares_rejected_;
-        pool_.note_rejected_share(or_empty(address_), or_empty(worker_));
+        pool_.note_rejected_share(or_empty(address_), or_empty(worker_),
+                                  reject_class_of(result.error().reason));
         if (log::level() <= log::Level::Debug)
             log::debug("Rejected share from {} ({})", or_empty(address_),
                        reject_reason(result.error().reason));

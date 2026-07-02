@@ -28,7 +28,9 @@ PoolSnapshot sample() {
     s.users = 1;
     s.blocks_found = 3;
     s.shares_accepted = 10;
-    s.shares_rejected = 1;
+    s.shares_rejected = 6;
+    // stale, duplicate, malformed, ntime, version, low_difficulty -> sums to shares_rejected.
+    s.shares_rejected_by_class = {1, 2, 0, 0, 0, 3};
     s.accepted_diff = 5.0;
     s.best_share = 7.5;
     s.hashrate_estimate = 12345.0;
@@ -92,9 +94,21 @@ TEST_CASE("prometheus emits every expected metric name + TYPE") {
     CHECK(contains(m, "erikslundpool_hashrate_hashes_per_second{window=\"7d\"}"));
     CHECK(contains(m, "erikslundpool_blocks_found_total 3"));
     CHECK(contains(m, "erikslundpool_shares_accepted_total 10"));
-    CHECK(contains(m, "erikslundpool_shares_rejected_total 1"));
+    CHECK(contains(m, "erikslundpool_shares_rejected_total 6"));
     CHECK(contains(m, "erikslundpool_workers 2"));
     CHECK(contains(m, "erikslundpool_block_height 200"));
+}
+
+TEST_CASE("prometheus emits a by-reason reject series that sums to the total") {
+    const std::string m = build_prometheus(sample());
+    CHECK(contains(m, "# TYPE erikslundpool_shares_rejected_by_reason_total counter"));
+    // Every label present (including zeros) for a stable series set.
+    CHECK(contains(m, "erikslundpool_shares_rejected_by_reason_total{reason=\"stale\"} 1"));
+    CHECK(contains(m, "erikslundpool_shares_rejected_by_reason_total{reason=\"duplicate\"} 2"));
+    CHECK(contains(m, "erikslundpool_shares_rejected_by_reason_total{reason=\"malformed\"} 0"));
+    CHECK(contains(m, "erikslundpool_shares_rejected_by_reason_total{reason=\"ntime\"} 0"));
+    CHECK(contains(m, "erikslundpool_shares_rejected_by_reason_total{reason=\"version\"} 0"));
+    CHECK(contains(m, "erikslundpool_shares_rejected_by_reason_total{reason=\"low_difficulty\"} 3"));
 }
 
 TEST_CASE("optional gauges are omitted with no job, counters remain") {
@@ -122,7 +136,7 @@ TEST_CASE("JSON bodies match the C/Python contract") {
     CHECK(ps["height"].get<double>() == 200);
     CHECK(ps["blocks_found"].get<double>() == 3);
     CHECK(ps["workers"].get<double>() == 2);
-    CHECK(ps["shares_rejected"].get<double>() == 1);
+    CHECK(ps["shares_rejected"].get<double>() == 6);
     CHECK(ps["best_share_percent"].get<double>() == doctest::Approx(750.0)); // 7.5 / 1.0 * 100
     CHECK(ps["hashrate_estimate"].get<double>() == doctest::Approx(12345.0));
 
