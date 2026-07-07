@@ -64,6 +64,10 @@ void finalize_and_validate(Config& config) {
         throw ConfigError("vardiff_retarget_seconds must be >= 1");
     if (config.work_rebroadcast_seconds < 1.0)
         throw ConfigError("work_rebroadcast_seconds must be >= 1");
+    if (config.work_source != "rpc" && config.work_source != "ipc")
+        throw ConfigError("work_source must be \"rpc\" or \"ipc\"");
+    if (config.work_source == "ipc" && config.ipc_socket_path.empty())
+        throw ConfigError("work_source: ipc requires a non-empty ipc_socket_path");
     if (config.poll_interval <= 0.0)
         throw ConfigError("block_poll_milliseconds must be >= 1");
     // Min 4: extranonce1 is a bare wrapping counter; a 2-byte space can lap under churn and
@@ -125,6 +129,8 @@ struct ConfigFile {
     std::optional<std::string> extranonce1_prefix;
     std::optional<std::string> zmq_block_endpoint;
     std::optional<bool> fast_block_notify;
+    std::optional<std::string> work_source;
+    std::optional<std::string> ipc_socket_path;
     std::optional<double> block_poll_milliseconds;
     std::optional<double> work_rebroadcast_seconds;
     std::optional<std::variant<std::uint32_t, std::string>> version_rolling_mask;
@@ -187,7 +193,8 @@ Config config_from(const ConfigFile& file) {
         const auto entries = to_list(*file.api_listen);
         if (!entries.empty()) {
             const auto [host, port] = split_host_port(entries[0]);
-            config.api_host = host;
+            // Omitted host -> loopback, not 0.0.0.0 (don't silently expose the API). Matches Python.
+            config.api_host = host.empty() ? std::string("127.0.0.1") : host;
             config.api_port = port;
         }
     }
@@ -211,6 +218,8 @@ Config config_from(const ConfigFile& file) {
     apply(config.extranonce2_size, file.extranonce2_size);
     apply(config.zmq_block_endpoint, file.zmq_block_endpoint);
     apply(config.fast_block_notify, file.fast_block_notify);
+    apply(config.work_source, file.work_source);
+    apply(config.ipc_socket_path, file.ipc_socket_path);
     apply(config.work_rebroadcast_seconds, file.work_rebroadcast_seconds);
     apply(config.donation_percent, file.donation_percent);
     apply(config.donation_address, file.donation_address);

@@ -1,13 +1,16 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <initializer_list>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "bitcoin/block_template.hpp"
 #include "gbt_fixture.hpp"
 #include "util/endian.hpp" // reversed
 #include "util/hex.hpp"
+#include "util/merkle.hpp"
 
 using namespace erikslund;
 using namespace erikslund::bitcoin;
@@ -50,18 +53,43 @@ TEST_CASE("from_gbt parses the scalar header fields") {
     CHECK(tmpl.bits == 0x1d00ffffu); // parsed base-16 from bits_hex
     CHECK(tmpl.coinbase_value == 5000000000ULL);
     CHECK(tmpl.previousblockhash == std::string(64, 'a'));
+    CHECK(to_hex(tmpl.coinbase_script_sig_prefix) == "02aa00");
 }
 
-TEST_CASE("witness_commitment is optional") {
+TEST_CASE("a witness commitment becomes a required output and witness item") {
     // Absent in a minimal (pre-segwit-style) template.
-    CHECK_FALSE(from_template(minimal_template()).witness_commitment.has_value());
+    const auto legacy = from_template(minimal_template());
+    CHECK_FALSE(legacy.coinbase_witness.has_value());
+    CHECK(legacy.coinbase_required_outputs.empty());
 
-    // Present and hex-decoded when supplied.
+    // GBT supplies the script; the coinbase carries it in a zero-valued output and uses the
+    // standard zero reserved value.
     gbt_json t = minimal_template();
     t["default_witness_commitment"] = std::string("6a24aa21a9ed") + std::string(64, '0');
     const auto tmpl = from_template(t);
-    REQUIRE(tmpl.witness_commitment.has_value());
-    CHECK(to_hex(*tmpl.witness_commitment) == "6a24aa21a9ed" + std::string(64, '0'));
+    REQUIRE(tmpl.coinbase_witness.has_value());
+    CHECK(*tmpl.coinbase_witness == Bytes(32, 0));
+    REQUIRE(tmpl.coinbase_required_outputs.size() == 1);
+    CHECK(tmpl.coinbase_required_outputs.front().value == 0);
+    CHECK(to_hex(tmpl.coinbase_required_outputs.front().script) ==
+          "6a24aa21a9ed" + std::string(64, '0'));
+}
+
+TEST_CASE("empty default_witness_commitment is segwit-aware but builds a legacy coinbase") {
+    // Empty "" -> segwit-aware (txid gate armed) but no witness commitment (legacy coinbase), matching
+    // Python's has_witness (commitment is not None) vs _segwit_gbt (isinstance str).
+    gbt_json t = minimal_template();
+    t["default_witness_commitment"] = std::string("");
+    const auto tmpl = from_template(t);
+    CHECK_FALSE(tmpl.coinbase_witness.has_value());
+    CHECK(tmpl.coinbase_required_outputs.empty());
+
+    // A segwit-aware tx carrying only `hash` (a wtxid) must be rejected, not used as a merkle leaf.
+    gbt_json tx = gbt_json::object_t{};
+    tx["data"] = std::string("00");
+    tx["hash"] = std::string(64, 'b');
+    push_transaction(t, tx);
+    CHECK_THROWS_AS(from_template(t), std::invalid_argument);
 }
 
 TEST_CASE("a mandatory ('!'-prefixed) template rule other than !segwit is refused") {
@@ -96,7 +124,7 @@ TEST_CASE("a non-string entry in the rules array is skipped, not crashed on") {
     CHECK_THROWS_AS(from_template(bad), std::invalid_argument);
 }
 
-TEST_CASE("transactions are parsed with txid stored in internal (reversed) byte order") {
+TEST_CASE("transactions produce a coinbase merkle branch in internal byte order") {
     gbt_json t = minimal_template();
     gbt_json tx = gbt_json::object_t{};
     tx["data"] = std::string("0123456789abcdef");
@@ -106,11 +134,12 @@ TEST_CASE("transactions are parsed with txid stored in internal (reversed) byte 
 
     const auto tmpl = from_template(t);
     REQUIRE(tmpl.txn_count == 1);
-    REQUIRE(tmpl.txids_internal.size() == 1);
+    REQUIRE(tmpl.merkle_branch_internal.size() == 1);
     CHECK(to_hex(tmpl.txn_data) == "0123456789abcdef");
-    // Internal txid == reversed display txid.
+    // With one non-coinbase transaction, its internal txid is the only branch node.
     const std::string internal_hex =
-        to_hex(Bytes(tmpl.txids_internal[0].begin(), tmpl.txids_internal[0].end()));
+        to_hex(Bytes(tmpl.merkle_branch_internal[0].begin(),
+                     tmpl.merkle_branch_internal[0].end()));
     CHECK(internal_hex == to_hex(reversed(from_hex(
                               "00112233445566778899aabbccddeeff"
                               "00112233445566778899aabbccddeeff"))));
@@ -125,9 +154,10 @@ TEST_CASE("a transaction without txid falls back to 'hash' ONLY on a pre-segwit 
     push_transaction(t, std::move(tx));
 
     const auto tmpl = from_template(t);
-    REQUIRE(tmpl.txids_internal.size() == 1);
+    REQUIRE(tmpl.merkle_branch_internal.size() == 1);
     const std::string internal_hex =
-        to_hex(Bytes(tmpl.txids_internal[0].begin(), tmpl.txids_internal[0].end()));
+        to_hex(Bytes(tmpl.merkle_branch_internal[0].begin(),
+                     tmpl.merkle_branch_internal[0].end()));
     CHECK(internal_hex == to_hex(reversed(from_hex(std::string(64, '3')))));
 }
 
@@ -143,9 +173,10 @@ TEST_CASE("a segwit template transaction without txid is rejected (no wtxid fall
     // The same segwit template WITH txid parses fine (txid preferred over hash).
     t["transactions"][0]["txid"] = std::string(64, '4');
     const auto tmpl = from_template(t);
-    REQUIRE(tmpl.txids_internal.size() == 1);
+    REQUIRE(tmpl.merkle_branch_internal.size() == 1);
     const std::string internal_hex =
-        to_hex(Bytes(tmpl.txids_internal[0].begin(), tmpl.txids_internal[0].end()));
+        to_hex(Bytes(tmpl.merkle_branch_internal[0].begin(),
+                     tmpl.merkle_branch_internal[0].end()));
     CHECK(internal_hex == to_hex(reversed(from_hex(std::string(64, '4')))));
 }
 
@@ -160,7 +191,7 @@ TEST_CASE("multiple transactions preserve order") {
     const auto tmpl = from_template(t);
     REQUIRE(tmpl.txn_count == 3);
     CHECK(to_hex(tmpl.txn_data) == "010203"); // concatenated in template order
-    REQUIRE(tmpl.txids_internal.size() == 3);
+    REQUIRE(tmpl.merkle_branch_internal.size() == 2);
 }
 
 TEST_CASE("a non-32-byte txid is rejected") {
@@ -188,7 +219,7 @@ TEST_CASE("an omitted transactions array yields zero transactions") {
     const auto tmpl = from_template(t);
     CHECK(tmpl.txn_count == 0);
     CHECK(tmpl.txn_data.empty());
-    CHECK(tmpl.txids_internal.empty());
+    CHECK(tmpl.merkle_branch_internal.empty());
 }
 
 TEST_CASE("from_gbt parses a representative template across all field types") {
@@ -211,13 +242,19 @@ TEST_CASE("from_gbt parses a representative template across all field types") {
     CHECK(tmpl.bits_hex == "1d00ffff");
     CHECK(tmpl.coinbase_value == 5000000000ULL);
     CHECK(tmpl.previousblockhash == std::string(64, 'a'));
-    REQUIRE(tmpl.witness_commitment.has_value());
+    REQUIRE(tmpl.coinbase_witness.has_value());
+    REQUIRE(tmpl.coinbase_required_outputs.size() == 1);
     CHECK(tmpl.txn_count == 3);
     CHECK(to_hex(tmpl.txn_data) == "111111112222222233333333");
-    REQUIRE(tmpl.txids_internal.size() == 3);
-    for (int i = 1; i <= 3; ++i)
-        CHECK(to_hex(Bytes(tmpl.txids_internal[i - 1].begin(), tmpl.txids_internal[i - 1].end())) ==
-              to_hex(reversed(from_hex(std::string(64, static_cast<char>('0' + i))))));
+    std::vector<Hash256> expected_txids;
+    for (int i = 1; i <= 3; ++i) {
+        const Bytes internal =
+            reversed(from_hex(std::string(64, static_cast<char>('0' + i))));
+        Hash256 hash{};
+        std::copy(internal.begin(), internal.end(), hash.begin());
+        expected_txids.push_back(hash);
+    }
+    CHECK(tmpl.merkle_branch_internal == merkle_branch(expected_txids));
 }
 
 TEST_CASE("an out-of-uint32-range version/curtime is rejected (not narrowed)") {

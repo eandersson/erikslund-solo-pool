@@ -2,7 +2,7 @@
 # Downloads the official Bitcoin Core release binary and verifies it against
 # the published SHA256SUMS before use.
 FROM debian:trixie-slim AS fetch
-ARG BTC_VERSION=31.0
+ARG BTC_VERSION=31.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates wget && rm -rf /var/lib/apt/lists/*
 WORKDIR /tmp
@@ -14,14 +14,19 @@ RUN set -eu; \
     grep " ${tarball}\$" SHA256SUMS | sha256sum -c -; \
     tar -xzf "${tarball}"; \
     install -m0755 "bitcoin-${BTC_VERSION}/bin/bitcoind" /usr/local/bin/bitcoind; \
-    install -m0755 "bitcoin-${BTC_VERSION}/bin/bitcoin-cli" /usr/local/bin/bitcoin-cli
+    install -m0755 "bitcoin-${BTC_VERSION}/bin/bitcoin-cli" /usr/local/bin/bitcoin-cli; \
+    install -m0755 "bitcoin-${BTC_VERSION}/bin/bitcoin" /usr/local/bin/bitcoin; \
+    install -D -m0755 "bitcoin-${BTC_VERSION}/libexec/bitcoin-node" /usr/local/libexec/bitcoin-node
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++6 libgcc-s1 && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /usr/local/bin/bitcoind /usr/local/bin/bitcoind
 COPY --from=fetch /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
-RUN useradd -m -d /data bitcoin
+COPY --from=fetch /usr/local/bin/bitcoin /usr/local/bin/bitcoin
+COPY --from=fetch /usr/local/libexec/bitcoin-node /usr/local/libexec/bitcoin-node
+RUN useradd -m -d /data -u 1000 -U bitcoin \
+    && mkdir -p /ipc && chown 1000:1000 /ipc
 USER bitcoin
 # 18443 = regtest RPC, 28332 = zmq hashblock
 EXPOSE 18443 28332

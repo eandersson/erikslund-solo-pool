@@ -56,7 +56,7 @@ TEST_CASE("build_pool_status computes best_share_percent against the network dif
     s.network_diff = 1000.0;
     s.best_share = 250.0; // 25% of the network difficulty
     auto status = build_pool_status(s);
-    CHECK(status["shares"]["best_share_percent"].get<double>() == doctest::Approx(25.0));
+    CHECK(status["shares"]["best_share_percent"].get<std::string>() == "25.0");
     CHECK_FALSE(status["shares"].contains("progress_to_block_percent"));
     CHECK_FALSE(status["pool_stat"].contains("time_to_block_seconds"));
 }
@@ -66,7 +66,7 @@ TEST_CASE("build_pool_status best_share_percent is zero when the network diff is
     s.uptime = 10;
     s.best_share = 250.0; // no network_diff set
     auto status = build_pool_status(s);
-    CHECK(status["shares"]["best_share_percent"].get<double>() == doctest::Approx(0.0));
+    CHECK(status["shares"]["best_share_percent"].get<std::string>() == "0.0");
 }
 
 TEST_CASE("build_pool_status reports users, workers, and runtime when idle") {
@@ -88,7 +88,7 @@ TEST_CASE("build_user_stats returns empty fields for an unknown address") {
     auto user = build_user_stats("ghost", s);
     CHECK(user["workers"].get<double>() == 0);
     CHECK(user["shares_accepted"].get<double>() == 0);
-    CHECK(user["bestshare"].get<double>() == doctest::Approx(0.0));
+    CHECK(user["bestshare"].get<std::string>() == "0.0");
     CHECK(user["worker"].is_array());
     CHECK(user["worker"].get_array().empty());
     // All seven hashrate windows still present, all "0".
@@ -145,7 +145,7 @@ TEST_CASE("build_pool_status has the C pool's shape") {
     auto status = build_pool_status(s);
     CHECK(status["pool_stat"]["users"].get<double>() == 2);
     CHECK(status["pool_stat"]["workers"].get<double>() == 3);
-    CHECK(status["shares"]["best_share_percent"].get<double>() == doctest::Approx(4.5)); // 45/1000*100
+    CHECK(status["shares"]["best_share_percent"].get<std::string>() == "4.5"); // 45/1000*100
     // lastupdate is an RFC 9557 UTC timestamp string, e.g. "2026-06-04T11:31:24Z[UTC]".
     CHECK(status["pool_stat"]["lastupdate"].is_string());
     CHECK(status["pool_stat"]["lastupdate"].get<std::string>().ends_with("Z[UTC]"));
@@ -158,10 +158,10 @@ TEST_CASE("build_pool_status has the C pool's shape") {
     CHECK(status["hashrate"]["hashrate7d"].get<std::string>() == "100K");
     CHECK(status["hashrate"].get_object().size() == 7); // seven decaying windows
     // SPS fields are shares_per_second_*, rounded to 5 decimals.
-    CHECK(status["shares"]["shares_per_second_1m"].get<double>() == doctest::Approx(1.23457));
-    CHECK(status["shares"]["shares_per_second_5m"].get<double>() == doctest::Approx(0.5));
-    CHECK(status["shares"]["shares_per_second_15m"].get<double>() == doctest::Approx(0.25));
-    CHECK(status["shares"]["shares_per_second_1h"].get<double>() == doctest::Approx(0.125));
+    CHECK(status["shares"]["shares_per_second_1m"].get<std::string>() == "1.23457");
+    CHECK(status["shares"]["shares_per_second_5m"].get<std::string>() == "0.5");
+    CHECK(status["shares"]["shares_per_second_15m"].get<std::string>() == "0.25");
+    CHECK(status["shares"]["shares_per_second_1h"].get<std::string>() == "0.125");
     CHECK_FALSE(status["shares"].contains("SPS1m"));
 }
 
@@ -189,6 +189,15 @@ TEST_CASE("pool.status round-trips through disk for restart recovery") {
     CHECK(doc["hashrate"]["hashrate1m"].as<std::string>().size() > 0);
     // lastupdate is an RFC 9557 UTC timestamp on disk; recovery must tolerate it.
     CHECK(doc["pool_stat"]["lastupdate"].as<std::string>().ends_with("Z[UTC]"));
+
+    // PyYAML parity: float fields carry a ".0" unquoted; count fields stay bare ints.
+    const std::string text = raw.str();
+    CHECK(text.find("best_share_percent: 0.0") != std::string::npos);
+    CHECK(text.find("shares_per_second_1m: 0.0") != std::string::npos);
+    CHECK(text.find("best_share_percent: 0\n") == std::string::npos); // not a bare int
+    CHECK(text.find("'0.0'") == std::string::npos);                   // not quoted
+    CHECK(text.find("accepted: 777") != std::string::npos);
+    CHECK(text.find("bestshare: 88") != std::string::npos);
 
     const auto recovered = read_pool_status(dir.string());
     REQUIRE(recovered.has_value());
@@ -447,7 +456,7 @@ TEST_CASE("build_user_stats renders the persistent registry rows; address = thei
     CHECK(user["workers"].get<double>() == 2); // live connection count
     CHECK(user["shares_accepted"].get<double>() == 5);
     CHECK(user["shares_rejected"].get<double>() == 1);
-    CHECK(user["bestshare"].get<double>() == doctest::Approx(9.0));
+    CHECK(user["bestshare"].get<std::string>() == "9.0");
     CHECK(user["lastshare"].get<std::string>() == format_rfc9557(200));
     auto& rows = user["worker"].get_array();
     REQUIRE(rows.size() == 2);                       // one row per name

@@ -1,6 +1,5 @@
 #include <doctest/doctest.h>
 
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -58,7 +57,7 @@ TEST_CASE("the scriptSig cap accounts for a multi-byte height push") {
 TEST_CASE("build_coinbase2 lays out tag, sequence, outputs, and locktime") {
     std::vector<CoinbaseOutput> outputs;
     outputs.push_back({0x0102030405060708ULL, from_hex("76a914") /* arbitrary short script */});
-    const Bytes cb2 = build_coinbase2(outputs, std::nullopt, tag("/t/"));
+    const Bytes cb2 = build_coinbase2(outputs, {}, tag("/t/"));
     const std::string hex = to_hex(cb2);
     // Leading tag then the 0xffffffff sequence.
     CHECK(hex.rfind(to_hex(tag("/t/")) + "ffffffff", 0) == 0);
@@ -70,16 +69,25 @@ TEST_CASE("build_coinbase2 lays out tag, sequence, outputs, and locktime") {
     CHECK(hex.substr(hex.size() - 8) == "00000000");
 }
 
-TEST_CASE("a witness commitment adds one more output to the count") {
+TEST_CASE("a required output is appended byte-for-byte and included in the count") {
     std::vector<CoinbaseOutput> outputs;
     outputs.push_back({5000000000ULL, from_hex("0014") /* placeholder */});
-    const Bytes without = build_coinbase2(outputs, std::nullopt, tag("/t/"));
-    const Bytes with = build_coinbase2(outputs, from_hex("6a24aa21a9ed"), tag("/t/"));
+    const Bytes without = build_coinbase2(outputs, {}, tag("/t/"));
+    const Bytes with =
+        build_coinbase2(outputs, {{0, from_hex("6a24aa21a9ed")}}, tag("/t/"));
     // Two outputs vs one: with-commitment is longer and carries the commitment script.
     CHECK(with.size() > without.size());
     CHECK(to_hex(with).find("6a24aa21a9ed") != std::string::npos);
     // The commitment output has a zero amount (8 LE zero bytes before its script length).
     CHECK(to_hex(with).find("0000000000000000" "06" "6a24aa21a9ed") != std::string::npos);
+}
+
+TEST_CASE("build_coinbase2 honors the template sequence and locktime") {
+    const Bytes cb2 = build_coinbase2({{1, from_hex("51")}}, {}, tag("/t/"), 0x11223344,
+                                      0x55667788);
+    const std::string hex = to_hex(cb2);
+    CHECK(hex.rfind(to_hex(tag("/t/")) + "44332211", 0) == 0);
+    CHECK(hex.ends_with("88776655"));
 }
 
 TEST_CASE("legacy_to_witness inserts the marker/flag and the reserved-value witness") {
@@ -96,4 +104,12 @@ TEST_CASE("legacy_to_witness inserts the marker/flag and the reserved-value witn
 
 TEST_CASE("legacy_to_witness rejects a coinbase shorter than 8 bytes") {
     CHECK_THROWS_AS(legacy_to_witness(from_hex("0100000000")), std::invalid_argument); // 5 bytes
+}
+
+TEST_CASE("legacy_to_witness preserves the template witness item") {
+    const Bytes legacy = from_hex("01000000" "ab" "00000000");
+    const Bytes reserved(32, 0x42);
+    CHECK(to_hex(legacy_to_witness(legacy, reserved)).find(
+              "0120" + to_hex(reserved) + "00000000") != std::string::npos);
+    CHECK_THROWS_AS(legacy_to_witness(legacy, Bytes(31, 0)), std::invalid_argument);
 }

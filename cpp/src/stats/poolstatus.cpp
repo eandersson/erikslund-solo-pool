@@ -27,6 +27,7 @@
 
 #include "core/logging.hpp"
 #include "stats/hashrate.hpp"
+#include "util/json_number.hpp"
 
 namespace erikslund::stats {
 
@@ -137,6 +138,8 @@ glz::generic hashrate_fields(const std::array<double, kHashrateWindows.size()>& 
 double round5(double value) {
     return std::round(value * 1e5) / 1e5;
 }
+
+using util::format_json_number;
 
 } // namespace
 
@@ -259,12 +262,14 @@ glz::generic build_pool_status(const api::PoolSnapshot& snapshot) {
         blocks[addr] = static_cast<double>(count);
 
     glz::generic shares = glz::generic::object_t{};
-    shares["best_share_percent"] = best_share_percent;
+    // best_share_percent + shares_per_second_* are Python floats (need the ".0"); counts stay ints.
+    shares["best_share_percent"] = format_json_number(best_share_percent);
     shares["accepted"] = static_cast<double>(static_cast<int64_t>(snapshot.accepted_diff));
     shares["rejected"] = static_cast<double>(static_cast<int64_t>(snapshot.shares_rejected));
     shares["bestshare"] = static_cast<double>(static_cast<int64_t>(snapshot.best_share));
     for (std::size_t i = 0; i < kSpsWindows.size(); ++i)
-        shares[std::string("shares_per_second_") + kSpsLabels[i]] = round5(snapshot.sps_windows[i]);
+        shares[std::string("shares_per_second_") + kSpsLabels[i]] =
+            format_json_number(round5(snapshot.sps_windows[i]));
 
     glz::generic status = glz::generic::object_t{};
     status["pool_stat"] = std::move(pool_stat);
@@ -308,7 +313,7 @@ glz::generic build_user_stats_from(const std::string& address,
             row[key] = child;
         row["shares_accepted"] = static_cast<double>(entry.shares_accepted);
         row["shares_rejected"] = static_cast<double>(entry.shares_rejected);
-        row["bestshare"] = entry.best_difficulty;
+        row["bestshare"] = format_json_number(entry.best_difficulty); // float in Python
         row["lastshare"] = format_rfc9557(entry.last_share_ts);
         row["last_share_age"] = static_cast<double>(age(entry.last_share_ts));
         worker_rows.get_array().push_back(std::move(row));
@@ -321,7 +326,7 @@ glz::generic build_user_stats_from(const std::string& address,
     out["workers"] = static_cast<double>(connection_count);
     out["shares_accepted"] = static_cast<double>(total_shares);
     out["shares_rejected"] = static_cast<double>(total_rejected);
-    out["bestshare"] = best_difficulty;
+    out["bestshare"] = format_json_number(best_difficulty); // float in Python
     const auto blocks_it = snapshot.blocks_by_address.find(address);
     out["blocks"] = static_cast<double>(
         blocks_it != snapshot.blocks_by_address.end() ? blocks_it->second : uint64_t{0});

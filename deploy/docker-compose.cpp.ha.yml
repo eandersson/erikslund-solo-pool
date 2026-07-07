@@ -26,8 +26,8 @@ services:
       context: ../tools/regtest
       dockerfile: Dockerfile.bitcoind
       args:
-        BTC_VERSION: "31.0"
-    image: erikslund-bitcoind:31.0
+        BTC_VERSION: "31.1"
+    image: erikslund-bitcoind:31.1
     restart: unless-stopped
     stop_grace_period: 120s
     security_opt: ["no-new-privileges:true"]

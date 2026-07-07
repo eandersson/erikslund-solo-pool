@@ -25,7 +25,7 @@
 
 #include "api/snapshot.hpp"
 #include "bitcoin/network.hpp"
-#include "bitcoin/rpc_client.hpp"
+#include "bitcoin/work_source.hpp"
 #include "core/config.hpp"
 #include "stats/hashrate.hpp"
 #include "stats/share_accounting.hpp"
@@ -38,7 +38,10 @@ struct PoolTestPeek; // test-only access to the registry prune
 
 class Pool : public stratum::PoolContext {
 public:
-    Pool(Config config, bitcoin::RpcClient& rpc);
+    Pool(Config config, bitcoin::WorkSource& source);
+
+    // Set the "bitcoind reachable" health atom. refresh_work drives it on every fetch.
+    void set_generator_ready(bool ready) { generator_ready_.store(ready); }
 
     void detect_network();
 
@@ -133,7 +136,7 @@ private:
     void spool_block(const PendingBlock& block);
 
     Config config_;
-    bitcoin::RpcClient& rpc_;
+    bitcoin::WorkSource& source_;
     bitcoin::Network network_ = bitcoin::Network::Regtest;
     std::string chain_name_ = "regtest";
     Bytes donation_script_;
@@ -187,7 +190,7 @@ private:
                                                const std::string& worker);
     std::string resolve_worker_key(const WorkerMap& workers, const std::string& worker) const;
     void prune_user_stats(int64_t now);
-    friend struct PoolTestPeek; // test-only reach into prune_user_stats()
+    friend struct PoolTestPeek;
 
     bool has_template_ = false;
     uint32_t last_version_ = 0;
@@ -213,7 +216,8 @@ private:
 // superseded parent. Pure (exposed for tests).
 bool fastblock_eligible(bool has_template, bool fastblock_pending, const std::string& notified_tip,
                         const std::string& last_prevhash, int64_t next_height,
-                        int64_t confirmations, const std::string& chain_name);
+                        int64_t confirmations, const std::string& chain_name,
+                        const std::string& bits_hex);
 
 // Consensus GetBlockSubsidy: 50 BTC halved every `halving_interval`, zero after 64 halvings.
 uint64_t block_subsidy(int64_t height, int64_t halving_interval);

@@ -144,17 +144,17 @@ HttpResponse route(const std::string& method, const std::string& path, Pool& poo
     if (path == "/metrics")
         return {200, "text/plain; version=0.0.4; charset=utf-8", build_prometheus(snapshot)};
     if (path == "/metrics.json")
-        return json_ok(glz::write_json(metrics_json(snapshot)).value_or(""));
+        return json_ok(to_status_json(metrics_json(snapshot)));
     if (path == "/status")
-        return json_ok(glz::write_json(status_json(snapshot)).value_or(""));
+        return json_ok(to_status_json(status_json(snapshot)));
     if (path == "/stats/pool")
-        return json_ok(glz::write_json(pool_stats_json(snapshot)).value_or(""));
+        return json_ok(to_status_json(pool_stats_json(snapshot)));
     if (path == "/stats/stratifier")
-        return json_ok(glz::write_json(stratifier_stats_json(snapshot)).value_or(""));
+        return json_ok(to_status_json(stratifier_stats_json(snapshot)));
     if (path == "/stats/connector")
-        return json_ok(glz::write_json(connector_stats_json(snapshot)).value_or(""));
+        return json_ok(to_status_json(connector_stats_json(snapshot)));
     if (path == "/stats/generator")
-        return json_ok(glz::write_json(generator_stats_json(snapshot)).value_or(""));
+        return json_ok(to_status_json(generator_stats_json(snapshot)));
     if (path.rfind("/stats/client/", 0) == 0) {
         const std::string address = path.substr(std::strlen("/stats/client/"));
         if (address.empty() || address.size() > 127 ||
@@ -163,7 +163,7 @@ HttpResponse route(const std::string& method, const std::string& path, Pool& poo
         const auto body = client_stats_json(snapshot, address);
         if (!body)
             return {404, "text/plain; charset=utf-8", "unknown address\n"};
-        return json_ok(glz::write_json(*body).value_or(""));
+        return json_ok(to_status_json(*body));
     }
     if (path == "/")
         return {200, "text/html; charset=utf-8", dashboard_html(snapshot)};

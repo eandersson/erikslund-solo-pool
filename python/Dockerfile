@@ -13,7 +13,7 @@
 #      app image, so a self-contained static libpython is simpler and the
 #      optimizations are independent of it.)
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim AS runtime
 
 ENV PATH=/usr/local/bin:$PATH
 

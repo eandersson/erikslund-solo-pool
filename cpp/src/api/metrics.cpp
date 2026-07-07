@@ -2,13 +2,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 #include "stats/hashrate.hpp"
 #include "stats/poolstatus.hpp"
 #include "stratum/job.hpp" // reject_class_label for the by-reason counter labels
+#include "util/json_number.hpp"
 #include "util/url.hpp"
 
 namespace erikslund::api {
@@ -18,6 +21,50 @@ namespace {
 template <class T>
 glz::generic or_null(const std::optional<T>& value) {
     return value ? glz::generic(*value) : glz::generic{};
+}
+
+// Keys Python emits as JSON floats (division/hashrate/difficulty); every other number is an int.
+const std::unordered_set<std::string_view> kFloatKeys = {
+    "network_diff",  "accepted_diff",     "best_share", "best_share_percent",
+    "hashrate_estimate", "best_diff",     "difficulty"};
+
+// Serialize like json.dumps(separators=(",",":")): a number gets ".0" iff its key is a kFloatKey, else
+// it's a plain int. glaze handles string/key escaping.
+void emit_status_json(std::string& out, const glz::generic& value, std::string_view key) {
+    if (value.is_object()) {
+        out += '{';
+        bool first = true;
+        for (const auto& [child_key, child] : value.get_object()) {
+            if (!first)
+                out += ',';
+            first = false;
+            out += glz::write_json(child_key).value_or("\"\"");
+            out += ':';
+            emit_status_json(out, child, child_key);
+        }
+        out += '}';
+    } else if (value.is_array()) {
+        out += '[';
+        bool first = true;
+        for (const auto& element : value.get_array()) {
+            if (!first)
+                out += ',';
+            first = false;
+            emit_status_json(out, element, key);
+        }
+        out += ']';
+    } else if (value.is_string()) {
+        out += glz::write_json(value.get<std::string>()).value_or("\"\"");
+    } else if (value.is_boolean()) {
+        out += value.get<bool>() ? "true" : "false";
+    } else if (value.is_number()) {
+        if (kFloatKeys.contains(key))
+            out += util::format_json_number(value.get<double>());
+        else
+            out += std::to_string(static_cast<int64_t>(value.get<double>()));
+    } else {
+        out += "null";
+    }
 }
 
 std::string html_escape(std::string_view value) {
@@ -302,6 +349,12 @@ std::optional<glz::generic> client_stats_json(const PoolSnapshot& snapshot,
     j["last_share_ts"] = static_cast<double>(last_share_timestamp);
     j["sessions"] = std::move(sessions);
     return j;
+}
+
+std::string to_status_json(const glz::generic& value) {
+    std::string out;
+    emit_status_json(out, value, "");
+    return out;
 }
 
 std::string dashboard_html(const PoolSnapshot& snapshot) {

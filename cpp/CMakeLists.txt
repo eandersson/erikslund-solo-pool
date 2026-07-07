@@ -57,6 +57,45 @@ if(SANITIZE_THREAD)
     add_link_options(-fsanitize=thread)
 endif()
 
+# ---- Cap'n Proto Mining IPC backend ------------------------------------------
+# CapnpMiningClient is the only Cap'n Proto-dependent application source. IpcWorkSource and the pool
+# core stay protocol-free and are unit-tested with a fake.
+#
+# Debian's CapnProtoConfig hard-fails check_library_exists(atomic __atomic_load_8), which returns
+# false on x86_64 where 8-byte atomics are compiler builtins not exported by libatomic.so -- even
+# though -latomic links fine. Pre-set the cache var to skip the flawed probe (capnp still links
+# atomic via CMAKE_REQUIRED_LIBRARIES).
+set(FOUND_LIBATOMIC 1 CACHE INTERNAL "libatomic present (-latomic links)")
+find_package(CapnProto REQUIRED)
+# Generate raw Cap'n Proto C++ bindings from the vendored schema graph (docker/Dockerfile puts
+# mining/common/init.capnp + mp/proxy.capnp under /opt/ipc-schema). Raw `capnp compile` -- NOT
+# mpgen -- so the client links only libcapnp, no Bitcoin Core interface headers. The generated
+# units are third-party code; -w silences their warnings.
+set(IPC_SCHEMA_DIR /opt/ipc-schema)
+set(IPC_GEN_DIR ${CMAKE_BINARY_DIR}/ipc_gen)
+file(MAKE_DIRECTORY ${IPC_GEN_DIR})
+# The method signatures use Proxy.Context / ThreadMap types from mp/proxy.capnp, so its bindings
+# (ipc_gen/mp/proxy.capnp.{h,c++}) must be generated too; the generated headers #include them.
+set(IPC_GENERATED
+    ${IPC_GEN_DIR}/mining.capnp.c++ ${IPC_GEN_DIR}/common.capnp.c++
+    ${IPC_GEN_DIR}/init.capnp.c++ ${IPC_GEN_DIR}/echo.capnp.c++
+    ${IPC_GEN_DIR}/mp/proxy.capnp.c++)
+add_custom_command(
+    OUTPUT ${IPC_GENERATED}
+           ${IPC_GEN_DIR}/mining.capnp.h ${IPC_GEN_DIR}/common.capnp.h
+           ${IPC_GEN_DIR}/init.capnp.h ${IPC_GEN_DIR}/echo.capnp.h
+           ${IPC_GEN_DIR}/mp/proxy.capnp.h
+    COMMAND ${CAPNP_EXECUTABLE} compile -o${CAPNPC_CXX_EXECUTABLE}:${IPC_GEN_DIR}
+            --src-prefix=${IPC_SCHEMA_DIR} -I${IPC_SCHEMA_DIR} -I/usr/include
+            ${IPC_SCHEMA_DIR}/mining.capnp ${IPC_SCHEMA_DIR}/common.capnp
+            ${IPC_SCHEMA_DIR}/init.capnp ${IPC_SCHEMA_DIR}/echo.capnp
+            ${IPC_SCHEMA_DIR}/mp/proxy.capnp
+    DEPENDS ${IPC_SCHEMA_DIR}/mining.capnp ${IPC_SCHEMA_DIR}/common.capnp
+            ${IPC_SCHEMA_DIR}/init.capnp ${IPC_SCHEMA_DIR}/echo.capnp
+            ${IPC_SCHEMA_DIR}/mp/proxy.capnp
+    COMMENT "capnp: generating Mining IPC C++ bindings")
+set_source_files_properties(${IPC_GENERATED} PROPERTIES COMPILE_OPTIONS "-w")
+
 # ---- dependencies ------------------------------------------------------------
 # Glaze (JSON/YAML) and doctest are header-only, installed on the default include path by their
 # -dev packages, so they need no find_package(). libcurl + zmq need link targets.
@@ -98,9 +137,12 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
 endif()
 
 # ---- core library ------------------------------------------------------------
-# Every .cpp under src/ except main.cpp becomes the testable core library.
+# Every .cpp under src/ except main.cpp becomes the testable core library. capnp_mining_client.cpp
+# is excluded too: it needs the generated capnp bindings, so it links only into the executable
+# (the core lib and tests stay capnp-free).
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
+list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/capnp_mining_client\\.cpp$")
 
 add_library(erikslund_core STATIC ${CORE_SOURCES} ${BTC_CRYPTO_SOURCES})
 target_include_directories(erikslund_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${BTC_DIR})
@@ -115,6 +157,13 @@ endif()
 # ---- main executable ---------------------------------------------------------
 add_executable(erikslund-pool ${CMAKE_SOURCE_DIR}/src/main.cpp)
 target_link_libraries(erikslund-pool PRIVATE erikslund_core)
+# The Cap'n Proto Mining backend links only into the executable (keeps the core lib + tests
+# capnp-free). The generated bindings live in the build dir; capnp_mining_client.cpp is our client.
+target_sources(erikslund-pool PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/bitcoin/capnp_mining_client.cpp ${IPC_GENERATED})
+target_include_directories(erikslund-pool PRIVATE ${IPC_GEN_DIR})
+target_link_libraries(erikslund-pool PRIVATE
+    CapnProto::capnp-rpc CapnProto::capnp CapnProto::kj-async CapnProto::kj)
 # Export the dynamic symbol table so the crash handler's backtrace shows function
 # names rather than bare addresses (negligible cost; just a larger symtab).
 target_link_options(erikslund-pool PRIVATE -rdynamic)

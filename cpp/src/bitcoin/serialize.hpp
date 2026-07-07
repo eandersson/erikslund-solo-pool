@@ -1,6 +1,7 @@
 #pragma once
 // BIP34 block-height script encoding for the coinbase.
 #include <cstdint>
+#include <stdexcept>
 
 #include "util/bytes.hpp"
 #include "util/varint.hpp"
@@ -8,6 +9,8 @@
 namespace erikslund::bitcoin {
 
 inline Bytes serialize_height(int64_t height) {
+    if (height < 0)
+        throw std::invalid_argument("serialize_height: negative block height");
     if (height == 0)
         return Bytes{0x00};
     if (height >= 1 && height <= 16)

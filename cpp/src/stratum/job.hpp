@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "bitcoin/block_template.hpp"
+#include "util/block_header.hpp"
 #include "util/bytes.hpp"
 #include "util/sha256.hpp"
 #include "util/uint256.hpp"
@@ -52,7 +53,7 @@ struct ShareRejection {
 struct ShareResult {
     double difficulty = 0.0;             // pool difficulty this hash satisfies
     bool is_block = false;               // hash <= network target
-    std::array<uint8_t, 80> header{};    // fixed-size: no per-share heap traffic
+    std::array<uint8_t, util::kHeaderSize> header{};    // fixed-size: no per-share heap traffic
     Bytes legacy_coinbase;
     // Canonical (display) hash as hex. Stored inline (a submit-rate path frees a heap string
     // unread on every non-block share otherwise); read through the accessor.
@@ -112,7 +113,7 @@ public:
     std::string build_block_hex(ByteView legacy_coinbase, ByteView header) const;
 
 private:
-    std::array<uint8_t, 80> build_header(const util::Hash256& merkle_root, uint32_t ntime,
+    std::array<uint8_t, util::kHeaderSize> build_header(const util::Hash256& merkle_root, uint32_t ntime,
                                          uint32_t nonce, uint32_t version) const;
 
     std::string job_id_;
@@ -126,8 +127,10 @@ private:
 
     Bytes prevhash_internal_;
     std::string prevhash_stratum_;
-    std::optional<Bytes> witness_commitment_;
-    bool has_witness_;
+    uint32_t coinbase_sequence_;
+    uint32_t coinbase_lock_time_;
+    std::optional<Bytes> coinbase_witness_;
+    std::vector<bitcoin::CoinbaseOutput> coinbase_required_outputs_;
 
     Bytes tag_;
     size_t extranonce2_size_;

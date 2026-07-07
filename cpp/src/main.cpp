@@ -1,5 +1,6 @@
 // Entry point: load config, connect to bitcoind, start the server, run until signal.
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -7,14 +8,19 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <system_error>
 #include <thread>
 
 #include <sys/resource.h>
 
 #include "api/http_server.hpp"
+#include "bitcoin/capnp_mining_client.hpp"
 #include "bitcoin/rpc_client.hpp"
+#include "bitcoin/work_source_ipc.hpp"
+#include "bitcoin/work_source_rpc.hpp"
 #include "core/config.hpp"
 #include "core/crash.hpp"
+#include "core/errors.hpp"
 #include "core/logging.hpp"
 #include "core/version.hpp"
 #include "net/server.hpp"
@@ -49,8 +55,17 @@ int main(int argc, char** argv) {
             config_path = argv[++i];
         else if (arg == "--api-host" && i + 1 < argc)
             api_host_override = argv[++i];
-        else if (arg == "--api-port" && i + 1 < argc)
-            api_port_override = static_cast<uint16_t>(std::stoul(argv[++i]));
+        else if (arg == "--api-port" && i + 1 < argc) {
+            const std::string value = argv[++i];
+            unsigned parsed = 0;
+            const auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (ec != std::errc{} || ptr != value.data() + value.size() || parsed == 0 ||
+                parsed > 65535) {
+                log::error("Invalid --api-port '{}' (expected 1-65535)", value);
+                return 1;
+            }
+            api_port_override = static_cast<uint16_t>(parsed);
+        }
         else if (arg == "--log-file" && i + 1 < argc)
             log_file = argv[++i];
         else if (arg == "--debug")
@@ -103,7 +118,22 @@ int main(int argc, char** argv) {
     bitcoin::RpcClient rpc(config.rpc_endpoints());
     if (!config.rpc_failover.empty())
         log::info("Bitcoind failover: {} endpoint(s) configured", config.rpc_endpoints().size());
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    bitcoin::WorkSource* source = &rpc_source;
+    std::optional<bitcoin::CapnpMiningClient> ipc_client;
+    std::optional<bitcoin::IpcWorkSource> ipc_source;
+    if (config.work_source == "ipc") {
+        try {
+            ipc_client.emplace(config.ipc_socket_path);
+            ipc_source.emplace(*ipc_client, rpc_source, "ipc://" + config.ipc_socket_path);
+            source = &*ipc_source;
+            log::info("Work source: IPC at {} with reconnecting RPC fallback",
+                      config.ipc_socket_path);
+        } catch (const std::exception& e) {
+            log::warning("Could not start IPC connection loop ({}); using RPC for work", e.what());
+        }
+    }
+    Pool pool(config, *source);
 
     // Install handlers before waiting on bitcoind so Ctrl-C / SIGTERM can interrupt the wait.
     // SIGPIPE ignored so a broken socket write never kills the process.
@@ -119,6 +149,9 @@ int main(int argc, char** argv) {
         try {
             pool.detect_network();
             network_detected = true;
+        } catch (const ConfigError& e) {
+            log::error("Config error: {}", e.what());
+            return 1;
         } catch (const std::exception& e) {
             if (attempt == 0)
                 log::warning("Waiting for bitcoind at {}: {} (will keep retrying)",
@@ -153,6 +186,7 @@ int main(int argc, char** argv) {
     }
 
     std::stop_source stop;
+    const std::stop_callback interrupt_work(stop.get_token(), [source] { source->interrupt(); });
     // request_stop isn't async-signal-safe, so a watcher polls the signal flag.
     std::jthread watcher([&stop] {
         while (!g_shutdown.load() && !stop.stop_requested())

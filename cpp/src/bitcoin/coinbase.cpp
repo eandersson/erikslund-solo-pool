@@ -1,6 +1,5 @@
 #include "bitcoin/coinbase.hpp"
 
-#include <array>
 #include <stdexcept>
 
 #include "bitcoin/serialize.hpp"
@@ -10,18 +9,23 @@
 namespace erikslund::bitcoin {
 
 namespace {
-constexpr std::array<uint8_t, 4> kSequence = {0xff, 0xff, 0xff, 0xff};
-constexpr std::array<uint8_t, 4> kLocktime = {0x00, 0x00, 0x00, 0x00};
+
+void append_output(Bytes& bytes, const CoinbaseOutput& output) {
+    util::append_le64(bytes, output.value);
+    append(bytes, util::encode_varint(output.script.size()));
+    append(bytes, output.script);
+}
+
 } // namespace
 
-Bytes build_coinbase1(int64_t height, size_t extranonce_total, ByteView tag, uint32_t version) {
-    const Bytes height_push = serialize_height(height);
-    const size_t scriptsig_length = height_push.size() + extranonce_total + tag.size();
+Bytes build_coinbase1(ByteView script_sig_prefix, size_t extranonce_total, ByteView tag,
+                      uint32_t version) {
+    const size_t scriptsig_length = script_sig_prefix.size() + extranonce_total + tag.size();
     if (scriptsig_length > kMaxScriptSig)
         throw std::invalid_argument("coinbase scriptSig too long (> 100 bytes)");
 
     Bytes out;
-    append(out, util::le32_bytes(version));
+    util::append_le32(out, version);
     out.push_back(0x01);
 
     Bytes prevout_null(36, 0x00);
@@ -29,36 +33,38 @@ Bytes build_coinbase1(int64_t height, size_t extranonce_total, ByteView tag, uin
     append(out, prevout_null);
 
     append(out, util::encode_varint(scriptsig_length));
-    append(out, height_push);
+    append(out, script_sig_prefix);
     return out;
+}
+
+Bytes build_coinbase1(int64_t height, size_t extranonce_total, ByteView tag, uint32_t version) {
+    return build_coinbase1(serialize_height(height), extranonce_total, tag, version);
 }
 
 Bytes build_coinbase2(const std::vector<CoinbaseOutput>& outputs,
-                      const std::optional<Bytes>& witness_commitment_script, ByteView tag) {
+                      const std::vector<CoinbaseOutput>& required_outputs, ByteView tag,
+                      uint32_t sequence, uint32_t lock_time) {
     Bytes out;
     append(out, tag);
-    append(out, kSequence);
+    util::append_le32(out, sequence);
 
-    const size_t output_count = outputs.size() + (witness_commitment_script ? 1 : 0);
+    const size_t output_count = outputs.size() + required_outputs.size();
     append(out, util::encode_varint(output_count));
 
-    const auto write_output = [&out](uint64_t amount, ByteView script) {
-        append(out, util::le64_bytes(amount));
-        append(out, util::encode_varint(script.size()));
-        append(out, script);
-    };
     for (const auto& output : outputs)
-        write_output(output.value, output.script);
-    if (witness_commitment_script)
-        write_output(0, *witness_commitment_script);
+        append_output(out, output);
+    for (const auto& output : required_outputs)
+        append_output(out, output);
 
-    append(out, kLocktime);
+    util::append_le32(out, lock_time);
     return out;
 }
 
-Bytes legacy_to_witness(ByteView legacy_coinbase) {
+Bytes legacy_to_witness(ByteView legacy_coinbase, ByteView witness_item) {
     if (legacy_coinbase.size() < 8)
         throw std::invalid_argument("legacy_to_witness: coinbase too short");
+    if (witness_item.size() != 32)
+        throw std::invalid_argument("legacy_to_witness: witness item must be 32 bytes");
 
     const ByteView version = legacy_coinbase.subspan(0, 4);
     const ByteView body = legacy_coinbase.subspan(4, legacy_coinbase.size() - 8);
@@ -70,13 +76,16 @@ Bytes legacy_to_witness(ByteView legacy_coinbase) {
     out.push_back(0x01);
     append(out, body);
 
-    const Bytes reserved_value(32, 0x00);
     append(out, util::encode_varint(1));
-    append(out, util::encode_varint(reserved_value.size()));
-    append(out, reserved_value);
+    append(out, util::encode_varint(witness_item.size()));
+    append(out, witness_item);
 
     append(out, locktime);
     return out;
+}
+
+Bytes legacy_to_witness(ByteView legacy_coinbase) {
+    return legacy_to_witness(legacy_coinbase, Bytes(32, 0));
 }
 
 } // namespace erikslund::bitcoin

@@ -22,6 +22,7 @@ _SCHEMA_KEYS = frozenset({
     "variable_difficulty", "vardiff_target_shares_per_minute", "vardiff_retarget_seconds",
     "extranonce1_size", "extranonce1_prefix", "extranonce2_size",
     "zmq_block_endpoint", "fast_block_notify",
+    "work_source", "ipc_socket_path",
     "block_poll_milliseconds", "work_rebroadcast_seconds",
     "version_rolling_mask", "donation_percent", "donation_address",
     "max_clients", "max_workers_per_address",
@@ -95,6 +96,11 @@ class Settings:
     # slower getblocktemplate (minimizes mining on a stale block).
     fast_block_notify: bool = True
 
+    # Work-source backend. The free-threaded Python pool supports only "rpc" (getblocktemplate +
+    # optional ZMQ); the Cap'n Proto Mining IPC backend is a C++-pool-only feature (pycapnp
+    # re-enables the GIL, which this pool forbids). "ipc" is rejected below with a clear message.
+    work_source: str = "rpc"
+
     stats_directory: str = "stats"
     status_interval_seconds: float = 30.0   # how often to rewrite pool.status / users/
     # Prune a users/<address> file after the address has been disconnected this many days.
@@ -150,6 +156,13 @@ class Settings:
             raise ConfigError("vardiff_retarget_seconds must be >= 1")
         if self.work_rebroadcast_seconds < 1:
             raise ConfigError("work_rebroadcast_seconds must be >= 1")
+        if self.work_source == "ipc":
+            raise ConfigError(
+                'work_source: ipc is not supported in the free-threaded Python pool (pycapnp '
+                're-enables the GIL). The Cap\'n Proto Mining IPC backend is a C++-pool feature; '
+                'use the C++ pool for IPC, or work_source: rpc here.')
+        if self.work_source != "rpc":
+            raise ConfigError('work_source must be "rpc"')
         if self.poll_interval <= 0:
             raise ConfigError("block_poll_milliseconds must be >= 1")
         # Min 4: extranonce1 is a wrapping counter; a 2-byte space (65k) can lap under connection
@@ -253,6 +266,7 @@ class Settings:
             "variable_difficulty", "vardiff_target_shares_per_minute", "vardiff_retarget_seconds",
             "extranonce1_size", "extranonce2_size",
             "zmq_block_endpoint", "fast_block_notify",
+            "work_source",
             "work_rebroadcast_seconds", "donation_percent", "donation_address",
             "max_clients", "max_workers_per_address",
     "drop_idle_seconds", "auth_timeout_seconds", "max_protocol_errors",

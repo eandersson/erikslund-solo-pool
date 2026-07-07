@@ -11,23 +11,22 @@
 
 #include <glaze/glaze.hpp>
 
+#include "bitcoin/serialize.hpp"
 #include "core/errors.hpp"
 #include "util/endian.hpp"
 #include "util/hex.hpp"
+#include "util/merkle.hpp"
 
 namespace erikslund::bitcoin {
 
 namespace {
 
-void append_transaction(BlockTemplate& block_template, std::string_view data_hex,
-                        const std::optional<std::string_view>& txid,
-                        const std::optional<std::string_view>& hash) {
-    util::from_hex_append(block_template.txn_data, data_hex);
-
+util::Hash256 parse_txid(bool segwit_aware, const std::optional<std::string_view>& txid,
+                         const std::optional<std::string_view>& hash) {
     std::string_view id_hex;
     if (txid) {
         id_hex = *txid;
-    } else if (block_template.witness_commitment) {
+    } else if (segwit_aware) {
         throw std::invalid_argument(
             "segwit template transaction missing txid (refusing wtxid fallback)");
     } else if (hash) {
@@ -39,7 +38,7 @@ void append_transaction(BlockTemplate& block_template, std::string_view data_hex
     if (!util::from_hex_into(txid_internal, id_hex))
         throw std::invalid_argument("template txid is not a 32-byte hex string");
     std::ranges::reverse(txid_internal);
-    block_template.txids_internal.push_back(txid_internal);
+    return txid_internal;
 }
 
 void check_mandatory_rule(std::string_view name) {
@@ -107,34 +106,45 @@ BlockTemplate BlockTemplate::from_gbt(const std::string& response_json) {
     block_template.bits = util::parse_hex_u32(block_template.bits_hex);
     block_template.coinbase_value = require_field(reply.coinbasevalue, "coinbasevalue");
     block_template.previousblockhash = require_field(reply.previousblockhash, "previousblockhash");
+    block_template.coinbase_script_sig_prefix = serialize_height(block_template.height);
 
     if (reply.rules)
         for (const auto& rule : *reply.rules)
             if (rule.is_string()) // skip non-string entries (parity with the Python pool's isinstance guard)
                 check_mandatory_rule(rule.get<std::string>());
 
-    // Present-and-string gate; an empty string still marks a segwit-aware server (drives the txid gate).
-    if (reply.default_witness_commitment)
-        block_template.witness_commitment = util::from_hex(*reply.default_witness_commitment);
+    // Field present -> segwit-aware (drives the txid gate); non-empty -> a witness commitment / segwit
+    // coinbase. Empty "" is segwit-aware but legacy, mirroring Python's has_witness vs _segwit_gbt.
+    const bool segwit_aware = reply.default_witness_commitment.has_value();
+    if (reply.default_witness_commitment && !reply.default_witness_commitment->empty()) {
+        block_template.coinbase_witness = Bytes(32, 0);
+        block_template.coinbase_required_outputs.push_back(
+            {0, util::from_hex(*reply.default_witness_commitment)});
+    }
 
     if (reply.transactions) {
         const auto& transactions = *reply.transactions;
+        if (transactions.size() > std::numeric_limits<uint32_t>::max())
+            throw std::invalid_argument("getblocktemplate has too many transactions");
         block_template.txn_count = static_cast<uint32_t>(transactions.size());
-        block_template.txids_internal.reserve(transactions.size());
+        std::vector<util::Hash256> txids;
+        txids.reserve(transactions.size());
         size_t total_hex = 0;
         for (const auto& tx : transactions)
             total_hex += require_field(tx.data, "transaction data").size();
         block_template.txn_data.reserve(total_hex / 2);
         for (const auto& tx : transactions) {
+            util::from_hex_append(block_template.txn_data,
+                                  require_field(tx.data, "transaction data"));
             std::optional<std::string_view> txid;
             std::optional<std::string_view> hash;
             if (tx.txid)
                 txid = *tx.txid;
             if (tx.hash)
                 hash = *tx.hash;
-            append_transaction(block_template, require_field(tx.data, "transaction data"), txid,
-                               hash);
+            txids.push_back(parse_txid(segwit_aware, txid, hash));
         }
+        block_template.merkle_branch_internal = util::merkle_branch(txids);
     }
     return block_template;
 }

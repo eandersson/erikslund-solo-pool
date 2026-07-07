@@ -45,6 +45,21 @@ RUN git clone --depth 1 --branch "${MIMALLOC_VERSION}" https://github.com/micros
     && rm -rf /tmp/mimalloc \
     && ldconfig
 
+# Cap'n Proto + the Bitcoin Core Mining IPC schema graph for the CapnpMiningClient backend. apt ships
+# capnp/libcapnp; the Bitcoin Core schema (mining/common/init.capnp) is vendored from the pinned tag
+# and libmultiprocess supplies the /mp/proxy.capnp import. All land in /opt/ipc-schema so
+# `capnp compile -I/opt/ipc-schema` resolves the import graph (see CMakeLists.txt).
+ARG BITCOIN_IPC_REF=v31.1
+RUN apt-get update && apt-get install -y --no-install-recommends capnproto libcapnp-dev \
+    && git clone --depth 1 --branch "${BITCOIN_IPC_REF}" --filter=blob:none --sparse \
+        https://github.com/bitcoin/bitcoin.git /tmp/btc \
+    # proxy.capnp from the SAME pinned checkout (Core vendors libmultiprocess as a subtree).
+    && git -C /tmp/btc sparse-checkout set src/ipc/capnp src/ipc/libmultiprocess/include/mp \
+    && mkdir -p /opt/ipc-schema/mp \
+    && cp /tmp/btc/src/ipc/capnp/*.capnp /opt/ipc-schema/ \
+    && cp /tmp/btc/src/ipc/libmultiprocess/include/mp/proxy.capnp /opt/ipc-schema/mp/ \
+    && rm -rf /tmp/btc /var/lib/apt/lists/*
+
 COPY build-entrypoint.sh /usr/local/bin/build-entrypoint.sh
 COPY clang-tidy.sh /usr/local/bin/clang-tidy.sh
 COPY cppcheck.sh /usr/local/bin/cppcheck.sh

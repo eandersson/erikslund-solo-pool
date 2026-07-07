@@ -143,6 +143,12 @@ TEST_CASE("an over-long coinbase_signature is rejected at load") {
               .coinbase_signature.size() == 78);
 }
 
+TEST_CASE("work_source selects IPC without a separate acknowledgement") {
+    CHECK(Config::from_string(R"({"work_source": "ipc"})").work_source == "ipc");
+    CHECK(Config::from_string(R"({"work_source": "rpc"})").work_source == "rpc");
+    CHECK_THROWS_AS(Config::from_string(R"({"experimental_ipc": true})"), ConfigError);
+}
+
 namespace {
 // Caller removes the returned path.
 std::filesystem::path write_temp(const std::string& name, const std::string& text) {

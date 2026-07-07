@@ -47,6 +47,24 @@ RUN git clone --depth 1 --branch "${MIMALLOC_VERSION}" https://github.com/micros
     && rm -rf /tmp/mimalloc \
     && ldconfig
 
+# ---- Cap'n Proto Mining IPC backend ------------------------------------------
+# The capnp toolchain (compiler + libcapnp-dev) + the Bitcoin Core v31 mining schema graph +
+# libmultiprocess mp/proxy.capnp under /opt/ipc-schema, exactly as cpp/docker/Dockerfile does, so
+# CMake can `capnp compile -I/opt/ipc-schema`.
+ARG BITCOIN_IPC_REF=v31.1
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends capnproto libcapnp-dev; \
+    git clone --depth 1 --branch "${BITCOIN_IPC_REF}" --filter=blob:none --sparse \
+        https://github.com/bitcoin/bitcoin.git /tmp/btc; \
+    # proxy.capnp comes from the SAME pinned checkout (Core vendors libmultiprocess as a subtree),
+    # so the whole schema graph is byte-identical to what the released bitcoind links.
+    git -C /tmp/btc sparse-checkout set src/ipc/capnp src/ipc/libmultiprocess/include/mp; \
+    mkdir -p /opt/ipc-schema/mp; \
+    cp /tmp/btc/src/ipc/capnp/*.capnp /opt/ipc-schema/; \
+    cp /tmp/btc/src/ipc/libmultiprocess/include/mp/proxy.capnp /opt/ipc-schema/mp/; \
+    rm -rf /tmp/btc /var/lib/apt/lists/*
+
 WORKDIR /src
 COPY . .
 
@@ -61,8 +79,9 @@ RUN mkdir -p /staging/lib && cp -a /usr/local/lib/libmimalloc.so* /staging/lib/
 # ---- runtime ---------------------------------------------------------------
 FROM debian:trixie-slim
 
+# libcapnp-1.1.0 (capnp / capnp-rpc / kj / kj-async) is the Cap'n Proto runtime .so the binary links.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libcurl4 libzmq5 libyaml-cpp0.8 libatomic1 curl \
+        libcurl4 libzmq5 libyaml-cpp0.8 libatomic1 curl libcapnp-1.1.0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 pool \
     && useradd --uid 1000 --gid 1000 --create-home --home-dir /var/lib/erikslund-pool \

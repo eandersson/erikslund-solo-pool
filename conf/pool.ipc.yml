@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=./pool.schema.json
+#
+# Example: fetch complete work through Bitcoin Core's Cap'n Proto Mining IPC interface.
+# RPC remains authoritative for the tip and is required for chain detection, header lookup, block
+# submission, spool replay, and work while IPC reconnects. ZMQ remains the optional fast
+# notification path.
+#
+# Prerequisites:
+#   * Run a MULTIPROCESS bitcoin-node exposing the mining IPC socket. `bitcoin-node` ships in the
+#     official Bitcoin Core tarball. This build pins Bitcoin Core's v31.1 IPC schema, so use the
+#     matching Core release. Launch it via the wrapper:
+#       bitcoin -m node -ipcbind=unix:/ipc/mining.sock
+#     Make that socket reachable from the C++ pool and point ipc_socket_path at it.
+#
+# IPC reconnects every 30 seconds after startup or runtime failures.
+work_source: ipc
+ipc_socket_path: /ipc/mining.sock   # shared named volume 'mining-ipc' mounted at /ipc in both containers
+
+bitcoin_nodes:
+  - address: bitcoind:8332          # required RPC side channel and work fallback
+    username: erikslund
+    password: CHANGE_ME_before_deploying
+zmq_block_endpoint: tcp://bitcoind:28332   # optional fast block notifications
+
+stratum_listen:
+  - 0.0.0.0:3333
+api_listen:
+  - 127.0.0.1:7777
+initial_difficulty: 10000
+minimum_difficulty: 1
+stats_directory: stats

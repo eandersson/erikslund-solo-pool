@@ -15,6 +15,7 @@
 
 #include "api/snapshot.hpp"
 #include "bitcoin/rpc_client.hpp"
+#include "bitcoin/work_source_rpc.hpp"
 #include "core/config.hpp"
 #include "pool/pool.hpp"
 #include "stats/poolstatus.hpp"
@@ -62,8 +63,9 @@ public:
 
 TEST_CASE("validate_address resolves locally, without any bitcoind RPC") {
     Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass"); // refused -> any RPC call throws
-    Pool pool(config, rpc);
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc); // refused -> any RPC call throws
+    Pool pool(config, rpc_source);
 
     // network_ defaults to Regtest. A valid regtest address yields a P2WPKH script with no RPC --
     // the dead endpoint above would make any RPC-based validation fail.
@@ -80,7 +82,8 @@ TEST_CASE("validate_address resolves locally, without any bitcoind RPC") {
 TEST_CASE("next_job_id is 16 hex: a stable per-process prefix + a monotonic counter") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     const std::string a = pool.next_job_id();
     const std::string b = pool.next_job_id();
@@ -104,8 +107,9 @@ TEST_CASE("next_job_id is 16 hex: a stable per-process prefix + a monotonic coun
 TEST_CASE("next_job_id: independent pools advance independent counters") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool p1(config, rpc);
-    Pool p2(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool p1(config, rpc_source);
+    Pool p2(config, rpc_source);
 
     // Each pool's counter starts at 1; the random 32-bit prefix makes the full ids
     // globally unique across processes (collision probability ~2^-32, not asserted here).
@@ -124,9 +128,10 @@ TEST_CASE("replica extranonce1 prefixes partition otherwise identical session co
     Config second_config = first_config;
     second_config.extranonce1_prefix = {0x00, 0x02};
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
     const auto before_start = static_cast<uint32_t>(std::time(nullptr));
-    Pool first(first_config, rpc);
-    Pool second(second_config, rpc);
+    Pool first(first_config, rpc_source);
+    Pool second(second_config, rpc_source);
 
     const auto first_session = first.add_client(std::make_shared<TestConnection>());
     const auto second_session = second.add_client(std::make_shared<TestConnection>());
@@ -159,8 +164,9 @@ TEST_CASE("resubmit_spooled_blocks leaves the block on disk when bitcoind is unr
 
     Config config;
     config.stats_directory = stats.string();
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass"); // refused -> submitblock throws
-    Pool pool(config, rpc);
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc); // refused -> submitblock throws
+    Pool pool(config, rpc_source);
     pool.resubmit_spooled_blocks();
 
     // The node was unreachable, so the block must stay (a later restart retries it),
@@ -183,7 +189,8 @@ TEST_CASE("resubmit_spooled_blocks leaves an inconclusive submission available f
     Config config;
     config.stats_directory = stats.string();
     InconclusiveRpc rpc;
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     pool.resubmit_spooled_blocks();
 
     CHECK(fs::exists(block));
@@ -207,7 +214,8 @@ TEST_CASE("an inconclusive spooled block is submitted (archived) on a later rest
     // Boot 1: bitcoind cannot yet validate the block ("inconclusive") -> it stays on disk for retry.
     {
         InconclusiveRpc rpc;
-        Pool pool(config, rpc);
+        bitcoin::RpcWorkSource rpc_source(rpc);
+        Pool pool(config, rpc_source);
         pool.resubmit_spooled_blocks();
     }
     REQUIRE(fs::exists(block));
@@ -216,7 +224,8 @@ TEST_CASE("an inconclusive spooled block is submitted (archived) on a later rest
     // Boot 2: bitcoind now confirms -> the same spooled block is submitted and archived.
     {
         AcceptingRpc rpc;
-        Pool pool(config, rpc);
+        bitcoin::RpcWorkSource rpc_source(rpc);
+        Pool pool(config, rpc_source);
         pool.resubmit_spooled_blocks();
     }
     CHECK_FALSE(fs::exists(block));
@@ -233,7 +242,8 @@ TEST_CASE("resubmit_spooled_blocks is a no-op when there is no blocks directory"
     Config config;
     config.stats_directory = stats.string();
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     CHECK_NOTHROW(pool.resubmit_spooled_blocks()); // nothing spooled -> nothing to do
 }
 
@@ -268,7 +278,8 @@ TEST_CASE("prune keeps a held worker row and evicts it once the last handle is g
     Config config;
     config.stats_directory = stats.string();
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     auto accounting = pool.attach_worker(kAddr, "w1"); // an authorized Session holds this handle
     REQUIRE(accounting);
@@ -291,7 +302,8 @@ TEST_CASE("prune keeps a held worker row and evicts it once the last handle is g
 TEST_CASE("share hooks accumulate persistent per-worker stats; sessions with one name merge") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     // Two connections share worker name "w1"; a third is "w2". They must MERGE by name.
     pool.note_accepted_share(kAddr, "w1", 5.0, 5.0);
@@ -316,7 +328,8 @@ TEST_CASE("cached worker accounting remains exact while writers and snapshots ru
 
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     std::vector<std::string> workers;
     std::vector<stats::WorkerAccountingHandle> accounting;
@@ -396,7 +409,8 @@ TEST_CASE("a connected overflow worker stays attached to its canonical bare buck
     Config config;
     config.max_workers_per_address = 2;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     std::vector<std::shared_ptr<stratum::Session>> sessions;
     for (const std::string worker : {"w1", "w2", "overflow"}) {
@@ -422,7 +436,8 @@ TEST_CASE("per-worker bestshare is the actual hash difficulty, not the credited 
     // actual difficulty met (share_difficulty), not the credited target, or it under-reports.
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     pool.note_accepted_share(kAddr, "w1", /*credited=*/8.0, /*share_difficulty=*/5000.0);
     pool.note_accepted_share(kAddr, "w1", /*credited=*/8.0, /*share_difficulty=*/120.0);
     const auto rows = workers_of(pool.snapshot(true), kAddr);
@@ -434,7 +449,8 @@ TEST_CASE("per-worker bestshare is the actual hash difficulty, not the credited 
 TEST_CASE("a worker row persists in the registry after its connection ends") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     pool.note_accepted_share(kAddr, "rig", 4.0, 4.0);
 
     // snapshot() has no live clients (none were attached), yet the row is present: persistence.
@@ -448,7 +464,8 @@ TEST_CASE("a worker row persists in the registry after its connection ends") {
 TEST_CASE("attach_worker creates a zero row so an idle authorized worker appears") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     pool.attach_worker(kAddr, "idle");
     const auto rows = workers_of(pool.snapshot(true), kAddr);
     REQUIRE(rows.size() == 1);
@@ -460,7 +477,8 @@ TEST_CASE("worker names beyond max_workers_per_address fold into the bare-addres
     Config config;
     config.max_workers_per_address = 2;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     pool.note_accepted_share(kAddr, "w1", 1.0, 1.0);
     pool.note_accepted_share(kAddr, "w2", 1.0, 1.0);
     pool.note_accepted_share(kAddr, "w3", 7.0, 7.0); // over the cap -> folds into ""
@@ -485,7 +503,8 @@ TEST_CASE("recover_user_stats re-seeds the registry from users/ files, decayed b
         Config wcfg;
         wcfg.stats_directory = dir.string();
         bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-        Pool writer(wcfg, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+        Pool writer(wcfg, rpc_source);
         for (int i = 0; i < 20; ++i)
             writer.note_accepted_share(kAddr, "rig", 1000.0, 1000.0); // build up some hashrate
         const auto snap = writer.snapshot(/*include_workers=*/true);
@@ -497,7 +516,8 @@ TEST_CASE("recover_user_stats re-seeds the registry from users/ files, decayed b
     Config rcfg;
     rcfg.stats_directory = dir.string();
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool reader(rcfg, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool reader(rcfg, rpc_source);
     reader.recover_user_stats();
 
     const auto rows = workers_of(reader.snapshot(true), kAddr);

@@ -71,6 +71,47 @@ std::string redacted_rpc_url(const PoolSnapshot& s) {
 
 } // namespace
 
+TEST_CASE("to_status_json byte-matches the Python FastAPI json.dumps (floats get .0)") {
+    // Golden bytes are json.dumps(dict, separators=(",",":")): floats get a ".0", other numbers stay
+    // ints, nulls stay null.
+    glz::generic pool = glz::generic::object_t{};
+    pool["runtime"] = static_cast<double>(10);
+    pool["height"] = static_cast<double>(170);
+    pool["network_diff"] = 1000.0;
+    pool["current_job"] = static_cast<double>(5);
+    pool["workers"] = static_cast<double>(3);
+    pool["users"] = static_cast<double>(2);
+    pool["blocks_found"] = static_cast<double>(1);
+    pool["last_block_found"] = glz::generic{};
+    pool["shares_accepted"] = static_cast<double>(100);
+    pool["shares_rejected"] = static_cast<double>(2);
+    pool["accepted_diff"] = 1024.0;
+    pool["best_share"] = 250.0;
+    pool["best_share_percent"] = 25.0;
+    pool["hashrate_estimate"] = 0.0;
+    CHECK(to_status_json(pool) ==
+          R"({"runtime":10,"height":170,"network_diff":1000.0,"current_job":5,"workers":3,"users":2,)"
+          R"("blocks_found":1,"last_block_found":null,"shares_accepted":100,"shares_rejected":2,)"
+          R"("accepted_diff":1024.0,"best_share":250.0,"best_share_percent":25.0,"hashrate_estimate":0.0})");
+
+    // A nested session difficulty that's an integer-valued float must print "1024.0".
+    glz::generic session = glz::generic::object_t{};
+    session["worker"] = std::string("w1");
+    session["difficulty"] = 1024.0;
+    session["shares_accepted"] = static_cast<double>(7);
+    session["best_diff"] = 12.5;
+    glz::generic sessions = glz::generic::array_t{};
+    sessions.get_array().push_back(std::move(session));
+    glz::generic client = glz::generic::object_t{};
+    client["address"] = std::string("bc1qx");
+    client["workers"] = static_cast<double>(1);
+    client["best_diff"] = 0.0;
+    client["sessions"] = std::move(sessions);
+    CHECK(to_status_json(client) ==
+          R"({"address":"bc1qx","workers":1,"best_diff":0.0,)"
+          R"("sessions":[{"worker":"w1","difficulty":1024.0,"shares_accepted":7,"best_diff":12.5}]})");
+}
+
 TEST_CASE("prometheus emits every expected metric name + TYPE") {
     const std::string m = build_prometheus(sample());
     for (const char* name :

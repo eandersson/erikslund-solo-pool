@@ -64,4 +64,6 @@ std::string make_notify_line(const std::string& job_id, const std::string& prevh
                              const std::string& version_hex, const std::string& nbits_hex,
                              const std::string& ntime_hex, bool clean);
 
+std::string make_set_difficulty_line(double difficulty);
+
 } // namespace erikslund::stratum

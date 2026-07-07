@@ -58,6 +58,15 @@
       "type": "boolean",
       "description": "On a ZMQ block notification, broadcast empty 'stop work' built from the new block hash before the slower getblocktemplate. Default true."
     },
+    "work_source": {
+      "type": "string",
+      "enum": ["rpc", "ipc"],
+      "description": "Work-source backend. \"rpc\" (default) uses getblocktemplate. \"ipc\" replaces only template fetching; bitcoin_nodes remains authoritative for the tip and is required for chain detection, header lookup, full-block submission, spool replay, and work while IPC reconnects every 30 seconds. ZMQ remains the optional fast block-notification path. IPC is C++ only."
+    },
+    "ipc_socket_path": {
+      "type": "string",
+      "description": "With work_source: ipc, the UNIX socket the multiprocess bitcoin-node exposes via -ipcbind=unix:<path>. Default /tmp/btc-mining.sock suits a bare-metal node sharing the host /tmp; in a container /tmp is a private tmpfs, so point this at a shared volume (e.g. /ipc/mining.sock, see conf/pool.ipc.yml). Ignored when work_source is rpc."
+    },
     "block_poll_milliseconds": {
       "type": "integer",
       "minimum": 1,
@@ -124,7 +133,7 @@
     },
     "coinbase_version": {
       "type": "integer",
-      "description": "Coinbase transaction version. Default 1."
+      "description": "Coinbase transaction version for RPC templates. IPC uses Bitcoin Core's template value. Default 1."
     },
     "donation_percent": {
       "type": "number",

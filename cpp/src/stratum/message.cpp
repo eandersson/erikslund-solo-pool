@@ -8,6 +8,8 @@
 
 #include <glaze/glaze.hpp>
 
+#include "util/json_number.hpp"
+
 namespace erikslund::stratum {
 
 using json = glz::generic;
@@ -233,6 +235,11 @@ std::string make_notify_line(const std::string& job_id, const std::string& prevh
     out += ntime_hex;
     out += clean ? "\",true]}" : "\",false]}";
     return out;
+}
+
+std::string make_set_difficulty_line(double difficulty) {
+    return std::string(R"({"id":null,"method":"mining.set_difficulty","params":[)") +
+           util::format_json_number(difficulty) + "]}";
 }
 
 void make_error_line_into(std::string& out, const json& id, const StratumError& error) {

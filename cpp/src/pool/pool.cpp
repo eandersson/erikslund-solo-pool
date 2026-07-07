@@ -27,6 +27,7 @@
 
 #include "bitcoin/address.hpp"
 #include "bitcoin/block_template.hpp"
+#include "bitcoin/serialize.hpp"
 #include "core/errors.hpp"
 #include "core/logging.hpp"
 #include "core/version.hpp"
@@ -77,9 +78,9 @@ void ratchet_max(std::atomic<double>& value, double candidate) {
 }
 } // namespace
 
-Pool::Pool(Config config, bitcoin::RpcClient& rpc)
+Pool::Pool(Config config, bitcoin::WorkSource& source)
     : config_(std::move(config)),
-      rpc_(rpc),
+      source_(source),
       started_(static_cast<int64_t>(std::time(nullptr))), // wall: DISPLAYED/STORED
       started_steady_(stats::steady_seconds()),           // monotonic
       // Seed the window clock at start so the first share folds a real interval.
@@ -97,42 +98,18 @@ Pool::Pool(Config config, bitcoin::RpcClient& rpc)
     submit_thread_ = std::jthread([this](const std::stop_token& stop) { submit_loop(stop); });
 }
 
-namespace {
-std::string json_str(glz::generic& obj, const char* key, const std::string& fallback) {
-    if (obj.contains(key) && obj[key].is_string())
-        return obj[key].get<std::string>();
-    return fallback;
-}
-int64_t json_int(glz::generic& obj, const char* key, int64_t fallback) {
-    if (obj.contains(key) && obj[key].is_number())
-        return static_cast<int64_t>(obj[key].get<double>());
-    return fallback;
-}
-int64_t json_require_int(glz::generic& obj, const char* key) {
-    if (!obj.contains(key) || !obj[key].is_number())
-        throw RpcError(std::string("bitcoind reply missing numeric field: ") + key);
-    return static_cast<int64_t>(obj[key].get<double>());
-}
-std::string json_require_str(glz::generic& obj, const char* key) {
-    if (!obj.contains(key) || !obj[key].is_string())
-        throw RpcError(std::string("bitcoind reply missing string field: ") + key);
-    return obj[key].get<std::string>();
-}
-} // namespace
-
 void Pool::detect_network() {
-    auto info = rpc_.getblockchaininfo();
-    const std::string chain = json_str(info, "chain", "regtest");
+    const bitcoin::ChainInfo info = source_.detect_chain();
+    const std::string& chain = info.chain;
     const auto detected = bitcoin::network_from_string(chain);
     if (!detected)
         log::warning("Unrecognized bitcoind chain '{}'; using regtest address rules -- "
                      "donation/payout addresses for other networks will be rejected", chain);
     network_ = detected.value_or(bitcoin::Network::Regtest);
     chain_name_ = chain; // raw chain string for display (keeps testnet3 vs testnet4 distinct)
-    const int64_t blocks = json_int(info, "blocks", 0);
-    chain_blocks_.store(blocks);
+    chain_blocks_.store(info.blocks);
     generator_ready_.store(true);
-    log::info("Connected to bitcoind: chain={} blocks={}", chain, blocks);
+    log::info("Connected to bitcoind: chain={} blocks={}", chain, info.blocks);
 
     if (config_.donation_percent > 0.0 && !config_.donation_address.empty()) {
         if (auto script = bitcoin::address_to_script(config_.donation_address, network_)) {
@@ -264,8 +241,12 @@ void Pool::build_and_broadcast(bitcoin::BlockTemplate block_template, bool clean
 
 bool fastblock_eligible(bool has_template, bool fastblock_pending, const std::string& notified_tip,
                         const std::string& last_prevhash, int64_t next_height,
-                        int64_t confirmations, const std::string& chain_name) {
+                        int64_t confirmations, const std::string& chain_name,
+                        const std::string& bits_hex) {
     if (!has_template || fastblock_pending)
+        return false;
+    // No nBits, no empty job: the fastblock template reuses the new tip's bits verbatim.
+    if (bits_hex.empty())
         return false;
     if (notified_tip == last_prevhash) // the GBT already advanced to this tip
         return false;
@@ -305,12 +286,12 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                 // One header fetch grounds the empty job in consensus: the true next height (BIP34
                 // coinbase height + exact subsidy across halvings), confirmations == 1 (active
                 // tip), the new tip's nBits, and its median-time-past for the ntime floor.
-                auto header = rpc_.getblockheader(block_hash_display); // RPC: off the lock
-                const int64_t next_height = json_require_int(header, "height") + 1;
-                const int64_t confirmations = json_int(header, "confirmations", -1);
-                const std::string bits_hex = json_require_str(header, "bits");
-                const uint32_t mediantime =
-                    static_cast<uint32_t>(json_require_int(header, "mediantime"));
+                const bitcoin::HeaderFacts header =
+                    source_.fetch_header(block_hash_display); // off the lock
+                const int64_t next_height = header.height + 1;
+                const int64_t confirmations = header.confirmations;
+                const std::string& bits_hex = header.bits_hex;
+                const uint32_t mediantime = header.mediantime;
 
                 bool eligible = false;
                 uint32_t version = 0;
@@ -319,7 +300,7 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                     const std::scoped_lock lock(mutex_);
                     eligible = fastblock_eligible(has_template_, fastblock_pending_,
                                                   block_hash_display, last_prevhash_, next_height,
-                                                  confirmations, chain_name_);
+                                                  confirmations, chain_name_, bits_hex);
                     if (eligible) {
                         version = last_version_;
                         halving_interval = chain_name_ == "regtest" ? 150 : 210000;
@@ -327,28 +308,35 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
                     }
                 }
                 if (eligible) {
-                    bitcoin::BlockTemplate block_template;
-                    block_template.height = next_height;
-                    block_template.version = version;
-                    // ntime must exceed the new tip's MTP; floor at MTP+1 so neither a lagging host
-                    // clock nor a frozen-clock chain can synthesize a "time-too-old" block.
-                    block_template.curtime =
-                        std::max(static_cast<uint32_t>(std::time(nullptr)), mediantime + 1);
-                    block_template.bits_hex = bits_hex;
-                    block_template.bits = util::parse_hex_u32(bits_hex);
-                    block_template.coinbase_value = block_subsidy(next_height, halving_interval);
-                    block_template.previousblockhash = block_hash_display;
-                    block_template.witness_commitment = util::from_hex(empty_commitment_);
-                    const auto job = make_job(std::move(block_template), /*clean=*/true);
-                    const auto outcome =
-                        broadcast_job(job, /*clean=*/true, /*require_new_prevhash=*/true);
-                    if (outcome == PublishOutcome::Published) {
-                        last_broadcast_steady_.store(stats::steady_seconds());
-                        log::debug("Fastblock: empty work for height {} on new block {}",
-                                   next_height, block_hash_display);
-                    } else {
-                        // Suppressed: release the pending latch so the next ZMQ notify isn't
-                        // blocked waiting for a GBT to reset it.
+                    bool published = false;
+                    try {
+                        bitcoin::BlockTemplate block_template;
+                        block_template.height = next_height;
+                        block_template.version = version;
+                        block_template.curtime =
+                            std::max(static_cast<uint32_t>(std::time(nullptr)), mediantime + 1);
+                        block_template.bits_hex = bits_hex;
+                        block_template.bits = util::parse_hex_u32(bits_hex);
+                        block_template.coinbase_value = block_subsidy(next_height, halving_interval);
+                        block_template.previousblockhash = block_hash_display;
+                        block_template.coinbase_script_sig_prefix =
+                            bitcoin::serialize_height(next_height);
+                        block_template.coinbase_witness = Bytes(32, 0);
+                        block_template.coinbase_required_outputs.push_back(
+                            {0, util::from_hex(empty_commitment_)});
+                        const auto job = make_job(std::move(block_template), /*clean=*/true);
+                        const auto outcome =
+                            broadcast_job(job, /*clean=*/true, /*require_new_prevhash=*/true);
+                        published = outcome == PublishOutcome::Published;
+                        if (published) {
+                            last_broadcast_steady_.store(stats::steady_seconds());
+                            log::debug("Fastblock: empty work for height {} on new block {}",
+                                       next_height, block_hash_display);
+                        }
+                    } catch (const std::exception& e) {
+                        log::warning("Fastblock job build failed: {}", e.what());
+                    }
+                    if (!published) {
                         const std::scoped_lock lock(mutex_);
                         fastblock_pending_ = false;
                     }
@@ -374,8 +362,8 @@ void Pool::refresh_work(const std::stop_token& stop) {
             const auto job = current_job();
             bool fetch = refresh_due || job == nullptr;
             if (!fetch) {
-                const std::string tip = rpc_.getbestblockhash();
-                generator_ready_.store(true);
+                const std::string tip = source_.get_tip();
+                set_generator_ready(true);
                 if (!job->mines_on(tip)) {
                     fetch = true;
                 } else {
@@ -384,8 +372,8 @@ void Pool::refresh_work(const std::stop_token& stop) {
                 }
             }
             if (fetch) {
-                auto block_template = rpc_.getblocktemplate_parsed();
-                generator_ready_.store(true);
+                auto block_template = source_.fetch_template();
+                set_generator_ready(true);
                 bool new_block = false;
                 {
                     const std::scoped_lock lock(mutex_);
@@ -396,7 +384,7 @@ void Pool::refresh_work(const std::stop_token& stop) {
         } catch (const RpcConnectionError& e) {
             // Every endpoint unreachable: un-latch readiness so /health reports degraded (it
             // re-latches on the next successful RPC).
-            generator_ready_.store(false);
+            set_generator_ready(false);
             log::warning("Work refresh failed: {}", e.what());
         } catch (const std::exception& e) {
             log::warning("Work refresh failed: {}", e.what());
@@ -632,7 +620,7 @@ void Pool::status_loop(const std::stop_token& stop) {
             tip = last_prevhash_;
         }
         if (!stop.stop_requested())
-            rpc_.maybe_failback(tip);
+            source_.maybe_failback(tip);
     }
     write_stats(); // final flush so a restart resumes from the latest stats
 }
@@ -788,7 +776,7 @@ void Pool::resubmit_spooled_blocks() {
         const std::string name = path.filename().string();
         log::warning("Resubmitting block {} spooled by a previous run", name);
         try {
-            const auto rejection = rpc_.submitblock(block_hex);
+            const auto rejection = source_.submit_block_hex(block_hex);
             const SubmitOutcome outcome = classify_submit(rejection);
             if (outcome == SubmitOutcome::Accepted || outcome == SubmitOutcome::AlreadyKnown) {
                 log::info("Spooled block {} accepted/already known; archiving", name);
@@ -816,8 +804,8 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     snapshot.version = kVersion;
     snapshot.chain = chain_name_;
     snapshot.rpc_url = config_.rpc_url;
-    snapshot.bitcoind_nodes = rpc_.endpoint_urls();
-    snapshot.bitcoind_active_index = rpc_.active_index();
+    snapshot.bitcoind_nodes = source_.endpoint_urls();
+    snapshot.bitcoind_active_index = source_.active_index();
     snapshot.pid = ::getpid();
     snapshot.starttime = started_;
     snapshot.uptime = static_cast<int64_t>(now_steady - started_steady_);
@@ -950,7 +938,8 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
                 result.block_hash_hex(), result.difficulty, address, worker);
     // PendingBlock outlives the ShareResult via submit_queue_, so materialize the hash view.
     PendingBlock block{job.height(), std::string(result.block_hash_hex()),
-                       job.build_block_hex(result.legacy_coinbase, result.header), address, worker};
+                       job.build_block_hex(result.legacy_coinbase, result.header),
+                       address, worker};
     // Spool before submit so a solved block is never lost if submitblock fails.
     spool_block(block);
     // Hand the slow submitblock RPC to the submit thread: this runs on the caller's reactor
@@ -964,7 +953,7 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
 
 bool Pool::submit_block(const PendingBlock& block) {
     try {
-        const auto rejection = rpc_.submitblock(block.hex);
+        const auto rejection = source_.submit_block_hex(block.hex);
         switch (classify_submit(rejection)) {
         case SubmitOutcome::Accepted:
             ++blocks_found_;

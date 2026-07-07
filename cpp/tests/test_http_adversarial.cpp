@@ -6,6 +6,7 @@
 
 #include "api/http_server.hpp"
 #include "bitcoin/rpc_client.hpp"
+#include "bitcoin/work_source_rpc.hpp"
 #include "core/config.hpp"
 #include "pool/pool.hpp"
 
@@ -20,7 +21,8 @@ bool contains(const std::string& haystack, const std::string& needle) {
 struct PoolFixture {
     Config config;
     bitcoin::RpcClient rpc{"http://127.0.0.1:1", "user", "pass"};
-    Pool pool{config, rpc};
+    bitcoin::RpcWorkSource source{rpc};
+    Pool pool{config, source};
 };
 } // namespace
 

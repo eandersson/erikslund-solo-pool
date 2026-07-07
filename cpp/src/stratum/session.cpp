@@ -217,10 +217,7 @@ void Session::send_set_difficulty() {
 }
 
 std::string Session::set_difficulty_line() {
-    json params = json::array_t{};
-    params.get_array().emplace_back(json(difficulty_));
-    return glz::write_json(make_notification("mining.set_difficulty", std::move(params)))
-        .value_or("");
+    return make_set_difficulty_line(difficulty_);
 }
 
 void Session::do_send_set_difficulty() {

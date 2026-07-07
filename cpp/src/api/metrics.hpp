@@ -21,6 +21,8 @@ glz::generic metrics_json(const PoolSnapshot& snapshot);
 std::optional<glz::generic> client_stats_json(const PoolSnapshot& snapshot,
                                               const std::string& address);
 
+std::string to_status_json(const glz::generic& value);
+
 std::string dashboard_html(const PoolSnapshot& snapshot);
 
 } // namespace erikslund::api

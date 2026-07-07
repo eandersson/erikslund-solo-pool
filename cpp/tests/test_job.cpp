@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "bitcoin/block_template.hpp"
+#include "bitcoin/coinbase.hpp"
 #include "gbt_fixture.hpp"
 #include "stratum/job.hpp"
 #include "util/difficulty.hpp"
@@ -374,6 +375,43 @@ TEST_CASE("donation adds a second coinbase output and reduces the payout") {
     CHECK(donated.find(to_hex(donation)) != std::string::npos); // donation script present
     // 10% of the fixture's 5,000,000,000 coinbasevalue = 500,000,000, little-endian.
     CHECK(donated.find("0065cd1d00000000") != std::string::npos);
+}
+
+TEST_CASE("Job honors Mining IPC coinbase fields and required outputs") {
+    auto json = fixture_json("1d00ffff");
+    json.get_object().erase("default_witness_commitment");
+    auto block_template = from_template(json);
+    block_template.coinbase_script_sig_prefix = from_hex("02aa00abcd");
+    block_template.coinbase_version = 2;
+    block_template.coinbase_sequence = 0x11223344;
+    block_template.coinbase_lock_time = 0x55667788;
+    block_template.coinbase_witness = Bytes(32, 0x42);
+    const Bytes required_script = from_hex("51");
+    block_template.coinbase_required_outputs = {{7, required_script}};
+
+    // The template's version overrides the configured fallback version.
+    const Job job("ipc", std::move(block_template), Bytes{}, 4, 4, 9);
+    CHECK(job.coinbase1_hex().starts_with("02000000"));
+    CHECK(job.coinbase1_hex().ends_with("0d02aa00abcd"));
+
+    const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
+    const Bytes coinbase2 = job.build_coinbase2(payout);
+    CHECK(to_hex(coinbase2).starts_with("44332211"));
+    CHECK(to_hex(coinbase2).ends_with("88776655"));
+
+    const auto outputs = parse_coinbase_outputs(coinbase2);
+    REQUIRE(outputs.size() == 2);
+    CHECK(outputs[0].value == 5000000000ULL);
+    CHECK(outputs[0].script_hex == to_hex(payout));
+    CHECK(outputs[1].value == 7);
+    CHECK(outputs[1].script_hex == to_hex(required_script));
+
+    Bytes legacy_coinbase = from_hex(job.coinbase1_hex());
+    append(legacy_coinbase, Bytes(8, 0)); // extranonce1 + extranonce2
+    append(legacy_coinbase, coinbase2);
+    const std::string block_hex =
+        job.build_block_hex(legacy_coinbase, Bytes(util::kHeaderSize, 0));
+    CHECK(block_hex.find("0120" + to_hex(Bytes(32, 0x42))) != std::string::npos);
 }
 
 TEST_CASE("donation conserves the full reward across the two outputs") {

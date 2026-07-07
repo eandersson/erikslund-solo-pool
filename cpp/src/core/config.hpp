@@ -72,6 +72,9 @@ struct Config {
     // On a ZMQ block, broadcast empty work before the slow getblocktemplate.
     bool fast_block_notify = true;
 
+    std::string work_source = "rpc";
+    std::string ipc_socket_path = "/tmp/btc-mining.sock";
+
     // Safety limits.
     int max_clients = 1024;
     // Max worker rows itemized in one address's stats file. Connections beyond this still mine and

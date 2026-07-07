@@ -95,8 +95,10 @@ Job::Job(std::string job_id, bitcoin::BlockTemplate block_template, ByteView tag
       network_target_(util::target_from_compact(block_template.bits)),
       prevhash_internal_(util::reversed(util::from_hex(block_template.previousblockhash))),
       prevhash_stratum_(prevhash_to_stratum(block_template.previousblockhash)),
-      witness_commitment_(std::move(block_template.witness_commitment)),
-      has_witness_(witness_commitment_.has_value()),
+      coinbase_sequence_(block_template.coinbase_sequence),
+      coinbase_lock_time_(block_template.coinbase_lock_time),
+      coinbase_witness_(std::move(block_template.coinbase_witness)),
+      coinbase_required_outputs_(std::move(block_template.coinbase_required_outputs)),
       tag_(tag.begin(), tag.end()),
       extranonce2_size_(extranonce2_size),
       txn_count_(block_template.txn_count),
@@ -106,12 +108,16 @@ Job::Job(std::string job_id, bitcoin::BlockTemplate block_template, ByteView tag
     donation_script_.assign(donation_script.begin(), donation_script.end());
     donation_percent_ = donation_percent;
 
-    merkle_branch_ = util::merkle_branch(block_template.txids_internal);
+    merkle_branch_ = std::move(block_template.merkle_branch_internal);
     merkle_branch_hex_.reserve(merkle_branch_.size());
     for (const auto& node : merkle_branch_)
         merkle_branch_hex_.push_back(util::to_hex(node));
 
-    coinbase1_ = bitcoin::build_coinbase1(height_, extranonce1_size + extranonce2_size, tag, coinbase_version);
+    if (block_template.coinbase_script_sig_prefix.empty())
+        throw std::invalid_argument("coinbase scriptSig prefix is empty");
+    coinbase1_ = bitcoin::build_coinbase1(
+        block_template.coinbase_script_sig_prefix, extranonce1_size + extranonce2_size, tag,
+        block_template.coinbase_version.value_or(coinbase_version));
     coinbase1_hex_ = util::to_hex(coinbase1_);
     version_hex_ = std::format("{:08x}", version_);
     ntime_hex_ = std::format("{:08x}", curtime_);
@@ -121,9 +127,16 @@ Job::Job(std::string job_id, bitcoin::BlockTemplate block_template, ByteView tag
     work_signature_ += '|' + nbits_hex_;
     work_signature_ += '|' + ntime_hex_;
     work_signature_ += '|' + coinbase1_hex_;
+    work_signature_ += '|' + util::to_hex(tag_);
     work_signature_ += '|' + std::to_string(coinbase_value_);
-    if (witness_commitment_)
-        work_signature_ += '|' + util::to_hex(*witness_commitment_);
+    work_signature_ += '|' + std::to_string(coinbase_sequence_);
+    work_signature_ += '|' + std::to_string(coinbase_lock_time_);
+    if (coinbase_witness_)
+        work_signature_ += '|' + util::to_hex(*coinbase_witness_);
+    for (const auto& output : coinbase_required_outputs_) {
+        work_signature_ += '|' + std::to_string(output.value);
+        work_signature_ += ':' + util::to_hex(output.script);
+    }
     for (const auto& branch : merkle_branch_hex_)
         work_signature_ += '|' + branch;
 }
@@ -139,7 +152,8 @@ Bytes Job::build_coinbase2(ByteView payout_script) const {
     } else {
         outputs.push_back({coinbase_value_, Bytes(payout_script.begin(), payout_script.end())});
     }
-    return bitcoin::build_coinbase2(outputs, witness_commitment_, tag_);
+    return bitcoin::build_coinbase2(outputs, coinbase_required_outputs_, tag_, coinbase_sequence_,
+                                    coinbase_lock_time_);
 }
 
 double Job::network_difficulty() const {
@@ -154,17 +168,17 @@ bool Job::mines_on(const std::string& tip_display_hex) const {
     }
 }
 
-std::array<uint8_t, 80> Job::build_header(const util::Hash256& merkle_root, uint32_t ntime,
-                                          uint32_t nonce, uint32_t version) const {
-    // version(4) || prevhash(32) || merkle_root(32) || ntime(4) || nbits(4) || nonce(4), all LE.
-    // Fixed-size stack write: this runs per submitted share, so no heap traffic.
-    std::array<uint8_t, 80> header;
-    util::write_le32(header.data(), version);
-    std::copy_n(prevhash_internal_.data(), 32, header.data() + 4);
-    std::copy_n(merkle_root.data(), 32, header.data() + 36);
-    util::write_le32(header.data() + 68, ntime);
-    util::write_le32(header.data() + 72, bits_);
-    util::write_le32(header.data() + 76, nonce);
+std::array<uint8_t, util::kHeaderSize> Job::build_header(const util::Hash256& merkle_root,
+                                                         uint32_t ntime, uint32_t nonce,
+                                                         uint32_t version) const {
+    // Layout pinned in util/block_header.hpp. Fixed-size stack write: per submitted share, no heap.
+    std::array<uint8_t, util::kHeaderSize> header;
+    util::write_le32(header.data() + util::kVersionOffset, version);
+    std::copy_n(prevhash_internal_.data(), 32, header.data() + util::kPrevhashOffset);
+    std::copy_n(merkle_root.data(), 32, header.data() + util::kMerkleOffset);
+    util::write_le32(header.data() + util::kTimeOffset, ntime);
+    util::write_le32(header.data() + util::kBitsOffset, bits_);
+    util::write_le32(header.data() + util::kNonceOffset, nonce);
     return header;
 }
 
@@ -215,7 +229,7 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
 
     const util::Hash256 coinbase_txid = util::sha256d(coinbase);
     const util::Hash256 root = util::merkle_root_from_branch(coinbase_txid, merkle_branch_);
-    const std::array<uint8_t, 80> header = build_header(root, ntime, nonce, version);
+    const std::array<uint8_t, util::kHeaderSize> header = build_header(root, ntime, nonce, version);
     const util::Hash256 block_hash = util::sha256d(header);
     const util::uint256 hash_value = util::uint256::from_le_bytes(block_hash);
 
@@ -235,9 +249,10 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
 }
 
 std::string Job::build_block_hex(ByteView legacy_coinbase, ByteView header) const {
-    const Bytes coinbase = has_witness_
-                               ? bitcoin::legacy_to_witness(legacy_coinbase)
-                               : Bytes(legacy_coinbase.begin(), legacy_coinbase.end());
+    const Bytes coinbase =
+        coinbase_witness_
+            ? bitcoin::legacy_to_witness(legacy_coinbase, *coinbase_witness_)
+            : Bytes(legacy_coinbase.begin(), legacy_coinbase.end());
     Bytes block;
     append(block, header);
     append(block, util::encode_varint(txn_count_ + 1));

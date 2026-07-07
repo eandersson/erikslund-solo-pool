@@ -15,10 +15,9 @@ void WorkerAccounting::touch(int64_t now_wall) {
 }
 
 void WorkerAccounting::note_accepted(double credited, double share_difficulty) {
-    // Read both clocks before locking: they are syscalls on the hottest per-worker path.
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
-    const double now_steady = steady_seconds();
     const std::scoped_lock lock(mutex_);
+    const double now_steady = steady_seconds();
     hashrate_.add(credited, now_steady);
     ++shares_accepted_;
     best_difficulty_ = std::max(best_difficulty_, share_difficulty);

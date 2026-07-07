@@ -5,8 +5,10 @@
 #include <vector>
 
 #include "stratum/message.hpp"
+#include "util/json_number.hpp"
 
 using namespace erikslund::stratum;
+using erikslund::util::format_json_number;
 using json = glz::generic;
 
 namespace {
@@ -117,6 +119,42 @@ TEST_CASE("response builders shape the JSON-RPC objects") {
     CHECK(note["id"].is_null());
     CHECK(note["method"].get<std::string>() == "mining.set_difficulty");
     CHECK(note["params"][0].get<double>() == doctest::Approx(1024.0));
+}
+
+TEST_CASE("set_difficulty line matches the Python pool (msgspec) byte-for-byte") {
+    // Golden strings are msgspec.json.encode(difficulty). The risk is the ".0" on integer/power-of-2
+    // difficulties, which glaze drops.
+    struct Golden {
+        double difficulty;
+        const char* number;
+    };
+    const Golden goldens[] = {
+        {0.001, "0.001"},           {0.01, "0.01"},
+        {0.1, "0.1"},               {0.5, "0.5"},
+        {1.0, "1.0"},               {2.0, "2.0"},
+        {8.0, "8.0"},               {16.0, "16.0"},
+        {512.0, "512.0"},           {1024.0, "1024.0"},
+        {2048.0, "2048.0"},         {4096.0, "4096.0"},
+        {16384.0, "16384.0"},       {65536.0, "65536.0"},
+        {100000.0, "100000.0"},     {1000000.0, "1000000.0"},
+        {33554432.0, "33554432.0"}, {1073741824.0, "1073741824.0"},
+        {2048.5, "2048.5"},         {12345.678, "12345.678"},
+        {0.00025, "0.00025"},       {1e9, "1000000000.0"},
+        {4.5e6, "4500000.0"},       {7.25, "7.25"},
+        {999999.0, "999999.0"},     {0.001953125, "0.001953125"},
+    };
+    for (const auto& g : goldens) {
+        CHECK(format_json_number(g.difficulty) == g.number);
+        CHECK(make_set_difficulty_line(g.difficulty) ==
+              std::string(R"({"id":null,"method":"mining.set_difficulty","params":[)") + g.number +
+                  "]}");
+    }
+    // Out-of-domain e-notation still tracks msgspec (lowercase 'e', no '+', no leading zeros).
+    CHECK(format_json_number(1e-7) == "1e-7");
+    CHECK(format_json_number(1.5e-8) == "1.5e-8");
+    CHECK(format_json_number(1e16) == "1e16");
+    CHECK(format_json_number(1e20) == "1e20");
+    CHECK(format_json_number(1.25e18) == "1.25e18");
 }
 
 TEST_CASE("parse_request preserves a string id") {

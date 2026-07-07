@@ -36,6 +36,8 @@ from erikslund_pool.stratum import ClientSession
 from erikslund_pool.util import dsha256
 from erikslund_pool.util import redact_url
 from erikslund_pool.work import Job
+from erikslund_pool.work_source import RpcWorkSource
+from erikslund_pool.work_source import SolvedBlock
 
 LOG = logging.getLogger(__name__)
 
@@ -83,6 +85,8 @@ class Pool:
             failover=[(e["url"], e.get("user", settings.rpc_user),
                        e.get("password", settings.rpc_password))
                       for e in settings.rpc_failover])
+        self.source = RpcWorkSource(lambda: self.rpc)
+        self._run_zmq = bool(settings.zmq_block_endpoint)
         self.clients: set[ClientSession] = set()
 
         self.current_job: Job | None = None
@@ -555,8 +559,8 @@ class Pool:
 
     async def _refresh_template(self, force: bool = False):
         try:
-            template = await asyncio.to_thread(self.rpc.getblocktemplate,
-                                               validate=self._validate_template)
+            template = await asyncio.to_thread(self.source.get_template,
+                                               self._validate_template)
         except RPCConnectionError as e:
             self.generator_ready = False  # every endpoint down: /health degrades, re-latches on next RPC
             LOG.error("getblocktemplate failed: %s", e)
@@ -604,7 +608,7 @@ class Pool:
                 # bitcoind answers once.
                 if not self.chain_info:
                     try:
-                        self.chain_info = await asyncio.to_thread(self.rpc.getblockchaininfo)
+                        self.chain_info = await asyncio.to_thread(self.source.get_chain_info)
                     except RPCError:
                         pass  # the probe/GBT below will log the outage
                 # A mainnet template is multi-MB; gate the heavy call on a ~100-byte tip probe,
@@ -617,7 +621,7 @@ class Pool:
                 fetch = force
                 if not fetch:
                     try:
-                        tip = await asyncio.to_thread(self.rpc.getbestblockhash)
+                        tip = await asyncio.to_thread(self.source.get_tip)
                     except RPCConnectionError as e:
                         self.generator_ready = False  # all endpoints down: /health degrades
                         LOG.error("getbestblockhash failed: %s", e)
@@ -669,13 +673,15 @@ class Pool:
         # One header fetch grounds the empty job in consensus: the true next height (else a
         # multi-block advance/reorg mints a wrong BIP34 height), confirmations == 1 proving this
         # hash is the active tip, the tip's nBits, and its median-time-past for the ntime floor.
-        header = await asyncio.to_thread(self.rpc.getblockheader, block_hash_hex)
+        header = await asyncio.to_thread(self.source.get_header, block_hash_hex)
         # Re-check the gates after the await: a concurrent _refresh_template may have broadcast a
         # full job for this tip (require_new_prevhash below also closes this with publication).
         if self._fastblock_pending or block_hash_hex == self._last_prevhash:
             return
         if header.get("confirmations") != 1:
             return  # stale notification (>= 2) or reorged away (-1): not the active tip
+        if not header.get("bits"):
+            return
         next_height = header["height"] + 1
         if next_height % 2016 == 0:
             return  # difficulty retarget: the new tip's nBits don't apply to the next block
@@ -702,7 +708,7 @@ class Pool:
 
     async def zmq_loop(self):
         """Optional instant new-tip notification when zmq_block_endpoint is configured."""
-        if not self.config.zmq_block_endpoint:
+        if not self._run_zmq:
             return
         context = zmq.asyncio.Context.instance()
         socket = context.socket(zmq.SUB)
@@ -767,7 +773,7 @@ class Pool:
                 continue
             LOG.warning("Resubmitting block %s spooled by a previous run", name)
             try:
-                reason = self.rpc.submitblock(block_hex)
+                reason = self.source.submit_block_hex(block_hex)
             except RPCError as e:
                 LOG.error("Could not resubmit spooled block %s (bitcoind unreachable: %s); "
                           "leaving it on disk for the next restart", name, e)
@@ -791,9 +797,11 @@ class Pool:
         worker = session.worker or ""
         block_hex = job.build_block_hex(result.legacy_coinbase, result.header)
         self._spool_block(job.height, result.block_hash_hex, block_hex, address, worker)
+        solved = SolvedBlock(job.height, result.block_hash_hex, result.header,
+                             result.legacy_coinbase, lambda: block_hex)
         try:
             reason = await asyncio.get_running_loop().run_in_executor(
-                self._submit_executor, self.rpc.submitblock, block_hex)
+                self._submit_executor, self.source.submit_block, solved)
         except RPCError as e:
             LOG.error("submitblock failed: %s", e)
             return
@@ -855,7 +863,7 @@ class Pool:
                 # up to the RPC timeout is harmless (work/submit keep the current endpoint).
                 expected_tip = self._last_prevhash
                 if expected_tip:
-                    await asyncio.to_thread(self.rpc.maybe_failback, expected_tip)
+                    await asyncio.to_thread(self.source.maybe_failback, expected_tip)
             except Exception:
                 LOG.exception("status loop failed")
                 await asyncio.sleep(self.config.status_interval_seconds)
@@ -957,7 +965,7 @@ class Pool:
         self._primary_loop = asyncio.get_running_loop()
         self._register_loop(self._primary_loop)
         try:
-            self.chain_info = await asyncio.to_thread(self.rpc.getblockchaininfo)
+            self.chain_info = await asyncio.to_thread(self.source.get_chain_info)
             self.generator_ready = True
             LOG.info("Connected to bitcoind: chain=%s blocks=%s",
                      self.chain_info.get("chain"), self.chain_info.get("blocks"))
@@ -1098,7 +1106,7 @@ class Pool:
     def generator_stats(self) -> dict:
         now = time.monotonic()
         job = self.current_job
-        active = self.rpc.active_index
+        active = self.source.active_index()
         return {
             "bitcoind_reachable": self.generator_ready,
             "chain": self.chain_info.get("chain"),
@@ -1107,7 +1115,7 @@ class Pool:
             "rpc_url": redact_url(self.config.rpc_url),
             "bitcoind_nodes": [
                 {"address": redact_url(url), "active": i == active}
-                for i, url in enumerate(self.rpc.endpoint_urls())
+                for i, url in enumerate(self.source.endpoint_urls())
             ],
         }
 

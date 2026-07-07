@@ -4,6 +4,7 @@
 
 #include "api/http_server.hpp"
 #include "bitcoin/rpc_client.hpp"
+#include "bitcoin/work_source_rpc.hpp"
 #include "core/config.hpp"
 #include "pool/pool.hpp"
 
@@ -34,7 +35,8 @@ TEST_CASE("routing covers the endpoints + methods") {
     // A Pool with an unconnected RPC client; route() only reads snapshot(), no I/O.
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     CHECK(route("POST", "/metrics", pool).status == 405);
     CHECK(route("GET", "/does-not-exist", pool).status == 404);
@@ -84,7 +86,8 @@ TEST_CASE("parse_request_line edge cases") {
 TEST_CASE("every read-only JSON endpoint returns 200 application/json") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     for (const char* path : {"/metrics.json", "/status", "/stats/pool", "/stats/stratifier",
                              "/stats/connector", "/stats/generator"}) {
@@ -97,7 +100,8 @@ TEST_CASE("every read-only JSON endpoint returns 200 application/json") {
 TEST_CASE("the root path serves HTML, /metrics serves prometheus text") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
 
     const auto root = route("GET", "/", pool);
     CHECK(contains(root.content_type, "text/html"));
@@ -110,7 +114,8 @@ TEST_CASE("the root path serves HTML, /metrics serves prometheus text") {
 TEST_CASE("an over-long client address is rejected as a bad request") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     // 128 valid characters exceeds the 127-byte cap.
     const std::string long_address = "/stats/client/" + std::string(128, 'a');
     CHECK(route("GET", long_address, pool).status == 400);
@@ -121,7 +126,8 @@ TEST_CASE("an over-long client address is rejected as a bad request") {
 TEST_CASE("HEAD is allowed on JSON endpoints and 405 on a write method") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    Pool pool(config, rpc);
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
     CHECK(route("HEAD", "/status", pool).status == 200);
     CHECK(route("HEAD", "/", pool).status == 200);
     CHECK(route("PUT", "/status", pool).status == 405);
