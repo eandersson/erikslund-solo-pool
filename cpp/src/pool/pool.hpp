@@ -7,6 +7,7 @@
 // work thread copies the client list under mutex_ then notifies lock-free, never holding two locks.
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -108,6 +109,7 @@ private:
         std::string hex;
         std::string address; // payout address (block attribution)
         std::string worker;  // full username, pre-sanitized for logging
+        std::chrono::steady_clock::time_point retry_after{};
     };
 
     // Both take the template BY VALUE and move it into the Job, which steals the multi-MB tx blob.
@@ -199,7 +201,7 @@ private:
     std::condition_variable_any wakeup_cv_;
     bool new_block_flag_ = false;
 
-    void submit_block(const PendingBlock& block);
+    [[nodiscard]] bool submit_block(const PendingBlock& block);
     void submit_loop(const std::stop_token& stop);
     std::mutex submit_mutex_;
     std::condition_variable_any submit_cv_;

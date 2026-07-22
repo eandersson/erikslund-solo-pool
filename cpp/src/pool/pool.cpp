@@ -41,6 +41,7 @@ namespace {
 // depth must cover a mean block interval or a still-valid same-tip share false-rejects as stale.
 // 24 x 30s = 12 min. Each job retains its tx data (up to ~4MB mainnet), so ~96MB worst-case.
 constexpr size_t kMaxRecentJobs = 24;
+constexpr std::chrono::seconds kInconclusiveRetryDelay{5};
 
 // How long a disconnected, never-mined registry row (authorize-only) lingers before prune evicts
 // it -- applied REGARDLESS of user_stats_retention_days so authorize-churn can't pin the registry
@@ -65,12 +66,14 @@ std::string worker_key(const std::string& address, const std::string& worker) {
     return key;
 }
 
-enum class SubmitOutcome { Accepted, AlreadyKnown, Rejected };
+enum class SubmitOutcome { Accepted, AlreadyKnown, Inconclusive, Rejected };
 SubmitOutcome classify_submit(const std::optional<std::string>& rejection) {
-    if (!rejection || *rejection == "inconclusive")
+    if (!rejection)
         return SubmitOutcome::Accepted;
     if (*rejection == "duplicate" || *rejection == "duplicate-inconclusive")
         return SubmitOutcome::AlreadyKnown;
+    if (*rejection == "inconclusive")
+        return SubmitOutcome::Inconclusive;
     return SubmitOutcome::Rejected;
 }
 } // namespace
@@ -798,9 +801,13 @@ void Pool::resubmit_spooled_blocks() {
         log::warning("Resubmitting block {} spooled by a previous run", name);
         try {
             const auto rejection = rpc_.submitblock(block_hex);
-            if (classify_submit(rejection) != SubmitOutcome::Rejected) {
+            const SubmitOutcome outcome = classify_submit(rejection);
+            if (outcome == SubmitOutcome::Accepted || outcome == SubmitOutcome::AlreadyKnown) {
                 log::info("Spooled block {} accepted/already known; archiving", name);
                 std::filesystem::rename(path, path.string() + ".submitted", ec);
+            } else if (outcome == SubmitOutcome::Inconclusive) {
+                log::warning("Spooled block {} submission was inconclusive; leaving it for retry",
+                             name);
             } else {
                 log::warning("Spooled block {} rejected by bitcoind ({}); archiving", name,
                              rejection.value_or("unknown"));
@@ -968,7 +975,7 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
     submit_cv_.notify_one();
 }
 
-void Pool::submit_block(const PendingBlock& block) {
+bool Pool::submit_block(const PendingBlock& block) {
     try {
         const auto rejection = rpc_.submitblock(block.hex);
         switch (classify_submit(rejection)) {
@@ -981,36 +988,67 @@ void Pool::submit_block(const PendingBlock& block) {
             }
             log::info("BLOCK ACCEPTED height={} hash={} address={} worker={}", block.height,
                         block.hash, block.address, block.worker);
-            break;
+            return false;
         case SubmitOutcome::AlreadyKnown:
             // Already in a chain (self-fastblock + GBT double-submit, or a retry) -- a win, not a
             // rejection; don't log an error or re-count it.
             log::info("Block {} already known (submitblock: {})", block.hash,
                       rejection.value_or("duplicate"));
-            break;
+            return false;
+        case SubmitOutcome::Inconclusive:
+            log::warning("Block {} submission was inconclusive; retrying in {} seconds", block.hash,
+                         kInconclusiveRetryDelay.count());
+            return true;
         case SubmitOutcome::Rejected:
             log::error("Block {} REJECTED by bitcoind: {}", block.hash,
                        rejection.value_or("unknown"));
-            break;
+            return false;
         }
     } catch (const std::exception& e) {
-        log::error("submitblock failed: {}", e.what());
+        log::error("submitblock failed: {} -- will retry in {} seconds", e.what(),
+                   kInconclusiveRetryDelay.count());
     }
+    return true;
 }
 
 void Pool::submit_loop(const std::stop_token& stop) {
     std::unique_lock<std::mutex> lock(submit_mutex_);
     while (true) {
         submit_cv_.wait(lock, stop, [this] { return !submit_queue_.empty(); });
-        while (!submit_queue_.empty()) {
-            const PendingBlock block = std::move(submit_queue_.front());
-            submit_queue_.pop_front();
-            lock.unlock();
-            submit_block(block); // RPC off the lock
-            lock.lock();
-        }
         if (stop.stop_requested())
-            return; // drained; any still-queued block remains spooled to disk
+            return; // every candidate is already durable in the spool
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto ready = std::find_if(submit_queue_.begin(), submit_queue_.end(),
+                                        [now](const PendingBlock& block) {
+                                            return block.retry_after <= now;
+                                        });
+        if (ready == submit_queue_.end()) {
+            const auto next_retry = std::min_element(
+                                        submit_queue_.begin(), submit_queue_.end(),
+                                        [](const PendingBlock& left, const PendingBlock& right) {
+                                            return left.retry_after < right.retry_after;
+                                        })
+                                        ->retry_after;
+            submit_cv_.wait_until(lock, stop, next_retry, [this] {
+                const auto current = std::chrono::steady_clock::now();
+                return std::any_of(submit_queue_.begin(), submit_queue_.end(),
+                                   [current](const PendingBlock& block) {
+                                       return block.retry_after <= current;
+                                   });
+            });
+            continue;
+        }
+
+        PendingBlock block = std::move(*ready);
+        submit_queue_.erase(ready);
+        lock.unlock();
+        const bool retry = submit_block(block); // RPC off the lock
+        lock.lock();
+        if (retry) {
+            block.retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
+            submit_queue_.push_back(std::move(block));
+        }
     }
 }
 

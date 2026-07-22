@@ -20,6 +20,31 @@ namespace {
 bool is_lower_hex(const std::string& s) {
     return !s.empty() && s.find_first_not_of("0123456789abcdef") == std::string::npos;
 }
+
+class InconclusiveRpc final : public bitcoin::RpcClient {
+public:
+    InconclusiveRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        if (http_status)
+            *http_status = 200;
+        return R"({"result":"inconclusive","error":null,"id":1})";
+    }
+};
+
+// submitblock returns null (accepted) -- stands in for the node once it can validate the block.
+class AcceptingRpc final : public bitcoin::RpcClient {
+public:
+    AcceptingRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        if (http_status)
+            *http_status = 200;
+        return R"({"result":null,"error":null,"id":1})";
+    }
+};
 } // namespace
 
 TEST_CASE("validate_address resolves locally, without any bitcoind RPC") {
@@ -98,6 +123,59 @@ TEST_CASE("resubmit_spooled_blocks leaves the block on disk when bitcoind is unr
     CHECK(fs::exists(block));
     CHECK_FALSE(fs::exists(block.string() + ".submitted"));
     CHECK_FALSE(fs::exists(block.string() + ".rejected"));
+
+    fs::remove_all(stats);
+}
+
+TEST_CASE("resubmit_spooled_blocks leaves an inconclusive submission available for retry") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_inconclusive_test";
+    fs::remove_all(stats);
+    fs::create_directories(stats / "blocks");
+    const fs::path block = stats / "blocks" / "500_abc.hex";
+    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
+
+    Config config;
+    config.stats_directory = stats.string();
+    InconclusiveRpc rpc;
+    Pool pool(config, rpc);
+    pool.resubmit_spooled_blocks();
+
+    CHECK(fs::exists(block));
+    CHECK_FALSE(fs::exists(block.string() + ".submitted"));
+    CHECK_FALSE(fs::exists(block.string() + ".rejected"));
+
+    fs::remove_all(stats);
+}
+
+TEST_CASE("an inconclusive spooled block is submitted (archived) on a later restart") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_inconclusive_retry_test";
+    fs::remove_all(stats);
+    fs::create_directories(stats / "blocks");
+    const fs::path block = stats / "blocks" / "500_abc.hex";
+    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
+
+    Config config;
+    config.stats_directory = stats.string();
+
+    // Boot 1: bitcoind cannot yet validate the block ("inconclusive") -> it stays on disk for retry.
+    {
+        InconclusiveRpc rpc;
+        Pool pool(config, rpc);
+        pool.resubmit_spooled_blocks();
+    }
+    REQUIRE(fs::exists(block));
+    REQUIRE_FALSE(fs::exists(block.string() + ".submitted"));
+
+    // Boot 2: bitcoind now confirms -> the same spooled block is submitted and archived.
+    {
+        AcceptingRpc rpc;
+        Pool pool(config, rpc);
+        pool.resubmit_spooled_blocks();
+    }
+    CHECK_FALSE(fs::exists(block));
+    CHECK(fs::exists(block.string() + ".submitted"));
 
     fs::remove_all(stats);
 }
