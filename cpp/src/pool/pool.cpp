@@ -156,9 +156,12 @@ std::string Pool::next_job_id() {
 
 Bytes Pool::next_extranonce1() {
     const uint64_t value = ++extranonce1_counter_;
-    Bytes extranonce1(config_.extranonce1_size, 0);
-    for (size_t i = 0; i < extranonce1.size(); ++i)
-        extranonce1[extranonce1.size() - 1 - i] = uint8_t(value >> (8 * i));
+    const size_t counter_size = config_.extranonce1_size - config_.extranonce1_prefix.size();
+    Bytes extranonce1 = config_.extranonce1_prefix;
+    extranonce1.resize(config_.extranonce1_size, 0);
+    for (size_t index = 0; index < counter_size; ++index)
+        extranonce1[extranonce1.size() - 1 - index] =
+            static_cast<uint8_t>(value >> (8 * index));
     return extranonce1;
 }
 

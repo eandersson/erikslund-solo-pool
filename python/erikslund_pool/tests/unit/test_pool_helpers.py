@@ -144,6 +144,13 @@ class TestAssignExtranonce1(unittest.TestCase):
         self.assertEqual(pool.assign_extranonce1().hex(), "00000000")  # wrapped
         self.assertEqual(pool.assign_extranonce1().hex(), "00000001")
 
+    def test_prefixes_partition_independent_replica_counters(self):
+        first = Pool(Settings(extranonce1_size=6, extranonce1_prefix=b"\x00\x01"))
+        second = Pool(Settings(extranonce1_size=6, extranonce1_prefix=b"\x00\x02"))
+        self.assertEqual(first.assign_extranonce1().hex(), "000100000001")
+        self.assertEqual(second.assign_extranonce1().hex(), "000200000001")
+        self.assertEqual(first.assign_extranonce1().hex(), "000100000002")
+
 
 class TestRecentJobs(unittest.TestCase):
     TEMPLATE = {

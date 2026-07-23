@@ -20,7 +20,7 @@ _SCHEMA_KEYS = frozenset({
     "coinbase_signature", "coinbase_version",
     "initial_difficulty", "minimum_difficulty", "maximum_difficulty",
     "variable_difficulty", "vardiff_target_shares_per_minute", "vardiff_retarget_seconds",
-    "extranonce1_size", "extranonce2_size",
+    "extranonce1_size", "extranonce1_prefix", "extranonce2_size",
     "zmq_block_endpoint", "fast_block_notify",
     "block_poll_milliseconds", "work_rebroadcast_seconds",
     "version_rolling_mask", "donation_percent", "donation_address",
@@ -79,6 +79,7 @@ class Settings:
     version_rolling_mask: int = 0x1FFFE000  # BIP320 bits a client may roll (negotiation cap)
 
     extranonce1_size: int = 4
+    extranonce1_prefix: bytes = b""
     extranonce2_size: int = 8
 
     coinbase_signature: str = "/erikslund-pool/"
@@ -155,6 +156,10 @@ class Settings:
         # churn and hand two concurrent miners identical search space.
         if not 4 <= self.extranonce1_size <= 8:
             raise ConfigError("extranonce1_size must be in [4, 8]")
+        if not isinstance(self.extranonce1_prefix, bytes):
+            raise ConfigError("extranonce1_prefix must be decoded bytes")
+        if len(self.extranonce1_prefix) > self.extranonce1_size - 4:
+            raise ConfigError("extranonce1_prefix must leave at least 4 counter bytes")
         if not 2 <= self.extranonce2_size <= 8:
             raise ConfigError("extranonce2_size must be in [2, 8]")
         # coinbase_signature must leave room in the 100-byte scriptSig for the height push (worst
@@ -228,6 +233,13 @@ class Settings:
         if "version_rolling_mask" in data:
             mask = data["version_rolling_mask"]
             fields["version_rolling_mask"] = int(mask, 16) if isinstance(mask, str) else mask
+
+        if "extranonce1_prefix" in data:
+            prefix_hex = data["extranonce1_prefix"]
+            if (not isinstance(prefix_hex, str) or len(prefix_hex) % 2 != 0 or
+                    any(character not in "0123456789abcdefABCDEF" for character in prefix_hex)):
+                raise ConfigError("extranonce1_prefix must be an even-length hex string")
+            fields["extranonce1_prefix"] = bytes.fromhex(prefix_hex)
 
         proxy_from = data.get("proxy_protocol_from")
         if proxy_from is not None:  # accept a single string or a list

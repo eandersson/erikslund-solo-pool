@@ -155,10 +155,13 @@ class Pool:
 
     def assign_extranonce1(self) -> bytes:
         size = self.config.extranonce1_size
+        prefix = self.config.extranonce1_prefix
+        counter_size = size - len(prefix)
         with self._extranonce1_lock:
-            self._extranonce1_counter = (self._extranonce1_counter + 1) % (1 << (8 * size))
+            self._extranonce1_counter = (
+                self._extranonce1_counter + 1) % (1 << (8 * counter_size))
             value = self._extranonce1_counter
-        return value.to_bytes(size, "big")
+        return prefix + value.to_bytes(counter_size, "big")
 
     def register(self, session: ClientSession):
         with self._clients_lock:

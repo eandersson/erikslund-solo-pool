@@ -270,3 +270,14 @@ class TestConfigValidation(SoloPoolTestCase):
         ):
             with self.subTest(cfg=cfg):
                 Settings.from_dict(cfg)  # must not raise
+
+    def test_extranonce1_prefix_is_decoded_and_requires_four_counter_bytes(self):
+        config = Settings.from_dict({"extranonce1_size": 6, "extranonce1_prefix": "A0b1"})
+        self.assertEqual(config.extranonce1_prefix, b"\xa0\xb1")
+        for cfg in (
+            {"extranonce1_prefix": "0"},
+            {"extranonce1_prefix": "00gg"},
+            {"extranonce1_size": 4, "extranonce1_prefix": "00"},
+        ):
+            with self.subTest(cfg=cfg), self.assertRaises(ConfigError):
+                Settings.from_dict(cfg)

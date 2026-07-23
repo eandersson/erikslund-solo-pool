@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "bitcoin/rpc_endpoint.hpp"
+#include "util/bytes.hpp"
 
 namespace erikslund {
 
@@ -45,6 +46,7 @@ struct Config {
     // Extranonce sizes (bytes).
     size_t extranonce1_size = 4;
     size_t extranonce2_size = 8;
+    Bytes extranonce1_prefix;
 
     // Coinbase.
     std::string coinbase_signature = "/erikslund-pool/";

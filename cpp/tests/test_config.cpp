@@ -7,6 +7,7 @@
 
 #include "core/config.hpp"
 #include "core/errors.hpp"
+#include "util/hex.hpp"
 
 using namespace erikslund;
 
@@ -248,6 +249,13 @@ TEST_CASE("version_rolling_mask accepts both a hex string and a JSON integer") {
     // JSON integer -> taken as-is (within the BIP320 range, no clamp). 0x2000 = 8192.
     CHECK(Config::from_string(R"({"version_rolling_mask": 8192})").version_rolling_mask ==
           0x00002000u);
+}
+
+TEST_CASE("extranonce1 prefix decodes from config and leaves a four-byte counter") {
+    const Config config = Config::from_string(
+        R"({"extranonce1_size": 6, "extranonce1_prefix": "A0b1"})");
+    CHECK(util::to_hex(config.extranonce1_prefix) == "a0b1");
+    CHECK(config.extranonce1_size - config.extranonce1_prefix.size() == 4);
 }
 
 TEST_CASE("version_rolling_mask is clamped to the BIP320 range") {

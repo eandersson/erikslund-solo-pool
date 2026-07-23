@@ -103,6 +103,11 @@
       "maximum": 8,
       "description": "extranonce1 byte length. Default 4. Min 4: a smaller assignment space could wrap and hand two live miners identical work."
     },
+    "extranonce1_prefix": {
+      "type": "string",
+      "pattern": "^(?:[0-9A-Fa-f]{2})*$",
+      "description": "Optional fixed hexadecimal extranonce1 prefix for a pool replica. It partitions concurrent replicas' work domains; it must leave at least four counter bytes in extranonce1. For example, two HA replicas can use extranonce1_size: 6 with prefixes 0001 and 0002."
+    },
     "extranonce2_size": {
       "type": "integer",
       "minimum": 2,

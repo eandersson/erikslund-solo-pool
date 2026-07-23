@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "api/snapshot.hpp"
@@ -44,6 +46,12 @@ protected:
             *http_status = 200;
         return R"({"result":null,"error":null,"id":1})";
     }
+};
+
+class TestConnection final : public stratum::Connection {
+public:
+    void send_line(std::string_view) override {}
+    std::string peer() const override { return "test"; }
 };
 } // namespace
 
@@ -102,6 +110,25 @@ TEST_CASE("next_job_id: independent pools advance independent counters") {
     CHECK(id2.size() == 16);
     CHECK(id1.substr(8) == "00000001"); // independent counters, both from 1
     CHECK(id2.substr(8) == "00000001");
+}
+
+TEST_CASE("replica extranonce1 prefixes partition otherwise identical session counters") {
+    Config first_config;
+    first_config.extranonce1_size = 6;
+    first_config.extranonce1_prefix = {0x00, 0x01};
+    Config second_config = first_config;
+    second_config.extranonce1_prefix = {0x00, 0x02};
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    Pool first(first_config, rpc);
+    Pool second(second_config, rpc);
+
+    const auto first_session = first.add_client(std::make_shared<TestConnection>());
+    const auto second_session = second.add_client(std::make_shared<TestConnection>());
+    const auto next_first_session = first.add_client(std::make_shared<TestConnection>());
+
+    CHECK(first_session->extranonce1_hex() == "000100000001");
+    CHECK(second_session->extranonce1_hex() == "000200000001");
+    CHECK(next_first_session->extranonce1_hex() == "000100000002");
 }
 
 TEST_CASE("resubmit_spooled_blocks leaves the block on disk when bitcoind is unreachable") {

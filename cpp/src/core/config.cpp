@@ -18,6 +18,7 @@
 #include "bitcoin/coinbase.hpp"
 #include "core/errors.hpp"
 #include "core/logging.hpp"
+#include "util/hex.hpp"
 
 namespace erikslund {
 
@@ -69,6 +70,8 @@ void finalize_and_validate(Config& config) {
     // hand two concurrent miners identical search space. 4 bytes cannot lap.
     if (config.extranonce1_size < 4 || config.extranonce1_size > 8)
         throw ConfigError("extranonce1_size must be in [4, 8]");
+    if (config.extranonce1_prefix.size() > config.extranonce1_size - 4)
+        throw ConfigError("extranonce1_prefix must leave at least 4 counter bytes");
     if (config.extranonce2_size < 2 || config.extranonce2_size > 8)
         throw ConfigError("extranonce2_size must be in [2, 8]");
     if (config.status_interval_seconds < 0.0)
@@ -119,6 +122,7 @@ struct ConfigFile {
     std::optional<int> vardiff_retarget_seconds;
     std::optional<std::size_t> extranonce1_size;
     std::optional<std::size_t> extranonce2_size;
+    std::optional<std::string> extranonce1_prefix;
     std::optional<std::string> zmq_block_endpoint;
     std::optional<bool> fast_block_notify;
     std::optional<double> block_poll_milliseconds;
@@ -220,6 +224,13 @@ Config config_from(const ConfigFile& file) {
     apply(config.status_interval_seconds, file.status_interval_seconds);
     apply(config.user_stats_retention_days, file.user_stats_retention_days);
     apply(config.worker_threads, file.worker_threads);
+
+    if (file.extranonce1_prefix) {
+        const std::string& prefix = *file.extranonce1_prefix;
+        if (!prefix.empty() && !util::is_hex(prefix))
+            throw ConfigError("extranonce1_prefix must be an even-length hex string");
+        config.extranonce1_prefix = util::from_hex(prefix);
+    }
 
     if (file.block_poll_milliseconds)
         config.poll_interval = *file.block_poll_milliseconds / 1000.0;

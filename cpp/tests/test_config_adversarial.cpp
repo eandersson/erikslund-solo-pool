@@ -189,6 +189,11 @@ TEST_CASE("out-of-range numeric values are a ConfigError (schema bounds enforced
     CHECK_THROWS_AS(Config::from_string(R"({"extranonce1_size": 2})"), ConfigError);
     CHECK_THROWS_AS(Config::from_string(R"({"extranonce1_size": 3})"), ConfigError);
     CHECK_THROWS_AS(Config::from_string(R"({"extranonce1_size": 9})"), ConfigError);
+    CHECK_THROWS_AS(Config::from_string(R"({"extranonce1_prefix": "0"})"), ConfigError);
+    CHECK_THROWS_AS(Config::from_string(R"({"extranonce1_prefix": "00gg"})"), ConfigError);
+    CHECK_THROWS_AS(
+        Config::from_string(R"({"extranonce1_size": 4, "extranonce1_prefix": "00"})"),
+        ConfigError);
     CHECK_THROWS_AS(Config::from_string(R"({"extranonce2_size": 0})"), ConfigError);
     CHECK_THROWS_AS(Config::from_string(R"({"extranonce2_size": 9})"), ConfigError);
     CHECK_THROWS_AS(Config::from_string(R"({"max_clients": -1})"), ConfigError);
@@ -201,6 +206,8 @@ TEST_CASE("out-of-range numeric values are a ConfigError (schema bounds enforced
 TEST_CASE("schema-boundary numeric values are accepted") {
     CHECK_NOTHROW(Config::from_string(R"({"extranonce1_size": 4})"));
     CHECK_NOTHROW(Config::from_string(R"({"extranonce1_size": 8})"));
+    CHECK_NOTHROW(
+        Config::from_string(R"({"extranonce1_size": 6, "extranonce1_prefix": "0001"})"));
     CHECK_NOTHROW(Config::from_string(R"({"extranonce2_size": 8})"));
     CHECK_NOTHROW(Config::from_string(R"({"vardiff_retarget_seconds": 1})"));
     CHECK_NOTHROW(Config::from_string(R"({"work_rebroadcast_seconds": 1})"));
