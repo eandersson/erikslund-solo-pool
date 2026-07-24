@@ -120,7 +120,7 @@ class Settings:
     proxy_protocol_from: list = dataclasses.field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Settings":
+    def from_dict(cls, data: dict) -> Settings:
         """Parse a pool config object (conf/pool.schema.json) into Settings."""
         if not isinstance(data, dict):
             raise ConfigError("config must be a mapping")
@@ -195,7 +195,7 @@ class Settings:
             self.version_rolling_mask &= 0x1FFFE000
 
     @classmethod
-    def _parse(cls, data: dict) -> "Settings":
+    def _parse(cls, data: dict) -> Settings:
         fields: dict = {}
         nodes = data.get("bitcoin_nodes")
         if nodes:  # nodes[0] is the primary bitcoind; the rest are failover, in order.
@@ -264,7 +264,7 @@ class Settings:
         return cls(**fields)
 
     @classmethod
-    def load(cls, path: str) -> "Settings":
+    def load(cls, path: str) -> Settings:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
@@ -272,7 +272,7 @@ class Settings:
             raise ConfigError(f"cannot load config {path!r}: {e}") from e
         return cls.from_dict(data)
 
-    def apply(self, other: "Settings") -> None:
+    def apply(self, other: Settings) -> None:
         """Copy every field from `other` into this instance in place."""
         for field in dataclasses.fields(self):
             setattr(self, field.name, getattr(other, field.name))

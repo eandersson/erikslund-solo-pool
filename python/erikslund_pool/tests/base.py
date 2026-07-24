@@ -46,7 +46,7 @@ class _Helpers:
             "mintime": now - 600,
             "bits": bits,
             "coinbasevalue": coinbasevalue,
-            "previousblockhash": "%064x" % 0x00000000000000000007A1B2C3D4E5F6,
+            "previousblockhash": f"{0x00000000000000000007A1B2C3D4E5F6:064x}",
             "transactions": [make_txn(i) for i in range(txns)],
         }
         if with_commitment:

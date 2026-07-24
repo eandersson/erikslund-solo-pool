@@ -10,8 +10,8 @@ import logging
 import math
 import os
 import time
+from datetime import UTC
 from datetime import datetime
-from datetime import timezone
 
 import yaml
 
@@ -67,11 +67,11 @@ def suffix_string(value: float, significant_digits: int = 0) -> str:
 
     if not significant_digits:
         if decimal:
-            return "%.3g%s" % (display_value, suffix)
-        return "%d%s" % (int(display_value), suffix)
+            return f"{display_value:.3g}{suffix}"
+        return f"{int(display_value):d}{suffix}"
     decimal_digits = significant_digits - 1 - (
         math.floor(math.log10(display_value)) if display_value > 0.0 else 0)
-    return "%*.*f%s" % (significant_digits + 1, decimal_digits, display_value, suffix)
+    return f"{display_value:{significant_digits + 1}.{decimal_digits}f}{suffix}"
 
 
 def parse_suffix(text) -> float:
@@ -92,7 +92,7 @@ def _format_rfc9557(epoch: float) -> str:
     """Render an epoch as an RFC 9557 UTC timestamp ("2026-06-04T11:31:24Z[UTC]"); "" for epoch <= 0."""
     if not epoch or epoch <= 0:
         return ""
-    return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z[UTC]"
+    return datetime.fromtimestamp(int(epoch), tz=UTC).strftime("%Y-%m-%dT%H:%M:%S") + "Z[UTC]"
 
 
 def _parse_rfc9557(value) -> int:
@@ -105,7 +105,7 @@ def _parse_rfc9557(value) -> int:
     except ValueError:
         return 0
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return int(parsed.timestamp())
 
 
@@ -127,8 +127,7 @@ def build_pool_status(pool) -> dict:
     with pool._stats_lock:
         best_share = pool.best_diff
         for client in clients:
-            if client.best_diff > best_share:
-                best_share = client.best_diff
+            best_share = max(best_share, client.best_diff)
         pool.best_diff = best_share
         blocks_found = pool.blocks_found
         last_block_found = pool.last_block_found

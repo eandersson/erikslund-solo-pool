@@ -30,18 +30,15 @@ def redact_url(url: str) -> str:
 
     Done by hand (not urlsplit) to cover a scheme-less ``user:pass@host:port`` and a password
     containing ``@`` (cut at the last ``@`` of the authority)."""
-    try:
-        scheme, sep, rest = url.partition("://")
-        if not sep:
-            scheme, rest = "", url
-        # Authority ends at the first '/', '?', or '#', so an '@' in a query/fragment is left intact.
-        cut = next((i for i, ch in enumerate(rest) if ch in "/?#"), len(rest))
-        authority, remainder = rest[:cut], rest[cut:]
-        if "@" in authority:
-            authority = authority.rsplit("@", 1)[1]
-        return (f"{scheme}://" if sep else "") + authority + remainder
-    except Exception:
-        return url
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        scheme, rest = "", url
+    # Authority ends at the first '/', '?', or '#', so an '@' in a query/fragment is left intact.
+    cut = next((i for i, ch in enumerate(rest) if ch in "/?#"), len(rest))
+    authority, remainder = rest[:cut], rest[cut:]
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[1]
+    return (f"{scheme}://" if sep else "") + authority + remainder
 
 
 def dsha256(data: bytes) -> bytes:

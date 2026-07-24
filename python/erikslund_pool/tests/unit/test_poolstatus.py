@@ -272,7 +272,8 @@ class TestRoundTrip(unittest.TestCase):
             poolstatus.write_pool_status(pool, temp_dir)
             path = os.path.join(temp_dir, "pool", "pool.status")
             self.assertTrue(os.path.exists(path))
-            self.assertTrue(open(path, encoding="ascii").read().endswith("\n"))
+            with open(path, encoding="ascii") as status_file:
+                self.assertTrue(status_file.read().endswith("\n"))
 
             result = poolstatus.read_pool_status(temp_dir)
             self.assertEqual(result["accepted"], 1200.0)

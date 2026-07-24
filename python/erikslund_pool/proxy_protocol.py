@@ -118,7 +118,7 @@ async def read_proxy_header(reader: asyncio.StreamReader, timeout: float = 2.0) 
     LOCAL yields DIRECT; the byte consumed to detect "no header" is returned in .prebuffer."""
     try:
         first = await asyncio.wait_for(reader.readexactly(1), timeout)
-    except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
+    except (TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
         return ProxyResult(ProxyKind.DIRECT)  # no data soon / peer gone -> direct (bare TCP check)
 
     if first == b"\x0d":  # v2: 16-byte fixed prefix, then addr_len more bytes
@@ -126,7 +126,7 @@ async def read_proxy_header(reader: asyncio.StreamReader, timeout: float = 2.0) 
             head = first + await asyncio.wait_for(reader.readexactly(15), timeout)
             addr_len = (head[14] << 8) | head[15]
             body = await asyncio.wait_for(reader.readexactly(addr_len), timeout) if addr_len else b""
-        except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
+        except (TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
             return ProxyResult(ProxyKind.MALFORMED, detail=first.hex())
         if head[:12] != _V2_SIG or (head[12] >> 4) != 0x2:
             return ProxyResult(ProxyKind.MALFORMED, detail=head.hex())
@@ -140,7 +140,7 @@ async def read_proxy_header(reader: asyncio.StreamReader, timeout: float = 2.0) 
     if first == b"P":  # v1: text line ending in CRLF
         try:
             rest = await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout)
-        except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError,
+        except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError,
                 ConnectionError, OSError):
             return ProxyResult(ProxyKind.MALFORMED, detail=first.hex())
         if len(rest) + 1 > _V1_MAX_LINE:

@@ -159,9 +159,8 @@ class TestLoadAdversarial(SoloPoolTestCase):
             Settings.load("/nonexistent/does/not/exist.yaml")
 
     def test_directory_instead_of_file(self):
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(ConfigError):
-                Settings.load(d)
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(ConfigError):
+            Settings.load(d)
 
     def test_empty_file_is_none_mapping(self):
         # An empty YAML doc parses to None -> "config must be a mapping".

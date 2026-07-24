@@ -358,8 +358,14 @@ class Pool:
         # Pass 1: accumulate raw file values per (address, resolved key), applying the cap against
         # the keys seen so far.
         class _Accum:
-            __slots__ = ("windows", "shares_accepted", "shares_rejected", "best_diff",
-                         "last_share_ts", "max_age")
+            __slots__ = (
+                "best_diff",
+                "last_share_ts",
+                "max_age",
+                "shares_accepted",
+                "shares_rejected",
+                "windows",
+            )
 
             def __init__(self):
                 self.windows = {window: 0.0 for window in HASHRATE_WINDOWS}
@@ -420,7 +426,7 @@ class Pool:
         with self._stats_lock:
             return self._sps.snapshot(now)
 
-    def _current_job_locked(self) -> "Job | None":
+    def _current_job_locked(self) -> Job | None:
         """Read current_job under the jobs lock; use from a worker loop (other paths read it on
         the primary loop, which writes it)."""
         with self._jobs_lock:
@@ -628,7 +634,7 @@ class Pool:
                 try:
                     await asyncio.wait_for(self._new_block_event.wait(),
                                            timeout=self.config.poll_interval)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 else:
                     self._new_block_event.clear()
@@ -834,8 +840,8 @@ class Pool:
                 poolstatus.write_user_files(
                     self, self.config.stats_directory,
                     retention_seconds=self.config.user_stats_retention_days * 86400.0)
-            except Exception as e:
-                LOG.warning("Failed to write stats to %s: %s", self.config.stats_directory, e)
+            except Exception:
+                LOG.exception("Failed to write stats to %s", self.config.stats_directory)
 
     async def status_loop(self):
         while True:
@@ -995,8 +1001,10 @@ class Pool:
         for task in self._tasks:
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                LOG.debug("Background task cancelled during shutdown")
+            except Exception:
+                LOG.exception("Background task failed during shutdown")
         self._tasks = []
         self._write_stats()   # flush so a restart resumes from the latest stats
         with self._loops_lock:

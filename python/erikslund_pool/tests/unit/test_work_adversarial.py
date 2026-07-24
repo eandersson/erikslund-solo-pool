@@ -13,14 +13,14 @@ from erikslund_pool.tests.base import make_txn
 
 class _ValidateMixin(SoloPoolTestCase):
     def _validate(self, job, **overrides):
-        params = dict(
-            coinbase2=job.build_coinbase2(self.P2WPKH_SPK),
-            extranonce1=b"\x00\x00\x00\x01",
-            extranonce2_hex="00" * job.extranonce2_size,
-            ntime_hex=job.ntime_hex,
-            nonce_hex="00000000",
-            share_target=job.network_target,
-        )
+        params = {
+            "coinbase2": job.build_coinbase2(self.P2WPKH_SPK),
+            "extranonce1": b"\x00\x00\x00\x01",
+            "extranonce2_hex": "00" * job.extranonce2_size,
+            "ntime_hex": job.ntime_hex,
+            "nonce_hex": "00000000",
+            "share_target": job.network_target,
+        }
         params.update(overrides)
         return job.validate_share(**params)
 

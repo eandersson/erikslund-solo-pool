@@ -188,7 +188,7 @@ class TestAuthorize(AsyncSoloPoolTestCase):
     async def test_worker_gated_from_raw_suffix_drops_unprintable_codepoints(self):
         # NBSP/ZWSP are dropped from the raw suffix (not "?"-replaced).
         session = _session(Settings())
-        await session.handle_authorize(2, ["bcrt1qworker.rig ​farm"])
+        await session.handle_authorize(2, ["bcrt1qworker.rig\u00a0\u200bfarm"])
         self.assertIs(session.writer.by_id(2)["result"], True)
         self.assertEqual(session.worker, "rigfarm")  # NBSP + ZWSP dropped, no "?" inserted
         self.assertNotIn("?", session.worker)
@@ -367,9 +367,14 @@ class TestVardiffRetarget(AsyncSoloPoolTestCase):
     """
 
     def _ready_session(self, **config_overrides):
-        settings = dict(initial_difficulty=16, minimum_difficulty=1, maximum_difficulty=0,
-                        variable_difficulty=True, vardiff_target_shares_per_minute=12,
-                        vardiff_retarget_seconds=60)
+        settings = {
+            "initial_difficulty": 16,
+            "minimum_difficulty": 1,
+            "maximum_difficulty": 0,
+            "variable_difficulty": True,
+            "vardiff_target_shares_per_minute": 12,
+            "vardiff_retarget_seconds": 60,
+        }
         settings.update(config_overrides)
         session = _session(Settings(**settings))
         session.authorized = True

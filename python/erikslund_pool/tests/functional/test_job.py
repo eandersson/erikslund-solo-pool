@@ -99,10 +99,14 @@ class TestShareValidation(SoloPoolTestCase):
     def test_version_rolling_within_mask_is_accepted_and_alters_header(self):
         job = self.make_job()
         # Loosest share target isolates the mask logic from the target comparison.
-        common = dict(
-            coinbase2=job.build_coinbase2(self.P2WPKH_SPK), extranonce1=b"\x00\x00\x00\x01",
-            extranonce2_hex="00" * 8, ntime_hex=job.ntime_hex, nonce_hex="00000000",
-            share_target=(1 << 256) - 1)
+        common = {
+            "coinbase2": job.build_coinbase2(self.P2WPKH_SPK),
+            "extranonce1": b"\x00\x00\x00\x01",
+            "extranonce2_hex": "00" * 8,
+            "ntime_hex": job.ntime_hex,
+            "nonce_hex": "00000000",
+            "share_target": (1 << 256) - 1,
+        }
         rolled = job.validate_share(**common, version_bits_hex="00002000", version_mask=0x1FFFE000)
         plain = job.validate_share(**common)
         self.assertTrue(rolled.valid)
@@ -152,14 +156,17 @@ class TestShareValidation(SoloPoolTestCase):
 
     def test_malformed_share_fields_rejected(self):
         job = self.make_job()
-        base = dict(
-            coinbase2=job.build_coinbase2(self.P2WPKH_SPK), extranonce1=b"\x00\x00\x00\x01",
-            share_target=job.network_target)
+        base = {
+            "coinbase2": job.build_coinbase2(self.P2WPKH_SPK),
+            "extranonce1": b"\x00\x00\x00\x01",
+            "share_target": job.network_target,
+        }
         # Bad ntime hex, bad nonce hex, and bad (but correctly-sized) extranonce2 hex.
         for bad in (
-            dict(extranonce2_hex="00" * 8, ntime_hex="zz", nonce_hex="00000000"),
-            dict(extranonce2_hex="00" * 8, ntime_hex=job.ntime_hex, nonce_hex="zz"),
-            dict(extranonce2_hex="zz" * 8, ntime_hex=job.ntime_hex, nonce_hex="00000000"),
+            {"extranonce2_hex": "00" * 8, "ntime_hex": "zz", "nonce_hex": "00000000"},
+            {"extranonce2_hex": "00" * 8, "ntime_hex": job.ntime_hex, "nonce_hex": "zz"},
+            {"extranonce2_hex": "zz" * 8, "ntime_hex": job.ntime_hex,
+             "nonce_hex": "00000000"},
         ):
             result = job.validate_share(**base, **bad)
             self.assertFalse(result.valid)

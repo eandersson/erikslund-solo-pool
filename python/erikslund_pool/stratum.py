@@ -496,7 +496,7 @@ class ClientSession:
                         line = await asyncio.wait_for(self.reader.readline(), timeout=timeout)
                     else:
                         line = await self.reader.readline()
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     if (auth_timeout > 0 and not self.authorized
                             and time.monotonic() - connected_at >= auth_timeout):
                         LOG.info("Client %s did not authorize within %ds; disconnecting",

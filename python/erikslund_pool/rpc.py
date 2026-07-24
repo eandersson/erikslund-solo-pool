@@ -111,7 +111,8 @@ class BitcoindRPC:
             result = body["result"]
             try:
                 validate(result)
-            except Exception as e:
+            # The callback contract allows any exception to reject an unusable template.
+            except Exception as e:  # noqa: BLE001
                 # Unusable work: treat like an unreachable endpoint -- try the next, don't stick here.
                 last_error = e
                 continue

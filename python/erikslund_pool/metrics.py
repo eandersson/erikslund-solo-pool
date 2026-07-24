@@ -38,8 +38,10 @@ def render_prometheus(pool) -> str:
                 "1 when all required subsystems are ready", int(bool(data.get("ready")))),
         _metric("erikslundpool_uptime_seconds", "gauge",
                 "Seconds since process start", data.get("uptime_seconds", 0)),
-        "# HELP erikslundpool_subsystem_ready 1 when a subsystem is ready\n"
-        "# TYPE erikslundpool_subsystem_ready gauge\n",
+        (
+            "# HELP erikslundpool_subsystem_ready 1 when a subsystem is ready\n"
+            "# TYPE erikslundpool_subsystem_ready gauge\n"
+        ),
     ]
     for subsystem, key in (("bitcoind", "bitcoind_connected"),
                            ("work", "work_ready"),

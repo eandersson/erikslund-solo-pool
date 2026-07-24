@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+from typing import ClassVar
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
@@ -155,7 +156,7 @@ class TestAssignExtranonce1(unittest.TestCase):
 
 
 class TestRecentJobs(unittest.TestCase):
-    TEMPLATE = {
+    TEMPLATE: ClassVar[dict] = {
         "height": 100, "version": 0x20000000, "curtime": 1700000000,
         "bits": "207fffff", "coinbasevalue": 5_000_000_000,
         "previousblockhash": "00" * 32, "transactions": [],

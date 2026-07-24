@@ -194,7 +194,7 @@ class TestPrevhash(SoloPoolTestCase):
             "d0e0f00090a0b0c05060708010203040ccddeeff8899aabb4455667700112233")
 
     def test_output_is_32_bytes(self):
-        display = "%064x" % 1
+        display = f"{1:064x}"
         self.assertEqual(len(bytes.fromhex(prevhash_to_stratum(display))), 32)
 
 
@@ -243,12 +243,12 @@ class TestAsciiWorker(SoloPoolTestCase):
 
     def test_unicode_printable_nonascii_codepoints_are_dropped(self):
         # NBSP / ZWSP / soft-hyphen are valid UTF-8 but not ASCII, so ascii_worker drops them.
-        self.assertEqual(ascii_worker("rig a"), "riga")   # NBSP (utf-8 c2 a0)
-        self.assertEqual(ascii_worker("rig​a"), "riga")   # zero-width space (e2 80 8b)
-        self.assertEqual(ascii_worker("rig­a"), "riga")   # soft hyphen (c2 ad)
+        self.assertEqual(ascii_worker("rig\u00a0a"), "riga")   # NBSP (utf-8 c2 a0)
+        self.assertEqual(ascii_worker("rig\u200ba"), "riga")   # zero-width space (e2 80 8b)
+        self.assertEqual(ascii_worker("rig\u00ada"), "riga")   # soft hyphen (c2 ad)
 
     def test_caps_length_after_dropping_non_ascii(self):
         self.assertEqual(ascii_worker("a" * 200), "a" * 128)            # default cap 128
         self.assertEqual(ascii_worker("a" * 200, limit=10), "a" * 10)
         # Non-ASCII is dropped before the cap, so char-count == byte-count.
-        self.assertEqual(ascii_worker("a " * 200, limit=10), "a" * 10)
+        self.assertEqual(ascii_worker("a\u00a0" * 200, limit=10), "a" * 10)

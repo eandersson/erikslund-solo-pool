@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["httpx>=0.27"]
+dev = ["httpx>=0.27", "httpx2>=2.0"]
 
 [project.scripts]
 erikslund_pool = "erikslund_pool.main:run"
