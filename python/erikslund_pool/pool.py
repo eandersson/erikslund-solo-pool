@@ -88,10 +88,11 @@ class Pool:
         self.current_job: Job | None = None
         self._recent: dict[str, Job] = {}
         self._job_counter = 0
+        self.started = time.time()
         # Random high half of job ids -> unique across restarts and non-sequential; low half is
         # the counter (see _make_job).
         self._job_id_prefix = int.from_bytes(os.urandom(4), "big")
-        self._extranonce1_counter = 0
+        self._extranonce1_counter = int(self.started)
         self._address_cache: dict[str, tuple[bool, bytes | None]] = {}
         self._donation_script: bytes = b""
         self._donation_resolved = False
@@ -102,7 +103,6 @@ class Pool:
         self._fastblock_pending = False
         self._new_block_event = asyncio.Event()
 
-        self.started = time.time()
         self._started_monotonic = time.monotonic()
         self.blocks_found = 0
         self.last_block_found = 0  # wall epoch of most recent accepted block (0 = none)

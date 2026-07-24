@@ -91,6 +91,7 @@ Pool::Pool(Config config, bitcoin::RpcClient& rpc)
     // Per-process random high half of job ids -> unique across restarts/replicas, non-sequential.
     // XOR start time so a degenerate random_device still varies.
     job_id_prefix_ = static_cast<uint32_t>(std::random_device{}()) ^ static_cast<uint32_t>(started_);
+    extranonce1_counter_.store(static_cast<uint64_t>(started_));
     // Empty-block witness commitment: witness merkle root is the all-zero coinbase wtxid, so
     // commitment = sha256d(64 zero bytes).
     empty_commitment_ = "6a24aa21a9ed" + util::to_hex(util::sha256d(Bytes(64, 0)));

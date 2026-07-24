@@ -128,13 +128,14 @@ class TestConnectorAndClientStats(unittest.TestCase):
 
 
 class TestAssignExtranonce1(unittest.TestCase):
-    def test_size_and_monotonic_increment(self):
+    @patch("erikslund_pool.pool.time.time", return_value=0x65A0BC00)
+    def test_starts_after_current_unix_timestamp_and_increments(self, _time):
         pool = Pool(Settings(extranonce1_size=4))
         first = pool.assign_extranonce1()
         second = pool.assign_extranonce1()
         self.assertEqual(len(first), 4)
-        self.assertEqual(first.hex(), "00000001")
-        self.assertEqual(second.hex(), "00000002")
+        self.assertEqual(first.hex(), "65a0bc01")
+        self.assertEqual(second.hex(), "65a0bc02")
 
     def test_wraps_within_byte_width(self):
         # Seed the counter at the top of the 32-bit space; the next assignments wrap to 0, 1.
@@ -144,12 +145,13 @@ class TestAssignExtranonce1(unittest.TestCase):
         self.assertEqual(pool.assign_extranonce1().hex(), "00000000")  # wrapped
         self.assertEqual(pool.assign_extranonce1().hex(), "00000001")
 
-    def test_prefixes_partition_independent_replica_counters(self):
+    @patch("erikslund_pool.pool.time.time", return_value=0x65A0BC00)
+    def test_prefixes_partition_independent_replica_counters(self, _time):
         first = Pool(Settings(extranonce1_size=6, extranonce1_prefix=b"\x00\x01"))
         second = Pool(Settings(extranonce1_size=6, extranonce1_prefix=b"\x00\x02"))
-        self.assertEqual(first.assign_extranonce1().hex(), "000100000001")
-        self.assertEqual(second.assign_extranonce1().hex(), "000200000001")
-        self.assertEqual(first.assign_extranonce1().hex(), "000100000002")
+        self.assertEqual(first.assign_extranonce1().hex(), "000165a0bc01")
+        self.assertEqual(second.assign_extranonce1().hex(), "000265a0bc01")
+        self.assertEqual(first.assign_extranonce1().hex(), "000165a0bc02")
 
 
 class TestRecentJobs(unittest.TestCase):

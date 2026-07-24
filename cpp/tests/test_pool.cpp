@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -119,6 +120,7 @@ TEST_CASE("replica extranonce1 prefixes partition otherwise identical session co
     Config second_config = first_config;
     second_config.extranonce1_prefix = {0x00, 0x02};
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    const auto before_start = static_cast<uint32_t>(std::time(nullptr));
     Pool first(first_config, rpc);
     Pool second(second_config, rpc);
 
@@ -126,9 +128,21 @@ TEST_CASE("replica extranonce1 prefixes partition otherwise identical session co
     const auto second_session = second.add_client(std::make_shared<TestConnection>());
     const auto next_first_session = first.add_client(std::make_shared<TestConnection>());
 
-    CHECK(first_session->extranonce1_hex() == "000100000001");
-    CHECK(second_session->extranonce1_hex() == "000200000001");
-    CHECK(next_first_session->extranonce1_hex() == "000100000002");
+    const auto after_start = static_cast<uint32_t>(std::time(nullptr));
+    const auto first_counter =
+        static_cast<uint32_t>(std::stoul(first_session->extranonce1_hex().substr(4), nullptr, 16));
+    const auto second_counter =
+        static_cast<uint32_t>(std::stoul(second_session->extranonce1_hex().substr(4), nullptr, 16));
+    const auto next_first_counter = static_cast<uint32_t>(
+        std::stoul(next_first_session->extranonce1_hex().substr(4), nullptr, 16));
+
+    CHECK(first_session->extranonce1_hex().starts_with("0001"));
+    CHECK(second_session->extranonce1_hex().starts_with("0002"));
+    CHECK(first_counter >= before_start + 1);
+    CHECK(first_counter <= after_start + 1);
+    CHECK(second_counter >= before_start + 1);
+    CHECK(second_counter <= after_start + 1);
+    CHECK(next_first_counter == first_counter + 1);
 }
 
 TEST_CASE("resubmit_spooled_blocks leaves the block on disk when bitcoind is unreachable") {
