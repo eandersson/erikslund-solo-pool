@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "stats/hashrate.hpp"
+#include "stats/share_accounting.hpp"
 #include "stratum/job.hpp"
 #include "stratum/message.hpp"
 #include "util/bytes.hpp"
@@ -22,7 +22,7 @@ namespace erikslund::stratum {
 
 inline constexpr size_t kMaxSeenShares = 16384;
 
-class Session; // for PoolContext::on_block_found
+class Session;
 struct SessionTestPeek; // test-only access to private dedup internals
 
 // Outbound side of a connection (socket in prod, recorder in tests).
@@ -54,11 +54,25 @@ public:
                                      double credited, double share_difficulty) = 0;
     virtual void note_rejected_share(const std::string& address, const std::string& worker,
                                      RejectClass reason) = 0;
+    virtual void note_accepted_share(const stats::WorkerAccountingHandle& accounting,
+                                     const std::string& address, const std::string& worker,
+                                     double credited, double share_difficulty) {
+        (void)accounting;
+        note_accepted_share(address, worker, credited, share_difficulty);
+    }
+    virtual void note_rejected_share(const stats::WorkerAccountingHandle& accounting,
+                                     const std::string& address, const std::string& worker,
+                                     RejectClass reason) {
+        (void)accounting;
+        note_rejected_share(address, worker, reason);
+    }
     // Called on a successful authorize so an idle authorized worker appears in (and persists in)
     // the registry with zero stats.
-    virtual void attach_worker(const std::string& address, const std::string& worker) {
+    virtual stats::WorkerAccountingHandle attach_worker(const std::string& address,
+                                                        const std::string& worker) {
         (void)address;
         (void)worker;
+        return {};
     }
     virtual void on_block_found(Session& session, const Job& job, const ShareResult& result) = 0;
 
@@ -115,9 +129,10 @@ public:
         bool authorized = false;
         // Decaying hashrate (diff/s) per window, aged to snapshot time.
         std::array<double, 7> hashrate_windows{};
+        stats::WorkerAccountingHandle worker_accounting;
     };
     // Thread-safe snapshot of this session's stats (for the HTTP API).
-    SessionStats stats() const;
+    SessionStats stats(bool include_worker_accounting = false) const;
 
 private:
     void dispatch(const Request& request);
@@ -171,6 +186,7 @@ private:
     std::optional<std::string> address_;
     std::optional<std::string> worker_;
     std::optional<Bytes> payout_script_;
+    stats::WorkerAccountingHandle worker_accounting_;
 
     double difficulty_;
     double min_difficulty_ = 0.0; // vardiff floor

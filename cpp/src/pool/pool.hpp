@@ -2,9 +2,11 @@
 // Polls bitcoind for templates, builds Jobs, broadcasts work, validates addresses, submits
 // solved blocks. Implements stratum::PoolContext.
 //
-// Locks: mutex_ guards the client list; jobs_mutex_ (shared) the current/recent jobs; stats_mutex_
-// the decaying hashrate windows; per-session state has its own mutex; counters are atomics. The
-// work thread copies the client list under mutex_ then notifies lock-free, never holding two locks.
+// Locks: mutex_ guards the client list; jobs_mutex_ (shared) the current/recent jobs; share
+// accounting counters are atomic, pool rate windows have their own mutex, and persistent worker
+// rows have per-row mutexes (taken after user_stats_mutex_ when both are needed); per-session state
+// has its own mutex. The work thread copies the client list under mutex_ then notifies lock-free,
+// never holding two locks.
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -15,9 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <shared_mutex>
-#include <span>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -28,10 +28,13 @@
 #include "bitcoin/rpc_client.hpp"
 #include "core/config.hpp"
 #include "stats/hashrate.hpp"
+#include "stats/share_accounting.hpp"
 #include "stratum/job.hpp"
 #include "stratum/session.hpp"
 
 namespace erikslund {
+
+struct PoolTestPeek; // test-only access to the registry prune
 
 class Pool : public stratum::PoolContext {
 public:
@@ -59,7 +62,7 @@ public:
 
     // include_workers samples the persistent per-worker registry into snapshot.workers (an
     // O(registry) walk under user_stats_mutex_). Only the stats-file writer passes true; the HTTP
-    // path leaves it false to avoid that cost and share-lock contention.
+    // path leaves it false to avoid that cost and per-worker snapshot locking.
     api::PoolSnapshot snapshot(bool include_workers = false) const;
     // Cheap readiness probe for /health (same predicate as PoolSnapshot::ready).
     bool ready() const;
@@ -75,7 +78,14 @@ public:
                              double share_difficulty) override;
     void note_rejected_share(const std::string& address, const std::string& worker,
                              stratum::RejectClass reason) override;
-    void attach_worker(const std::string& address, const std::string& worker) override;
+    void note_accepted_share(const stats::WorkerAccountingHandle& accounting,
+                             const std::string& address, const std::string& worker, double credited,
+                             double share_difficulty) override;
+    void note_rejected_share(const stats::WorkerAccountingHandle& accounting,
+                             const std::string& address, const std::string& worker,
+                             stratum::RejectClass reason) override;
+    stats::WorkerAccountingHandle attach_worker(const std::string& address,
+                                                const std::string& worker) override;
     // Seed the per-worker registry from a prior run's users/ files, decaying each worker's hashrate
     // windows by the file's age. Call once at startup before serving.
     void recover_user_stats();
@@ -148,7 +158,6 @@ private:
     std::atomic<uint64_t> extranonce1_counter_{0};
     std::atomic<uint64_t> broadcast_cursor_{0};
     std::atomic<uint64_t> accepted_shares_{0};
-    std::atomic<uint64_t> rejected_shares_{0};
     std::array<std::atomic<uint64_t>, stratum::kRejectClassCount> rejected_by_class_{};
     std::atomic<uint64_t> blocks_found_{0};
     std::atomic<int64_t> last_block_found_{0}; // wall epoch of the most recent accepted block
@@ -164,31 +173,21 @@ private:
     double baseline_difficulty_ = 0.0;
     double baseline_best_difficulty_ = 0.0;
     // Pool-wide best share (actual hash difficulty), ratcheted monotonically on every accepted
-    // share so snapshot() reports best_share without walking the registry and a prune that drops
-    // the max row can't lower the pool best.
+    // share so snapshot() does not depend on retained worker rows.
     std::atomic<double> best_difficulty_runtime_{0.0};
 
     mutable std::mutex stats_mutex_; // guards the two DecayingWindows below
     stats::DecayingWindows<stats::kHashrateWindows.size()> hashrate_windows_;
     stats::DecayingWindows<stats::kSpsWindows.size()> sps_windows_;
 
-    struct WorkerStat {
-        stats::DecayingWindows<stats::kHashrateWindows.size()> hashrate;
-        uint64_t shares_accepted = 0;
-        uint64_t shares_rejected = 0;
-        double best_difficulty = 0.0; // max ACTUAL hash difficulty met (not the credited target)
-        int64_t last_share_ts = 0;    // wall epoch of the last accepted share (DISPLAYED)
-        int64_t last_activity_ts = 0; // wall epoch of the last attach/accept/reject (prune clock)
-        explicit WorkerStat(double start)
-            : hashrate(std::span<const int, stats::kHashrateWindows.size()>(stats::kHashrateWindows),
-                       start) {}
-    };
+    using WorkerMap = std::map<std::string, stats::WorkerAccountingHandle>;
     mutable std::mutex user_stats_mutex_;
-    std::map<std::string, std::map<std::string, WorkerStat>> user_stats_; // address -> worker
-    WorkerStat* worker_entry(const std::string& address, const std::string& worker);
-    std::string resolve_worker_key(const std::map<std::string, WorkerStat>& workers,
-                                   const std::string& worker) const;
-    void prune_user_stats(const std::vector<std::pair<std::string, std::string>>& live);
+    std::map<std::string, WorkerMap> user_stats_; // address -> worker
+    stats::WorkerAccountingHandle worker_entry(const std::string& address,
+                                               const std::string& worker);
+    std::string resolve_worker_key(const WorkerMap& workers, const std::string& worker) const;
+    void prune_user_stats(int64_t now);
+    friend struct PoolTestPeek; // test-only reach into prune_user_stats()
 
     bool has_template_ = false;
     uint32_t last_version_ = 0;

@@ -1,6 +1,7 @@
 #pragma once
 // Exponentially-decaying per-window hash/share rates: one rate per window (1m..7d),
 // each share folded in with that window's time constant.
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>

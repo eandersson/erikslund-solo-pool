@@ -100,8 +100,10 @@ public:
         return (job && job->job_id() == job_id) ? job : nullptr;
     }
     std::vector<std::pair<std::string, std::string>> attached; // (address, worker) authorize log
-    void attach_worker(const std::string& address, const std::string& worker) override {
+    stats::WorkerAccountingHandle attach_worker(const std::string& address,
+                                                const std::string& worker) override {
         attached.emplace_back(address, worker);
+        return {};
     }
     void note_accepted_share(const std::string& address, const std::string& worker, double credited,
                              double share_difficulty) override {

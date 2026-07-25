@@ -16,6 +16,7 @@
 #include <limits>
 #include <random>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -57,15 +58,6 @@ bool plausible_address(const std::string& address) {
            address.find_first_not_of(kAddressChars) == std::string::npos;
 }
 
-// (address, worker) joined with a NUL separator (can occur in neither field) for the
-// connected-set keys.
-std::string worker_key(const std::string& address, const std::string& worker) {
-    std::string key = address;
-    key += '\0';
-    key += worker;
-    return key;
-}
-
 enum class SubmitOutcome { Accepted, AlreadyKnown, Inconclusive, Rejected };
 SubmitOutcome classify_submit(const std::optional<std::string>& rejection) {
     if (!rejection)
@@ -75,6 +67,13 @@ SubmitOutcome classify_submit(const std::optional<std::string>& rejection) {
     if (*rejection == "inconclusive")
         return SubmitOutcome::Inconclusive;
     return SubmitOutcome::Rejected;
+}
+
+void ratchet_max(std::atomic<double>& value, double candidate) {
+    for (double previous = value.load(std::memory_order_relaxed);
+         candidate > previous &&
+         !value.compare_exchange_weak(previous, candidate, std::memory_order_relaxed);)
+        ;
 }
 } // namespace
 
@@ -454,8 +453,7 @@ std::shared_ptr<const stratum::Job> Pool::recent_job(const std::string& job_id) 
     return it != recent_jobs_.end() ? it->second : nullptr;
 }
 
-std::string Pool::resolve_worker_key(const std::map<std::string, WorkerStat>& workers,
-                                     const std::string& worker) const {
+std::string Pool::resolve_worker_key(const WorkerMap& workers, const std::string& worker) const {
     if (workers.contains(worker))
         return worker; // an existing row keeps its key
     const int cap = config_.max_workers_per_address;
@@ -469,7 +467,8 @@ std::string Pool::resolve_worker_key(const std::map<std::string, WorkerStat>& wo
     return worker;
 }
 
-Pool::WorkerStat* Pool::worker_entry(const std::string& address, const std::string& worker) {
+stats::WorkerAccountingHandle Pool::worker_entry(const std::string& address,
+                                                 const std::string& worker) {
     // Caller holds user_stats_mutex_. The "" key is the bare-address bucket: always present-able.
     auto addr_it = user_stats_.find(address);
     if (addr_it == user_stats_.end()) {
@@ -479,96 +478,95 @@ Pool::WorkerStat* Pool::worker_entry(const std::string& address, const std::stri
     }
     auto& workers = addr_it->second;
     if (const auto worker_it = workers.find(worker); worker_it != workers.end())
-        return &worker_it->second;
+        return worker_it->second;
     const std::string key = resolve_worker_key(workers, worker);
-    return &workers.try_emplace(key, started_steady_).first->second;
+    if (const auto worker_it = workers.find(key); worker_it != workers.end())
+        return worker_it->second;
+    auto accounting = std::make_shared<stats::WorkerAccounting>(started_steady_);
+    workers.emplace(key, accounting);
+    return accounting;
 }
 
-void Pool::attach_worker(const std::string& address, const std::string& worker) {
+stats::WorkerAccountingHandle Pool::attach_worker(const std::string& address,
+                                                  const std::string& worker) {
     if (address.empty())
-        return;
+        return {};
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
     const std::scoped_lock lock(user_stats_mutex_);
-    if (WorkerStat* stat = worker_entry(address, worker)) // create a zero row if absent
-        stat->last_activity_ts = std::max(stat->last_activity_ts, now_wall);
+    auto accounting = worker_entry(address, worker);
+    if (accounting) // create a zero row if absent
+        accounting->touch(now_wall);
+    return accounting;
 }
 
 void Pool::note_accepted_share(const std::string& address, const std::string& worker,
                                double credited, double share_difficulty) {
-    ++accepted_shares_;
-    total_share_difficulty_ += credited; // atomic: no per-share mutex_
-    // Ratchet the pool-wide best monotonically (CAS loop: atomic<double> has no fetch_max).
-    for (double prev = best_difficulty_runtime_.load();
-         share_difficulty > prev &&
-         !best_difficulty_runtime_.compare_exchange_weak(prev, share_difficulty);)
-        ;
-    const double now = stats::steady_seconds();       // monotonic: decay clock
-    const int64_t now_wall = static_cast<int64_t>(std::time(nullptr)); // DISPLAYED
+    note_accepted_share({}, address, worker, credited, share_difficulty);
+}
+
+void Pool::note_accepted_share(const stats::WorkerAccountingHandle& accounting,
+                               const std::string& address, const std::string& worker,
+                               double credited, double share_difficulty) {
+    accepted_shares_.fetch_add(1, std::memory_order_relaxed);
+    total_share_difficulty_.fetch_add(credited, std::memory_order_relaxed);
+    ratchet_max(best_difficulty_runtime_, share_difficulty);
     {
         const std::scoped_lock lock(stats_mutex_);
-        hashrate_windows_.add(credited, now);
-        sps_windows_.add(1.0, now);
+        const double now_steady = stats::steady_seconds();
+        hashrate_windows_.add(credited, now_steady);
+        sps_windows_.add(1.0, now_steady);
     }
-    if (address.empty())
-        return;
-    const std::scoped_lock lock(user_stats_mutex_);
-    WorkerStat* stat = worker_entry(address, worker);
-    if (!stat)
-        return; // address-capped: counted pool-wide, not per-worker
-    stat->hashrate.add(credited, now);
-    ++stat->shares_accepted;
-    // bestshare is the ACTUAL hash difficulty met, not the credited target (which would
-    // systematically under-report it).
-    stat->best_difficulty = std::max(stat->best_difficulty, share_difficulty);
-    stat->last_share_ts = now_wall;
-    stat->last_activity_ts = now_wall;
+    auto worker_accounting = accounting;
+    if (!worker_accounting && !address.empty()) {
+        const std::scoped_lock lock(user_stats_mutex_);
+        worker_accounting = worker_entry(address, worker);
+    }
+    if (worker_accounting)
+        worker_accounting->note_accepted(credited, share_difficulty);
 }
 
 void Pool::note_rejected_share(const std::string& address, const std::string& worker,
                                stratum::RejectClass reason) {
-    ++rejected_shares_;
-    ++rejected_by_class_[static_cast<size_t>(reason)];
-    if (address.empty())
-        return;
-    const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
-    const std::scoped_lock lock(user_stats_mutex_);
-    if (WorkerStat* stat = worker_entry(address, worker)) {
-        ++stat->shares_rejected;
-        stat->last_activity_ts = now_wall; // a reject is activity (keeps a live rig out of prune)
-    }
+    note_rejected_share({}, address, worker, reason);
 }
 
-void Pool::prune_user_stats(const std::vector<std::pair<std::string, std::string>>& live) {
+void Pool::note_rejected_share(const stats::WorkerAccountingHandle& accounting,
+                               const std::string& address, const std::string& worker,
+                               stratum::RejectClass reason) {
+    rejected_by_class_[static_cast<std::size_t>(reason)].fetch_add(1,
+                                                                  std::memory_order_relaxed);
+    auto worker_accounting = accounting;
+    if (!worker_accounting && !address.empty()) {
+        const std::scoped_lock lock(user_stats_mutex_);
+        worker_accounting = worker_entry(address, worker);
+    }
+    if (worker_accounting)
+        worker_accounting->note_rejected();
+}
+
+void Pool::prune_user_stats(int64_t now) {
     // Evict worker rows that are idle AND disconnected. A mined row (last_share_ts > 0) ages out
     // only past the retention window (retention_days <= 0 keeps it forever); a never-mined row
     // (authorize-only) ages out after a short grace REGARDLESS of retention. Never evicts a
     // connected worker; a folded live worker resolves to its "" bucket key, protecting that row.
     const int retention_days = config_.user_stats_retention_days;
     const bool retention_on = retention_days > 0;
-    const int64_t now = static_cast<int64_t>(std::time(nullptr));
     const int64_t ghost_cutoff = now - kGhostRowGraceSeconds;
     const int64_t retention_cutoff =
         retention_on ? now - static_cast<int64_t>(retention_days) * 86400 : 0;
     const std::scoped_lock lock(user_stats_mutex_);
-    std::set<std::string> connected_keys;
-    for (const auto& [address, worker] : live) {
-        const auto ai = user_stats_.find(address);
-        const std::string key =
-            ai != user_stats_.end() ? resolve_worker_key(ai->second, worker) : worker;
-        connected_keys.insert(worker_key(address, key));
-    }
     for (auto addr_it = user_stats_.begin(); addr_it != user_stats_.end();) {
         auto& workers = addr_it->second;
         for (auto it = workers.begin(); it != workers.end();) {
-            const WorkerStat& s = it->second;
-            const bool connected =
-                connected_keys.contains(worker_key(addr_it->first, it->first));
+            const auto& accounting = it->second;
+            const bool pinned = accounting.use_count() > 1;
             bool expired = false;
-            if (!connected && s.last_activity_ts > 0) {
-                if (s.last_share_ts == 0)
-                    expired = s.last_activity_ts < ghost_cutoff; // never mined
+            const auto [last_activity, last_share] = accounting->activity();
+            if (!pinned && last_activity > 0) {
+                if (last_share == 0)
+                    expired = last_activity < ghost_cutoff; // never mined
                 else if (retention_on)
-                    expired = s.last_activity_ts < retention_cutoff; // mined, retention on
+                    expired = last_activity < retention_cutoff; // mined, retention on
                 // else: mined + keep-forever -> never expired
             }
             if (expired)
@@ -704,15 +702,12 @@ void Pool::recover_user_stats() {
     const std::scoped_lock lock(user_stats_mutex_);
     for (const auto& [address, keys] : by_address)
         for (const auto& [key, a] : keys) {
-            WorkerStat* stat = worker_entry(address, key);
-            if (!stat)
+            auto accounting = worker_entry(address, key);
+            if (!accounting)
                 continue; // registry address cap hit during recovery
-            stat->shares_accepted += a.shares_accepted;
-            stat->shares_rejected += a.shares_rejected;
-            stat->best_difficulty = std::max(stat->best_difficulty, a.best_difficulty);
-            stat->last_share_ts = std::max(stat->last_share_ts, a.last_share_ts);
-            stat->last_activity_ts = std::max(stat->last_activity_ts, a.last_share_ts);
-            stat->hashrate.seed(a.windows, started_steady_, a.max_age); // decay by file age, once
+            accounting->recover(a.shares_accepted, a.shares_rejected, a.best_difficulty,
+                                a.last_share_ts, a.windows, started_steady_,
+                                a.max_age); // decay by file age, once
             ++rows;
         }
     log::info("Recovered {} worker stat row(s) from {}/users (hashrates decayed by file age)", rows,
@@ -723,18 +718,7 @@ void Pool::write_stats() {
     try {
         // Prune FIRST so an eviction-cycle write doesn't re-publish the just-evicted rows to disk
         // (whose mtime would reset the prune clock on a later restart).
-        std::vector<std::shared_ptr<Client>> clients_copy;
-        {
-            const std::scoped_lock lock(mutex_);
-            clients_copy = clients_;
-        }
-        std::vector<std::pair<std::string, std::string>> live;
-        for (const auto& client : clients_copy) {
-            const auto session_stats = client->session->stats();
-            if (!session_stats.address.empty())
-                live.emplace_back(session_stats.address, session_stats.worker);
-        }
-        prune_user_stats(live);
+        prune_user_stats(static_cast<int64_t>(std::time(nullptr)));
 
         const auto snap = snapshot(/*include_workers=*/true); // the file writer needs the registry
         stats::write_pool_status(config_.stats_directory, snap);
@@ -842,7 +826,7 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     snapshot.bitcoind_reachable = snapshot.generator_ready;
     snapshot.blocks_found = blocks_found_.load();
     snapshot.last_block_found = last_block_found_.load();
-    snapshot.shares_accepted = accepted_shares_.load();
+    snapshot.shares_accepted = accepted_shares_.load(std::memory_order_relaxed);
     snapshot.jobs_created = job_counter_.load();
 
     std::shared_ptr<const stratum::Job> job;
@@ -864,7 +848,8 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
         snapshot.hashrate_windows = hashrate_windows_.snapshot(now_steady);
         snapshot.sps_windows = sps_windows_.snapshot(now_steady);
     }
-    const double total_difficulty = total_share_difficulty_.load();
+    const double total_difficulty =
+        total_share_difficulty_.load(std::memory_order_relaxed);
 
     snapshot.stratifier_ready = job != nullptr;
     snapshot.ready = snapshot.generator_ready && snapshot.connector_ready && job != nullptr;
@@ -883,9 +868,12 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
 
     double best_difficulty = 0.0;
     std::set<std::string> addresses;
+    std::set<stats::WorkerAccountingHandle,
+             std::owner_less<stats::WorkerAccountingHandle>>
+        connected_accounting;
     snapshot.clients.reserve(clients.size());
     for (const auto& client : clients) {
-        const auto session_stats = client->session->stats();
+        const auto session_stats = client->session->stats(include_workers);
         api::ClientSnapshot client_snapshot;
         client_snapshot.address = session_stats.address;
         client_snapshot.worker = session_stats.worker;
@@ -901,50 +889,45 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
         client_snapshot.subscribed = session_stats.subscribed;
         client_snapshot.authorized = session_stats.authorized;
         client_snapshot.hashrate_windows = session_stats.hashrate_windows;
+        if (include_workers && session_stats.worker_accounting)
+            connected_accounting.insert(session_stats.worker_accounting);
         best_difficulty = std::max(best_difficulty, session_stats.best_difficulty);
         if (!session_stats.address.empty())
             addresses.insert(session_stats.address);
         snapshot.clients.push_back(std::move(client_snapshot));
     }
     // Sample the persistent registry into snapshot.workers ONLY for the stats-file writer; the HTTP
-    // path skips this O(registry) walk under the share lock. (best_share is the runtime scalar.)
+    // path skips this O(registry) walk and its per-worker rate locks.
     if (include_workers) {
-        // Live (address, worker) pairs, resolved to registry keys so a worker folded into the ""
         const std::scoped_lock lock(user_stats_mutex_);
-        std::set<std::string> connected_keys;
-        for (const auto& client_snapshot : snapshot.clients) {
-            if (client_snapshot.address.empty())
-                continue;
-            const auto ai = user_stats_.find(client_snapshot.address);
-            const std::string key = ai != user_stats_.end()
-                                        ? resolve_worker_key(ai->second, client_snapshot.worker)
-                                        : client_snapshot.worker;
-            connected_keys.insert(worker_key(client_snapshot.address, key));
-        }
         for (const auto& [address, workers] : user_stats_)
-            for (const auto& [worker, stat] : workers) {
+            for (const auto& [worker, accounting] : workers) {
+                const auto worker_stats = accounting->snapshot(now_steady);
                 api::WorkerSnapshot ws;
                 ws.address = address;
                 ws.worker = worker;
-                ws.connected = connected_keys.contains(worker_key(address, worker));
-                ws.shares_accepted = stat.shares_accepted;
-                ws.shares_rejected = stat.shares_rejected;
-                ws.best_difficulty = stat.best_difficulty;
-                ws.last_share_ts = stat.last_share_ts;
-                ws.hashrate_windows = stat.hashrate.snapshot(now_steady);
+                ws.connected = connected_accounting.contains(accounting);
+                ws.shares_accepted = worker_stats.shares_accepted;
+                ws.shares_rejected = worker_stats.shares_rejected;
+                ws.best_difficulty = worker_stats.best_difficulty;
+                ws.last_share_ts = worker_stats.last_share_ts;
+                ws.hashrate_windows = worker_stats.hashrate_windows;
                 snapshot.workers.push_back(std::move(ws));
             }
     }
 
     snapshot.connected = clients.size();
     snapshot.users = addresses.size();
-    snapshot.shares_rejected = rejected_shares_.load();
-    for (size_t cls = 0; cls < rejected_by_class_.size(); ++cls)
-        snapshot.shares_rejected_by_class[cls] = rejected_by_class_[cls].load();
+    for (size_t cls = 0; cls < rejected_by_class_.size(); ++cls) {
+        snapshot.shares_rejected_by_class[cls] =
+            rejected_by_class_[cls].load(std::memory_order_relaxed);
+        snapshot.shares_rejected += snapshot.shares_rejected_by_class[cls];
+    }
     // Pool-wide best: the runtime scalar (survives a registry prune) folded with live clients and
     // the restart baseline.
     snapshot.best_share =
-        std::max({best_difficulty, baseline_best_difficulty_, best_difficulty_runtime_.load()});
+        std::max({best_difficulty, baseline_best_difficulty_,
+                  best_difficulty_runtime_.load(std::memory_order_relaxed)});
     snapshot.accepted_diff = baseline_difficulty_ + total_difficulty;
     snapshot.hashrate_estimate =
         snapshot.uptime > 0 ? total_difficulty * stats::kHashesPerDiff1Share /

@@ -1,12 +1,16 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "api/snapshot.hpp"
@@ -251,6 +255,39 @@ std::vector<api::WorkerSnapshot> workers_of(const api::PoolSnapshot& s, const st
 const char* kAddr = "bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf";
 } // namespace
 
+namespace erikslund {
+struct PoolTestPeek {
+    static void prune(Pool& pool, int64_t now) { pool.prune_user_stats(now); }
+};
+} // namespace erikslund
+
+TEST_CASE("prune keeps a held worker row and evicts it once the last handle is gone") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_prune_pin_test";
+    fs::remove_all(stats);
+    Config config;
+    config.stats_directory = stats.string();
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    Pool pool(config, rpc);
+
+    auto accounting = pool.attach_worker(kAddr, "w1"); // an authorized Session holds this handle
+    REQUIRE(accounting);
+    REQUIRE(workers_of(pool.snapshot(true), kAddr).size() == 1);
+
+    const int64_t much_later = static_cast<int64_t>(std::time(nullptr)) + 10 * 86400;
+
+    // Held (a live session still owns the row): never evicted, however stale the clock says it is.
+    PoolTestPeek::prune(pool, much_later);
+    CHECK(workers_of(pool.snapshot(true), kAddr).size() == 1);
+
+    // Handle released (session gone): the map is the sole owner, so the stale row is evicted.
+    accounting.reset();
+    PoolTestPeek::prune(pool, much_later);
+    CHECK(workers_of(pool.snapshot(true), kAddr).empty());
+
+    fs::remove_all(stats);
+}
+
 TEST_CASE("share hooks accumulate persistent per-worker stats; sessions with one name merge") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
@@ -271,6 +308,113 @@ TEST_CASE("share hooks accumulate persistent per-worker stats; sessions with one
     CHECK(rows[0].hashrate_windows[0] > 0.0); // a fresh share registers hashrate
     CHECK(rows[1].worker == "w2");
     CHECK(rows[1].shares_accepted == 1);
+}
+
+TEST_CASE("cached worker accounting remains exact while writers and snapshots run concurrently") {
+    constexpr int kWriterCount = 8;
+    constexpr int kSharesPerWriter = 5000;
+
+    Config config;
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    Pool pool(config, rpc);
+
+    std::vector<std::string> workers;
+    std::vector<stats::WorkerAccountingHandle> accounting;
+    workers.reserve(kWriterCount);
+    accounting.reserve(kWriterCount);
+    for (int writer = 0; writer < kWriterCount; ++writer) {
+        workers.push_back("writer" + std::to_string(writer));
+        accounting.push_back(pool.attach_worker(kAddr, workers.back()));
+        REQUIRE(accounting.back());
+    }
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> stop_snapshots{false};
+    std::atomic<bool> snapshots_valid{true};
+    std::jthread snapshotter([&] {
+        start.wait(false);
+        while (!stop_snapshots.load(std::memory_order_relaxed)) {
+            const auto current = pool.snapshot();
+            uint64_t rejected_by_class = 0;
+            for (const uint64_t count : current.shares_rejected_by_class)
+                rejected_by_class += count;
+            if (!std::isfinite(current.accepted_diff) || current.accepted_diff < 0.0 ||
+                current.shares_rejected != rejected_by_class)
+                snapshots_valid.store(false, std::memory_order_relaxed);
+        }
+    });
+
+    std::vector<std::jthread> writers_threads;
+    writers_threads.reserve(kWriterCount);
+    for (int writer = 0; writer < kWriterCount; ++writer) {
+        writers_threads.emplace_back([&, writer] {
+            start.wait(false);
+            const auto reason =
+                static_cast<stratum::RejectClass>(writer % stratum::kRejectClassCount);
+            for (int share = 0; share < kSharesPerWriter; ++share) {
+                pool.note_accepted_share(accounting[writer], kAddr, workers[writer], 1.0,
+                                         static_cast<double>(writer + 1));
+                pool.note_rejected_share(accounting[writer], kAddr, workers[writer], reason);
+            }
+        });
+    }
+    start.store(true);
+    start.notify_all();
+    for (auto& writer : writers_threads)
+        writer.join();
+    stop_snapshots.store(true, std::memory_order_relaxed);
+    snapshotter.join();
+
+    CHECK(snapshots_valid.load(std::memory_order_relaxed));
+    const auto final = pool.snapshot(true);
+    const uint64_t expected = kWriterCount * kSharesPerWriter;
+    CHECK(final.shares_accepted == expected);
+    CHECK(final.shares_rejected == expected);
+    CHECK(final.accepted_diff == doctest::Approx(static_cast<double>(expected)));
+    CHECK(final.best_share == doctest::Approx(static_cast<double>(kWriterCount)));
+    CHECK(final.hashrate_windows[0] > 0.0);
+    CHECK(final.sps_windows[0] > 0.0);
+
+    const auto rows = workers_of(final, kAddr);
+    REQUIRE(rows.size() == kWriterCount);
+    for (int writer = 0; writer < kWriterCount; ++writer) {
+        CHECK(rows[writer].worker == workers[writer]);
+        CHECK(rows[writer].shares_accepted == kSharesPerWriter);
+        CHECK(rows[writer].shares_rejected == kSharesPerWriter);
+        CHECK(rows[writer].best_difficulty == doctest::Approx(static_cast<double>(writer + 1)));
+    }
+    for (std::size_t reason = 0; reason < stratum::kRejectClassCount; ++reason) {
+        const uint64_t writers_for_reason =
+            (kWriterCount + stratum::kRejectClassCount - 1 - reason) /
+            stratum::kRejectClassCount;
+        CHECK(final.shares_rejected_by_class[reason] ==
+              writers_for_reason * kSharesPerWriter);
+    }
+}
+
+TEST_CASE("a connected overflow worker stays attached to its canonical bare bucket") {
+    Config config;
+    config.max_workers_per_address = 2;
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    Pool pool(config, rpc);
+
+    std::vector<std::shared_ptr<stratum::Session>> sessions;
+    for (const std::string worker : {"w1", "w2", "overflow"}) {
+        auto session = pool.add_client(std::make_shared<TestConnection>());
+        session->handle_line(std::format(
+            R"({{"id":1,"method":"mining.authorize","params":["{}.{}","x"]}})", kAddr, worker));
+        REQUIRE(session->authorized());
+        sessions.push_back(std::move(session));
+    }
+
+    const auto rows = workers_of(pool.snapshot(true), kAddr);
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[0].worker == "");
+    CHECK(rows[0].connected);
+    CHECK(rows[1].worker == "w1");
+    CHECK(rows[1].connected);
+    CHECK(rows[2].worker == "w2");
+    CHECK(rows[2].connected);
 }
 
 TEST_CASE("per-worker bestshare is the actual hash difficulty, not the credited target") {

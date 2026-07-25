@@ -106,7 +106,7 @@ void Session::maybe_retarget() {
     }
 }
 
-Session::SessionStats Session::stats() const {
+Session::SessionStats Session::stats(bool include_worker_accounting) const {
     const std::scoped_lock lock(mutex_);
     SessionStats snapshot;
     snapshot.address = address_.value_or("");
@@ -125,6 +125,8 @@ Session::SessionStats Session::stats() const {
     snapshot.subscribed = subscribed_;
     snapshot.authorized = authorized_;
     snapshot.hashrate_windows = hashrate_.snapshot(now_steady);
+    if (include_worker_accounting)
+        snapshot.worker_accounting = worker_accounting_;
     return snapshot;
 }
 
@@ -368,7 +370,7 @@ void Session::handle_authorize(const json& id, const std::vector<std::string>& p
     authorized_ = true;
     // Register the worker so an idle authorized rig shows up (and persists) in the stats even
     // before its first share.
-    pool_.attach_worker(*address_, *worker_);
+    worker_accounting_ = pool_.attach_worker(*address_, *worker_);
     send_result(id, true);
     log::info("Authorized {} (address={}, user_agent={}, extranonce1={})", connection_.peer(),
               *address_, user_agent_, extranonce1_hex()); // both sanitized at ingress
@@ -397,6 +399,7 @@ void Session::handle_suggest_difficulty(const Request& request) {
 void Session::handle_submit(const json& id, const std::vector<std::string>& params) {
     std::shared_ptr<const Job> job;
     std::shared_ptr<const Coinbase2Cache> coinbase2;
+    stats::WorkerAccountingHandle worker_accounting;
     std::string address, worker;
     std::optional<std::string> version_bits;
     double snap_difficulty = 0.0, snap_previous = 0.0;
@@ -427,7 +430,8 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         job = pool_.recent_job(job_id);
         if (!job) [[unlikely]] {
             ++shares_rejected_;
-            pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Stale);
+            pool_.note_rejected_share(worker_accounting_, or_empty(address_), or_empty(worker_),
+                                      RejectClass::Stale);
             send_error(id, ERR_STALE);
             return;
         }
@@ -435,19 +439,22 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         if (extranonce2.size() > pool_.extranonce2_size() * 2 || ntime.size() > 8 ||
             nonce.size() > 8 || (version_bits && version_bits->size() > 8)) [[unlikely]] {
             ++shares_rejected_;
-            pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Malformed);
+            pool_.note_rejected_share(worker_accounting_, or_empty(address_), or_empty(worker_),
+                                      RejectClass::Malformed);
             send_error(id, ERR_OTHER);
             return;
         }
 
         if (!remember(make_dedup_key(job_id, extranonce2, ntime, nonce, version_bits))) [[unlikely]] {
             ++shares_rejected_;
-            pool_.note_rejected_share(or_empty(address_), or_empty(worker_), RejectClass::Duplicate);
+            pool_.note_rejected_share(worker_accounting_, or_empty(address_), or_empty(worker_),
+                                      RejectClass::Duplicate);
             send_error(id, ERR_DUPLICATE);
             return;
         }
 
         coinbase2 = coinbase2_for(*job);
+        worker_accounting = worker_accounting_;
         address = or_empty(address_);
         worker = or_empty(worker_);
         snap_difficulty = difficulty_;
@@ -472,7 +479,8 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     const auto result = job->validate_share(input);
 
     if (!result) {
-        pool_.note_rejected_share(address, worker, reject_class_of(result.error().reason));
+        pool_.note_rejected_share(worker_accounting, address, worker,
+                                  reject_class_of(result.error().reason));
         if (log::level() <= log::Level::Debug)
             log::debug("Rejected share from {} ({})", address, reject_reason(result.error().reason));
         const std::scoped_lock lock(mutex_);
@@ -488,7 +496,7 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         const double lo = std::min(snap_difficulty, snap_previous);
         credited = result->difficulty >= hi ? hi : lo;
     }
-    pool_.note_accepted_share(address, worker, credited, result->difficulty);
+    pool_.note_accepted_share(worker_accounting, address, worker, credited, result->difficulty);
     {
         const std::scoped_lock lock(mutex_);
         record_accepted_share_locked(credited, result->difficulty);
