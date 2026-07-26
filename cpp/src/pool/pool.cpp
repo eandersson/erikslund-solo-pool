@@ -350,6 +350,12 @@ void Pool::on_zmq_block(const std::string& block_hash_display) {
 }
 
 void Pool::refresh_work(const std::stop_token& stop) {
+    bool refresh_failing = false;
+    const auto report_failure = [&refresh_failing](const std::exception& error) {
+        if (!std::exchange(refresh_failing, true))
+            log::warning("Work refresh failed: {}", error.what());
+    };
+
     while (!stop.stop_requested()) {
         try {
             // A mainnet template is multi-MB; fetching it every poll just to read
@@ -381,13 +387,15 @@ void Pool::refresh_work(const std::stop_token& stop) {
                 }
                 build_and_broadcast(std::move(block_template), new_block);
             }
+            if (std::exchange(refresh_failing, false))
+                log::info("Work refresh recovered");
         } catch (const RpcConnectionError& e) {
             // Every endpoint unreachable: un-latch readiness so /health reports degraded (it
             // re-latches on the next successful RPC).
             set_generator_ready(false);
-            log::warning("Work refresh failed: {}", e.what());
+            report_failure(e);
         } catch (const std::exception& e) {
-            log::warning("Work refresh failed: {}", e.what());
+            report_failure(e);
         }
         // Wait poll_interval, but wake immediately on a ZMQ block notification.
         std::unique_lock<std::mutex> wait_lock(wakeup_mutex_);

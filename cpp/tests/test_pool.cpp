@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <memory>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -15,8 +18,12 @@
 
 #include "api/snapshot.hpp"
 #include "bitcoin/rpc_client.hpp"
+#include "bitcoin/work_source.hpp"
 #include "bitcoin/work_source_rpc.hpp"
 #include "core/config.hpp"
+#include "core/errors.hpp"
+#include "core/logging.hpp"
+#include "gbt_fixture.hpp"
 #include "pool/pool.hpp"
 #include "stats/poolstatus.hpp"
 
@@ -59,6 +66,69 @@ public:
     void send_line(std::string_view) override {}
     std::string peer() const override { return "test"; }
 };
+
+bitcoin::BlockTemplate refresh_template() {
+    test::gbt_json data = test::gbt_json::object_t{};
+    data["height"] = 170;
+    data["version"] = 0x20000000;
+    data["curtime"] = 1700000000;
+    data["bits"] = std::string("1d00ffff");
+    data["coinbasevalue"] = 5000000000LL;
+    data["previousblockhash"] = std::string(64, 'a');
+    data["transactions"] = test::gbt_json::array_t{};
+    return test::from_template(data);
+}
+
+class FlappingWorkSource final : public bitcoin::WorkSource {
+public:
+    std::atomic<bool> failing{false};
+    std::atomic<size_t> templates{0};
+    std::atomic<size_t> failures{0};
+    std::atomic<size_t> successes{0};
+
+    bitcoin::ChainInfo detect_chain() override { return {.chain = "regtest", .blocks = 169}; }
+
+    std::string get_tip() override {
+        if (failing.load(std::memory_order_acquire)) {
+            failures.fetch_add(1, std::memory_order_relaxed);
+            throw RpcConnectionError("test bitcoind offline");
+        }
+        successes.fetch_add(1, std::memory_order_relaxed);
+        return std::string(64, 'a');
+    }
+
+    bitcoin::BlockTemplate fetch_template() override {
+        templates.fetch_add(1, std::memory_order_relaxed);
+        return block_template_;
+    }
+
+    bitcoin::HeaderFacts fetch_header(const std::string&) override { return {}; }
+
+    std::optional<std::string> submit_block_hex(const std::string&) override {
+        return std::nullopt;
+    }
+
+private:
+    const bitcoin::BlockTemplate block_template_ = refresh_template();
+};
+
+template <typename Predicate>
+bool wait_until(Predicate&& predicate) {
+    for (int attempt = 0; attempt < 1000; ++attempt) {
+        if (predicate())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return predicate();
+}
+
+size_t occurrence_count(std::string_view text, std::string_view needle) {
+    size_t count = 0;
+    for (size_t offset = 0; (offset = text.find(needle, offset)) != std::string_view::npos;
+         offset += needle.size())
+        ++count;
+    return count;
+}
 } // namespace
 
 TEST_CASE("validate_address resolves locally, without any bitcoind RPC") {
@@ -152,6 +222,70 @@ TEST_CASE("replica extranonce1 prefixes partition otherwise identical session co
     CHECK(second_counter >= before_start + 1);
     CHECK(second_counter <= after_start + 1);
     CHECK(next_first_counter == first_counter + 1);
+}
+
+TEST_CASE("refresh_work logs one warning and one recovery per outage") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "ep-refresh-log-test";
+    const fs::path path = dir / "pool.log";
+    fs::remove_all(dir);
+
+    const log::Level previous_level = log::level();
+    log::set_level(log::Level::Info);
+    const bool log_opened = log::set_log_file(path.string());
+
+    Config config;
+    config.poll_interval = 0.001;
+    config.work_rebroadcast_seconds = 3600;
+    FlappingWorkSource source;
+    Pool pool(config, source);
+    std::jthread worker([&pool](const std::stop_token& stop) { pool.refresh_work(stop); });
+
+    const bool template_ready = wait_until([&source] { return source.templates.load() != 0; });
+    source.failing.store(true, std::memory_order_release);
+    const bool first_outage_retried =
+        wait_until([&source] { return source.failures.load() >= 20; });
+    const size_t first_recovery_start = source.successes.load();
+    source.failing.store(false, std::memory_order_release);
+    const bool first_recovered =
+        wait_until([&source, first_recovery_start] {
+            return source.successes.load() >= first_recovery_start + 2;
+        });
+
+    const size_t second_outage_start = source.failures.load();
+    source.failing.store(true, std::memory_order_release);
+    const bool second_outage_retried =
+        wait_until([&source, second_outage_start] {
+            return source.failures.load() >= second_outage_start + 20;
+        });
+    const size_t second_recovery_start = source.successes.load();
+    source.failing.store(false, std::memory_order_release);
+    const bool second_recovered =
+        wait_until([&source, second_recovery_start] {
+            return source.successes.load() >= second_recovery_start + 2;
+        });
+
+    worker.request_stop();
+    worker.join();
+    log::set_log_file("");
+    log::set_level(previous_level);
+
+    std::ifstream input(path);
+    std::stringstream buffer;
+    buffer << input.rdbuf();
+    const std::string contents = buffer.str();
+
+    CHECK(log_opened);
+    CHECK(template_ready);
+    CHECK(first_outage_retried);
+    CHECK(first_recovered);
+    CHECK(second_outage_retried);
+    CHECK(second_recovered);
+    CHECK(occurrence_count(contents, "Work refresh failed") == 2);
+    CHECK(occurrence_count(contents, "Work refresh recovered") == 2);
+    CHECK(pool.snapshot().generator_ready);
+
+    fs::remove_all(dir);
 }
 
 TEST_CASE("resubmit_spooled_blocks leaves the block on disk when bitcoind is unreachable") {
