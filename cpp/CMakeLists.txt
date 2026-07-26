@@ -80,11 +80,12 @@ set(IPC_GENERATED
     ${IPC_GEN_DIR}/mining.capnp.c++ ${IPC_GEN_DIR}/common.capnp.c++
     ${IPC_GEN_DIR}/init.capnp.c++ ${IPC_GEN_DIR}/echo.capnp.c++
     ${IPC_GEN_DIR}/mp/proxy.capnp.c++)
+set(IPC_GENERATED_HEADERS
+    ${IPC_GEN_DIR}/mining.capnp.h ${IPC_GEN_DIR}/common.capnp.h
+    ${IPC_GEN_DIR}/init.capnp.h ${IPC_GEN_DIR}/echo.capnp.h
+    ${IPC_GEN_DIR}/mp/proxy.capnp.h)
 add_custom_command(
-    OUTPUT ${IPC_GENERATED}
-           ${IPC_GEN_DIR}/mining.capnp.h ${IPC_GEN_DIR}/common.capnp.h
-           ${IPC_GEN_DIR}/init.capnp.h ${IPC_GEN_DIR}/echo.capnp.h
-           ${IPC_GEN_DIR}/mp/proxy.capnp.h
+    OUTPUT ${IPC_GENERATED} ${IPC_GENERATED_HEADERS}
     COMMAND ${CAPNP_EXECUTABLE} compile -o${CAPNPC_CXX_EXECUTABLE}:${IPC_GEN_DIR}
             --src-prefix=${IPC_SCHEMA_DIR} -I${IPC_SCHEMA_DIR} -I/usr/include
             ${IPC_SCHEMA_DIR}/mining.capnp ${IPC_SCHEMA_DIR}/common.capnp
@@ -94,6 +95,7 @@ add_custom_command(
             ${IPC_SCHEMA_DIR}/init.capnp ${IPC_SCHEMA_DIR}/echo.capnp
             ${IPC_SCHEMA_DIR}/mp/proxy.capnp
     COMMENT "capnp: generating Mining IPC C++ bindings")
+add_custom_target(generate_ipc_bindings DEPENDS ${IPC_GENERATED} ${IPC_GENERATED_HEADERS})
 set_source_files_properties(${IPC_GENERATED} PROPERTIES COMPILE_OPTIONS "-w")
 
 # ---- dependencies ------------------------------------------------------------

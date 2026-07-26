@@ -2,9 +2,8 @@
 #
 # Runs as a static-analysis lint gate in CI (cpp/docker/clang-tidy.sh +
 # .github/workflows/cpp.yml). GCC is the authoritative compiler (the build job);
-# this pass only adds static analysis on top. A couple of clang/libstdc++
-# front-end quirks (e.g. a consteval std::format with a dynamic spec, which GCC
-# accepts) are surfaced as notes by the runner but never gate the build.
+# this pass only adds static analysis on top. Clang front-end diagnostics are
+# surfaced as notes by the runner but never gate the build.
 #
 # Curated, bug-focused families the tree passes cleanly:
 #   bugprone-*       likely-bug patterns

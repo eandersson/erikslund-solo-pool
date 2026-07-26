@@ -17,7 +17,6 @@ on:
 
 concurrency:
   group: cpp-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -65,3 +64,14 @@ jobs:
           docker build -t erikslund-pool-cpp cpp/docker
           docker run --rm -v "$PWD/cpp:/src:ro" -v cpp-asan-build:/build \
             --entrypoint /usr/local/bin/sanitize.sh erikslund-pool-cpp
+
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: TSan (runtime gate over concurrent tests)
+        run: |
+          docker build -t erikslund-pool-cpp cpp/docker
+          docker run --rm -v "$PWD/cpp:/src:ro" -v cpp-tsan-build:/build \
+            --entrypoint /usr/local/bin/tsan.sh erikslund-pool-cpp

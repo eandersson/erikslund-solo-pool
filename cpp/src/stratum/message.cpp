@@ -14,6 +14,17 @@ namespace erikslund::stratum {
 
 using json = glz::generic;
 
+// Glaze reflection requires this file-private wire type to have external linkage.
+namespace message_detail {
+
+struct RequestWire {
+    json id{};
+    std::optional<std::string> method{};
+    std::optional<std::vector<std::string>> params{};
+};
+
+} // namespace message_detail
+
 namespace {
 
 // Reject pathologically nested JSON: guards against stack exhaustion on small thread stacks
@@ -59,12 +70,6 @@ void normalize_request_id(json& request_id, const json& raw_id) {
     }
 }
 
-struct RequestWire {
-    json id{};
-    std::optional<std::string> method{};
-    std::optional<std::vector<std::string>> params{};
-};
-
 } // namespace
 
 std::optional<Request> parse_request(std::string_view line) {
@@ -73,7 +78,7 @@ std::optional<Request> parse_request(std::string_view line) {
 
     // Fast path
     {
-        RequestWire wire;
+        message_detail::RequestWire wire;
         if (!glz::read_json(wire, line)) {
             if (!wire.method)
                 return std::nullopt; // missing or null method: the DOM path rejects these too

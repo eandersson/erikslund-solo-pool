@@ -19,6 +19,34 @@
 
 namespace erikslund::bitcoin {
 
+// Glaze reflection requires these file-private wire types to have external linkage.
+namespace gbt_detail {
+
+struct GbtTransaction {
+    std::optional<std::string> data;
+    std::optional<std::string> txid;
+    std::optional<std::string> hash;
+};
+
+struct GbtReply {
+    std::optional<int64_t> height;
+    std::optional<int64_t> version;
+    std::optional<int64_t> curtime;
+    std::optional<std::string> bits;
+    std::optional<uint64_t> coinbasevalue;
+    std::optional<std::string> previousblockhash;
+    std::optional<std::vector<glz::generic>> rules;
+    std::optional<std::string> default_witness_commitment;
+    std::optional<std::vector<GbtTransaction>> transactions;
+};
+
+struct GbtEnvelope {
+    std::optional<GbtReply> result;
+    glz::generic error; // null when the call succeeded
+};
+
+} // namespace gbt_detail
+
 namespace {
 
 util::Hash256 parse_txid(bool segwit_aware, const std::optional<std::string_view>& txid,
@@ -53,29 +81,6 @@ uint32_t require_header_u32(int64_t value, const char* field) {
     return static_cast<uint32_t>(value);
 }
 
-struct GbtTransaction {
-    std::optional<std::string> data;
-    std::optional<std::string> txid;
-    std::optional<std::string> hash;
-};
-
-struct GbtReply {
-    std::optional<int64_t> height;
-    std::optional<int64_t> version;
-    std::optional<int64_t> curtime;
-    std::optional<std::string> bits;
-    std::optional<uint64_t> coinbasevalue;
-    std::optional<std::string> previousblockhash;
-    std::optional<std::vector<glz::generic>> rules;
-    std::optional<std::string> default_witness_commitment;
-    std::optional<std::vector<GbtTransaction>> transactions;
-};
-
-struct GbtEnvelope {
-    std::optional<GbtReply> result;
-    glz::generic error; // null when the call succeeded
-};
-
 template <typename T>
 const T& require_field(const std::optional<T>& field, const char* name) {
     if (!field)
@@ -86,7 +91,7 @@ const T& require_field(const std::optional<T>& field, const char* name) {
 } // namespace
 
 BlockTemplate BlockTemplate::from_gbt(const std::string& response_json) {
-    GbtEnvelope envelope;
+    gbt_detail::GbtEnvelope envelope;
     // Lenient: ignore the envelope "id" + the GBT fields we don't use.
     constexpr glz::opts opts{.error_on_unknown_keys = false};
     if (const auto ec = glz::read<opts>(envelope, response_json))
@@ -96,7 +101,7 @@ BlockTemplate BlockTemplate::from_gbt(const std::string& response_json) {
         throw RpcError(glz::write_json(envelope.error).value_or("getblocktemplate error"));
     if (!envelope.result)
         throw std::invalid_argument("getblocktemplate reply has no result");
-    const GbtReply& reply = *envelope.result;
+    const gbt_detail::GbtReply& reply = *envelope.result;
 
     BlockTemplate block_template;
     block_template.height = require_field(reply.height, "height");

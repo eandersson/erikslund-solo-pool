@@ -2,14 +2,12 @@ name: Python
 
 on:
   push:
-    branches: [main]
     paths: ['python/**', '.github/workflows/python.yml']
   pull_request:
     paths: ['python/**', '.github/workflows/python.yml']
 
 concurrency:
   group: py-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read

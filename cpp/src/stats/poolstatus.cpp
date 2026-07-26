@@ -238,8 +238,10 @@ std::string suffix_string(double value, int significant_digits) {
     const int decimal_places =
         significant_digits - 1 -
         (scaled > 0.0 ? static_cast<int>(std::floor(std::log10(scaled))) : 0);
-    return std::format("{:{}.{}f}{}", scaled, significant_digits + 1, std::max(decimal_places, 0),
-                       suffix);
+    const int field_width = significant_digits + 1;
+    const int precision = std::max(decimal_places, 0);
+    return std::vformat("{:{}.{}f}{}",
+                        std::make_format_args(scaled, field_width, precision, suffix));
 }
 
 glz::generic build_pool_status(const api::PoolSnapshot& snapshot) {

@@ -22,7 +22,60 @@
 
 namespace erikslund {
 
+// Glaze reflection requires these file-private wire types to have external linkage.
+namespace config_detail {
+
+struct NodeEntry {
+    std::string address;
+    std::optional<std::string> username;
+    std::optional<std::string> password;
+    std::optional<bool> notify;
+};
+using ScalarOrList = std::variant<std::string, std::vector<std::string>>;
+
+struct ConfigFile {
+    std::optional<std::vector<NodeEntry>> bitcoin_nodes;
+    std::optional<ScalarOrList> stratum_listen;
+    std::optional<ScalarOrList> api_listen;
+    std::optional<ScalarOrList> proxy_protocol_from;
+    std::optional<std::string> coinbase_signature;
+    std::optional<std::uint32_t> coinbase_version;
+    std::optional<double> initial_difficulty;
+    std::optional<double> minimum_difficulty;
+    std::optional<double> maximum_difficulty;
+    std::optional<bool> variable_difficulty;
+    std::optional<double> vardiff_target_shares_per_minute;
+    std::optional<int> vardiff_retarget_seconds;
+    std::optional<std::size_t> extranonce1_size;
+    std::optional<std::size_t> extranonce2_size;
+    std::optional<std::string> extranonce1_prefix;
+    std::optional<std::string> zmq_block_endpoint;
+    std::optional<bool> fast_block_notify;
+    std::optional<std::string> work_source;
+    std::optional<std::string> ipc_socket_path;
+    std::optional<double> block_poll_milliseconds;
+    std::optional<double> work_rebroadcast_seconds;
+    std::optional<std::variant<std::uint32_t, std::string>> version_rolling_mask;
+    std::optional<double> donation_percent;
+    std::optional<std::string> donation_address;
+    std::optional<int> max_clients;
+    std::optional<int> max_workers_per_address;
+    std::optional<int> drop_idle_seconds;
+    std::optional<std::size_t> max_line_bytes;
+    std::optional<int> auth_timeout_seconds;
+    std::optional<int> max_protocol_errors;
+    std::optional<std::string> stats_directory;
+    std::optional<double> status_interval_seconds;
+    std::optional<int> user_stats_retention_days;
+    std::optional<int> worker_threads;
+};
+
+} // namespace config_detail
+
 namespace {
+
+using config_detail::ConfigFile;
+using config_detail::ScalarOrList;
 
 std::pair<std::string, uint16_t> split_host_port(const std::string& host_port) {
     const auto colon = host_port.rfind(':');
@@ -102,51 +155,6 @@ void finalize_and_validate(Config& config) {
                           std::to_string(bitcoin::kMaxScriptSig) +
                           "-byte coinbase scriptSig for the height push and extranonces");
 }
-
-struct NodeEntry {
-    std::string address;
-    std::optional<std::string> username;
-    std::optional<std::string> password;
-    std::optional<bool> notify;
-};
-using ScalarOrList = std::variant<std::string, std::vector<std::string>>;
-
-struct ConfigFile {
-    std::optional<std::vector<NodeEntry>> bitcoin_nodes;
-    std::optional<ScalarOrList> stratum_listen;
-    std::optional<ScalarOrList> api_listen;
-    std::optional<ScalarOrList> proxy_protocol_from;
-    std::optional<std::string> coinbase_signature;
-    std::optional<std::uint32_t> coinbase_version;
-    std::optional<double> initial_difficulty;
-    std::optional<double> minimum_difficulty;
-    std::optional<double> maximum_difficulty;
-    std::optional<bool> variable_difficulty;
-    std::optional<double> vardiff_target_shares_per_minute;
-    std::optional<int> vardiff_retarget_seconds;
-    std::optional<std::size_t> extranonce1_size;
-    std::optional<std::size_t> extranonce2_size;
-    std::optional<std::string> extranonce1_prefix;
-    std::optional<std::string> zmq_block_endpoint;
-    std::optional<bool> fast_block_notify;
-    std::optional<std::string> work_source;
-    std::optional<std::string> ipc_socket_path;
-    std::optional<double> block_poll_milliseconds;
-    std::optional<double> work_rebroadcast_seconds;
-    std::optional<std::variant<std::uint32_t, std::string>> version_rolling_mask;
-    std::optional<double> donation_percent;
-    std::optional<std::string> donation_address;
-    std::optional<int> max_clients;
-    std::optional<int> max_workers_per_address;
-    std::optional<int> drop_idle_seconds;
-    std::optional<std::size_t> max_line_bytes;
-    std::optional<int> auth_timeout_seconds;
-    std::optional<int> max_protocol_errors;
-    std::optional<std::string> stats_directory;
-    std::optional<double> status_interval_seconds;
-    std::optional<int> user_stats_retention_days;
-    std::optional<int> worker_threads;
-};
 
 std::vector<std::string> to_list(const ScalarOrList& value) {
     if (const auto* one = std::get_if<std::string>(&value))
