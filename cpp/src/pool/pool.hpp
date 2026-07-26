@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <stop_token>
 #include <string>
@@ -154,6 +155,7 @@ private:
     std::deque<std::string> recent_order_;
     uint64_t publish_counter_ = 0; // publication order stamped onto each published job
     std::map<std::string, uint64_t> blocks_by_address_; // guarded by mutex_ (not jobs_mutex_)
+    std::set<std::string> credited_blocks_;             // block hashes already counted (mutex_)
     std::string last_prevhash_;                         // guarded by mutex_ (not jobs_mutex_)
 
     std::atomic<uint64_t> job_counter_{0};
@@ -203,6 +205,7 @@ private:
     std::condition_variable_any wakeup_cv_;
     bool new_block_flag_ = false;
 
+    bool credit_block(const PendingBlock& block);
     [[nodiscard]] bool submit_block(const PendingBlock& block);
     void submit_loop(const std::stop_token& stop);
     std::mutex submit_mutex_;

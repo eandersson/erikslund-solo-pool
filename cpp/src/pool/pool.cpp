@@ -63,9 +63,9 @@ enum class SubmitOutcome { Accepted, AlreadyKnown, Inconclusive, Rejected };
 SubmitOutcome classify_submit(const std::optional<std::string>& rejection) {
     if (!rejection)
         return SubmitOutcome::Accepted;
-    if (*rejection == "duplicate" || *rejection == "duplicate-inconclusive")
+    if (*rejection == "duplicate")
         return SubmitOutcome::AlreadyKnown;
-    if (*rejection == "inconclusive")
+    if (*rejection == "inconclusive" || *rejection == "duplicate-inconclusive")
         return SubmitOutcome::Inconclusive;
     return SubmitOutcome::Rejected;
 }
@@ -959,25 +959,41 @@ void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
     submit_cv_.notify_one();
 }
 
+bool Pool::credit_block(const PendingBlock& block) {
+    {
+        const std::scoped_lock lock(mutex_);
+        if (!credited_blocks_.insert(block.hash).second)
+            return false;
+        if (!block.address.empty())
+            ++blocks_by_address_[block.address];
+    }
+    ++blocks_found_;
+    last_block_found_.store(static_cast<int64_t>(std::time(nullptr)));
+    return true;
+}
+
 bool Pool::submit_block(const PendingBlock& block) {
     try {
         const auto rejection = source_.submit_block_hex(block.hex);
         switch (classify_submit(rejection)) {
         case SubmitOutcome::Accepted:
-            ++blocks_found_;
-            last_block_found_.store(static_cast<int64_t>(std::time(nullptr))); // wall: DISPLAYED
-            if (!block.address.empty()) {
-                const std::scoped_lock lock(mutex_);
-                ++blocks_by_address_[block.address];
-            }
+            credit_block(block);
             log::info("BLOCK ACCEPTED height={} hash={} address={} worker={}", block.height,
                         block.hash, block.address, block.worker);
             return false;
         case SubmitOutcome::AlreadyKnown:
-            // Already in a chain (self-fastblock + GBT double-submit, or a retry) -- a win, not a
-            // rejection; don't log an error or re-count it.
-            log::info("Block {} already known (submitblock: {})", block.hash,
-                      rejection.value_or("duplicate"));
+            // Already in a chain -- a win, not a rejection. This can be the FIRST reply we ever see
+            // for a block we won: if the node accepted an earlier submit but its response was lost
+            // (flaky link), the pool retries and bitcoind answers "duplicate", so no ACCEPTED reply
+            // ever arrives. Credit it unless something already did -- credit_block dedups by hash,
+            // which also keeps the fastblock+GBT double-submit from counting twice.
+            if (credit_block(block))
+                log::info("BLOCK ACCEPTED (as duplicate; the accepting reply was lost) height={} "
+                          "hash={} address={} worker={}",
+                          block.height, block.hash, block.address, block.worker);
+            else
+                log::info("Block {} already known (submitblock: {})", block.hash,
+                          rejection.value_or("duplicate"));
             return false;
         case SubmitOutcome::Inconclusive:
             log::warning("Block {} submission was inconclusive; retrying in {} seconds", block.hash,

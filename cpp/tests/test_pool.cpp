@@ -61,6 +61,45 @@ protected:
     }
 };
 
+class DuplicateRpc final : public bitcoin::RpcClient {
+public:
+    DuplicateRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        if (http_status)
+            *http_status = 200;
+        return R"({"result":"duplicate","error":null,"id":1})";
+    }
+};
+
+class LostReplyThenDuplicateRpc final : public bitcoin::RpcClient {
+public:
+    LostReplyThenDuplicateRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+    int calls = 0;
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        if (++calls == 1)
+            throw RpcConnectionError("transport error: connection reset");
+        if (http_status)
+            *http_status = 200;
+        return R"({"result":"duplicate","error":null,"id":1})";
+    }
+};
+
+class DuplicateInconclusiveRpc final : public bitcoin::RpcClient {
+public:
+    DuplicateInconclusiveRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        if (http_status)
+            *http_status = 200;
+        return R"({"result":"duplicate-inconclusive","error":null,"id":1})";
+    }
+};
+
 class TestConnection final : public stratum::Connection {
 public:
     void send_line(std::string_view) override {}
@@ -402,8 +441,68 @@ const char* kAddr = "bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf";
 namespace erikslund {
 struct PoolTestPeek {
     static void prune(Pool& pool, int64_t now) { pool.prune_user_stats(now); }
+    static bool submit(Pool& pool, const std::string& hash, const std::string& address) {
+        const Pool::PendingBlock block{1, hash, "00", address, "w"};
+        return pool.submit_block(block);
+    }
 };
 } // namespace erikslund
+
+// A block the pool genuinely won must be credited even when the ACCEPTING reply never arrives.
+// On a flaky node link bitcoind accepts the submit but its response is lost; the pool retries and
+// gets "duplicate", so "duplicate" is the ONLY reply it ever sees. Counting solely on ACCEPTED
+// under-reported blocks_found/blocks_by_address permanently (they persist via pool.status).
+TEST_CASE("a block whose accepting reply was lost is still credited exactly once") {
+    Config config;
+    DuplicateRpc rpc; // every submit answers "duplicate"
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+    const std::string hash(64, 'b');
+
+    CHECK_FALSE(PoolTestPeek::submit(pool, hash, kAddr)); // terminal, no retry
+    CHECK(pool.blocks_found() == 1);                      // credited off "duplicate" alone
+    CHECK(pool.snapshot().blocks_by_address.at(kAddr) == 1);
+
+    // Re-offering the SAME block (fastblock+GBT double-submit, or a replay) must not double-count.
+    CHECK_FALSE(PoolTestPeek::submit(pool, hash, kAddr));
+    CHECK(pool.blocks_found() == 1);
+    CHECK(pool.snapshot().blocks_by_address.at(kAddr) == 1);
+
+    // A genuinely different block is credited on its own.
+    CHECK_FALSE(PoolTestPeek::submit(pool, std::string(64, 'c'), kAddr));
+    CHECK(pool.blocks_found() == 2);
+    CHECK(pool.snapshot().blocks_by_address.at(kAddr) == 2);
+}
+
+// The real flaky-link sequence: the submit reaches Core and is accepted, but the reply is lost at
+// the transport. The pool retries and only ever sees "duplicate" -- which must still credit.
+TEST_CASE("a lost reply followed by duplicate credits the block on the retry") {
+    Config config;
+    LostReplyThenDuplicateRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+    const std::string hash(64, 'd');
+
+    CHECK(PoolTestPeek::submit(pool, hash, kAddr)); // transport died -> retry requested
+    CHECK(pool.blocks_found() == 0);                // nothing credited yet
+    CHECK_FALSE(PoolTestPeek::submit(pool, hash, kAddr)); // retry sees "duplicate" -> terminal
+    CHECK(pool.blocks_found() == 1);                      // credited exactly once
+    CHECK(pool.snapshot().blocks_by_address.at(kAddr) == 1);
+}
+
+// "duplicate-inconclusive" means Core knows the block but has NOT fully validated it. It is not a
+// win yet: crediting it would count an unresolved block, and treating it as terminal would stop the
+// retry that gets the real answer.
+TEST_CASE("duplicate-inconclusive is retryable and is never credited") {
+    Config config;
+    DuplicateInconclusiveRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    CHECK(PoolTestPeek::submit(pool, std::string(64, 'e'), kAddr)); // retry requested
+    CHECK(pool.blocks_found() == 0);                                // NOT credited
+    CHECK(pool.snapshot().blocks_by_address.empty());
+}
 
 TEST_CASE("prune keeps a held worker row and evicts it once the last handle is gone") {
     namespace fs = std::filesystem;
