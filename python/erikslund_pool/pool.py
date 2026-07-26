@@ -45,6 +45,7 @@ LOG = logging.getLogger(__name__)
 # regardless of user_stats_retention_days so authorize-churn can't pin the registry cap.
 GHOST_ROW_GRACE_SECONDS = 3600.0
 LISTEN_BACKLOG = 1024
+NOTIFY_SEND_TIMEOUT_SECONDS = 2.0
 
 
 def block_subsidy(height: int, halving_interval: int) -> int:
@@ -536,7 +537,10 @@ class Pool:
                 except RuntimeError:
                     coroutine.close()
         if local_coroutines:
-            await asyncio.gather(*local_coroutines, return_exceptions=True)
+            await asyncio.gather(
+                *(asyncio.wait_for(coroutine, NOTIFY_SEND_TIMEOUT_SECONDS)
+                  for coroutine in local_coroutines),
+                return_exceptions=True)
 
     async def _broadcast(self, job: Job, clean: bool, require_new_prevhash: bool = False) -> bool:
         # Suppress a broadcast byte-identical to current_job, atomically with publishing it under
