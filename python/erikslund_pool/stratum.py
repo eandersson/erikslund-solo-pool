@@ -375,8 +375,9 @@ class ClientSession:
         # result.difficulty is the actual hash difficulty met (for the per-worker best-share).
         self.pool.note_accepted_share(self.address or "", self.worker or "", credited,
                                       result.difficulty)
-        LOG.debug("Accepted share from %s diff %s/%s", self.address,
-                  format_difficulty(result.difficulty), format_difficulty(credited))
+        if LOG.isEnabledFor(logging.DEBUG):
+            LOG.debug("Accepted share from %s peer=%s diff %s/%s", self.address, self.peer,
+                      format_difficulty(result.difficulty), format_difficulty(credited))
 
     def _record_rejected(self, reason: str):
         with self._stats_lock:
@@ -424,8 +425,24 @@ class ClientSession:
         )
         if not result.valid:
             self._record_rejected(reject_class_of(result.reason))
-            LOG.debug("Rejected share from %s (%s)", self.address, result.reason)
-            await self._error(message_id, ERR_LOW_DIFF if result.reason == "above target" else ERR_OTHER)
+            if LOG.isEnabledFor(logging.DEBUG):
+                if result.reason == "above target":
+                    current_job = self.pool._current_job_locked()
+                    LOG.debug(
+                        "Rejected low-difficulty share from %s peer=%s job=%s current_job=%s "
+                        "hash_diff=%s required=%s session=%s previous=%s pending=%s",
+                        self.address, self.peer, job.job_id,
+                        current_job.job_id if current_job is not None else "none",
+                        format_difficulty(result.difficulty), format_difficulty(accept_difficulty),
+                        format_difficulty(self.difficulty),
+                        format_difficulty(self.previous_difficulty),
+                        str(self.pending_difficulty_change).lower(),
+                    )
+                else:
+                    LOG.debug("Rejected share from %s peer=%s job=%s (%s)",
+                              self.address, self.peer, job.job_id, result.reason)
+            error = ERR_LOW_DIFF if result.reason == "above target" else ERR_OTHER
+            await self._error(message_id, error)
             return
 
         self._record_accepted(result)

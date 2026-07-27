@@ -5,6 +5,8 @@ must leave miners grinding their current job.
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from erikslund_pool.config import Settings
 from erikslund_pool.exceptions import RPCConnectionError
 from erikslund_pool.exceptions import RPCResponseError
@@ -57,8 +59,10 @@ class TestDuplicateWorkSuppression(AsyncSoloPoolTestCase):
         first = pool.current_job
         self.assertIsNotNone(first)
 
-        await pool._refresh_template(force=True)  # identical template
+        with patch("erikslund_pool.pool.LOG") as log:
+            await pool._refresh_template(force=True)  # identical template
         self.assertIs(pool.current_job, first)    # same job object kept
+        log.debug.assert_not_called()             # expected idle polling is not useful diagnostics
 
     async def test_clean_duplicate_after_fastblock_is_suppressed(self):
         # Fastblock published empty work; GBT returns that same empty work as a clean job.

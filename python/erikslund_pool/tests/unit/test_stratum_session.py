@@ -2,7 +2,9 @@
 
 import json
 import time
+from unittest.mock import patch
 
+from erikslund_pool import work
 from erikslund_pool.config import Settings
 from erikslund_pool.constants import ERR_DUPLICATE
 from erikslund_pool.exceptions import RPCConnectionError
@@ -308,6 +310,67 @@ class TestSubmitGuards(AsyncSoloPoolTestCase):
         session.subscribed = True
         await session.handle_submit(9, ["w", "j"])   # too few -> ERR_OTHER
         self.assertEqual(session.writer.by_id(9)["error"][0], 20)
+
+
+class TestShareLogging(AsyncSoloPoolTestCase):
+    async def _ready_session(self):
+        config = Settings(initial_difficulty=10_000, variable_difficulty=False)
+        job = self.make_job()
+        pool = FakePool(job, config)
+        session = ClientSession(pool, None, FakeWriter(), pool.assign_extranonce1())
+        await session.handle_subscribe(1, ["x"])
+        await session.handle_authorize(2, ["addr"])
+        return session, job
+
+    async def test_accepted_share_includes_peer(self):
+        session, job = await self._ready_session()
+        result = work.ShareResult(True, None, 12_345, False, "", b"", b"")
+        with (
+            patch.object(job, "validate_share", return_value=result),
+            patch("erikslund_pool.stratum.LOG") as log,
+        ):
+            await session.handle_submit(
+                3, ["addr", job.job_id, "00" * 8, job.ntime_hex, "00000000"])
+
+        log.debug.assert_called_once_with(
+            "Accepted share from %s peer=%s diff %s/%s",
+            "addr", "test:0", "12345", "10000",
+        )
+
+    async def test_low_difficulty_share_includes_peer_and_target_state(self):
+        session, job = await self._ready_session()
+        session.difficulty = 2_000
+        session.previous_difficulty = 10_000
+        session.pending_difficulty_change = True
+        result = work.ShareResult(False, "above target", 1_500, False, "", b"", b"")
+        with (
+            patch.object(job, "validate_share", return_value=result),
+            patch("erikslund_pool.stratum.LOG") as log,
+        ):
+            await session.handle_submit(
+                3, ["addr", job.job_id, "00" * 8, job.ntime_hex, "00000000"])
+
+        log.debug.assert_called_once_with(
+            "Rejected low-difficulty share from %s peer=%s job=%s current_job=%s "
+            "hash_diff=%s required=%s session=%s previous=%s pending=%s",
+            "addr", "test:0", job.job_id, job.job_id,
+            "1500", "2000", "2000", "10000", "true",
+        )
+
+    async def test_other_validation_rejection_includes_peer_and_job(self):
+        session, job = await self._ready_session()
+        result = work.ShareResult(False, "ntime out of range", 0, False, "", b"", b"")
+        with (
+            patch.object(job, "validate_share", return_value=result),
+            patch("erikslund_pool.stratum.LOG") as log,
+        ):
+            await session.handle_submit(
+                3, ["addr", job.job_id, "00" * 8, job.ntime_hex, "00000000"])
+
+        log.debug.assert_called_once_with(
+            "Rejected share from %s peer=%s job=%s (%s)",
+            "addr", "test:0", job.job_id, "ntime out of range",
+        )
 
 
 class TestOverWidthSubmitNotRemembered(AsyncSoloPoolTestCase):

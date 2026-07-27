@@ -602,8 +602,6 @@ class Pool:
         if await self._broadcast(job, clean):
             LOG.debug("New job %s height=%d txns=%d clean=%s",
                       job.job_id, job.height, job.txn_count, clean)
-        else:
-            LOG.debug("Work unchanged; not rebroadcasting a duplicate (job %s)", job.job_id)
 
     async def template_loop(self):
         while True:
