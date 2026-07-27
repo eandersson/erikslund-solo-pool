@@ -235,8 +235,6 @@ void Pool::build_and_broadcast(bitcoin::BlockTemplate block_template, bool clean
     if (outcome == PublishOutcome::Published)
         log::debug("New job {} height={} txns={} clean={}", job->job_id(), height, txn_count,
                    clean);
-    else
-        log::debug("Work unchanged; not rebroadcasting a duplicate (job {})", job->job_id());
 }
 
 bool fastblock_eligible(bool has_template, bool fastblock_pending, const std::string& notified_tip,

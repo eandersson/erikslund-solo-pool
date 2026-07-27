@@ -478,8 +478,22 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
     if (!result) {
         pool_.note_rejected_share(worker_accounting, address, worker,
                                   reject_class_of(result.error().reason));
-        if (log::level() <= log::Level::Debug)
-            log::debug("Rejected share from {} ({})", address, reject_reason(result.error().reason));
+        if (log::level() <= log::Level::Debug) {
+            if (result.error().reason == ShareReject::AboveTarget) {
+                const auto current_job = pool_.current_job();
+                log::debug(
+                    "Rejected low-difficulty share from {} job={} current_job={} hash_diff={} "
+                    "required={} session={} previous={} pending={}",
+                    address, job->job_id(), current_job ? current_job->job_id() : "none",
+                    util::format_difficulty(result.error().difficulty),
+                    util::format_difficulty(accept_difficulty),
+                    util::format_difficulty(snap_difficulty),
+                    util::format_difficulty(snap_previous), snap_pending);
+            } else {
+                log::debug("Rejected share from {} job={} ({})", address, job->job_id(),
+                           reject_reason(result.error().reason));
+            }
+        }
         const std::scoped_lock lock(mutex_);
         ++shares_rejected_;
         send_error(id,
