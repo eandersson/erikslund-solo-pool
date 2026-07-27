@@ -482,16 +482,17 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
             if (result.error().reason == ShareReject::AboveTarget) {
                 const auto current_job = pool_.current_job();
                 log::debug(
-                    "Rejected low-difficulty share from {} job={} current_job={} hash_diff={} "
-                    "required={} session={} previous={} pending={}",
-                    address, job->job_id(), current_job ? current_job->job_id() : "none",
+                    "Rejected low-difficulty share from {} peer={} job={} current_job={} "
+                    "hash_diff={} required={} session={} previous={} pending={}",
+                    address, connection_.peer(), job->job_id(),
+                    current_job ? current_job->job_id() : "none",
                     util::format_difficulty(result.error().difficulty),
                     util::format_difficulty(accept_difficulty),
                     util::format_difficulty(snap_difficulty),
                     util::format_difficulty(snap_previous), snap_pending);
             } else {
-                log::debug("Rejected share from {} job={} ({})", address, job->job_id(),
-                           reject_reason(result.error().reason));
+                log::debug("Rejected share from {} peer={} job={} ({})", address,
+                           connection_.peer(), job->job_id(), reject_reason(result.error().reason));
             }
         }
         const std::scoped_lock lock(mutex_);
@@ -514,8 +515,9 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         send_result(id, true);
     }
     if (log::level() <= log::Level::Debug)
-        log::debug("Accepted share from {} diff {}/{}", address,
-                   util::format_difficulty(result->difficulty), util::format_difficulty(credited));
+        log::debug("Accepted share from {} peer={} diff {}/{}", address, connection_.peer(),
+                   util::format_difficulty(result->difficulty),
+                   util::format_difficulty(credited));
 
     if (result->is_block)
         pool_.on_block_found(*this, *job, *result);
