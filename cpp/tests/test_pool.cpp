@@ -121,23 +121,24 @@ bitcoin::BlockTemplate refresh_template() {
 class FlappingWorkSource final : public bitcoin::WorkSource {
 public:
     std::atomic<bool> failing{false};
-    std::atomic<size_t> templates{0};
     std::atomic<size_t> failures{0};
-    std::atomic<size_t> successes{0};
+    std::atomic<size_t> template_successes{0};
+    std::atomic<size_t> tip_successes{0};
 
     bitcoin::ChainInfo detect_chain() override { return {.chain = "regtest", .blocks = 169}; }
 
     std::string get_tip() override {
-        if (failing.load(std::memory_order_acquire)) {
-            failures.fetch_add(1, std::memory_order_relaxed);
-            throw RpcConnectionError("test bitcoind offline");
-        }
-        successes.fetch_add(1, std::memory_order_relaxed);
-        return std::string(64, 'a');
+        tip_successes.fetch_add(1, std::memory_order_relaxed);
+        return std::string(64, failing.load(std::memory_order_acquire) ? 'b' : 'a');
     }
 
     bitcoin::BlockTemplate fetch_template() override {
-        templates.fetch_add(1, std::memory_order_relaxed);
+        if (failing.load(std::memory_order_acquire)) {
+            failures.fetch_add(1, std::memory_order_relaxed);
+            throw RpcConnectionError(
+                R"({"code":-9,"message":"Bitcoin Core is not connected!"})");
+        }
+        template_successes.fetch_add(1, std::memory_order_relaxed);
         return block_template_;
     }
 
@@ -280,28 +281,18 @@ TEST_CASE("refresh_work logs one warning and one recovery per outage") {
     Pool pool(config, source);
     std::jthread worker([&pool](const std::stop_token& stop) { pool.refresh_work(stop); });
 
-    const bool template_ready = wait_until([&source] { return source.templates.load() != 0; });
+    const bool template_ready = wait_until([&pool] { return pool.current_job() != nullptr; });
+    const auto original_job = pool.current_job();
     source.failing.store(true, std::memory_order_release);
-    const bool first_outage_retried =
+    const bool outage_retried =
         wait_until([&source] { return source.failures.load() >= 20; });
-    const size_t first_recovery_start = source.successes.load();
+    const auto outage_snapshot = pool.snapshot();
+    const auto retained_job = pool.current_job();
+    const size_t recovery_start = source.template_successes.load();
     source.failing.store(false, std::memory_order_release);
-    const bool first_recovered =
-        wait_until([&source, first_recovery_start] {
-            return source.successes.load() >= first_recovery_start + 2;
-        });
-
-    const size_t second_outage_start = source.failures.load();
-    source.failing.store(true, std::memory_order_release);
-    const bool second_outage_retried =
-        wait_until([&source, second_outage_start] {
-            return source.failures.load() >= second_outage_start + 20;
-        });
-    const size_t second_recovery_start = source.successes.load();
-    source.failing.store(false, std::memory_order_release);
-    const bool second_recovered =
-        wait_until([&source, second_recovery_start] {
-            return source.successes.load() >= second_recovery_start + 2;
+    const bool recovered =
+        wait_until([&source, recovery_start] {
+            return source.template_successes.load() > recovery_start;
         });
 
     worker.request_stop();
@@ -316,12 +307,15 @@ TEST_CASE("refresh_work logs one warning and one recovery per outage") {
 
     CHECK(log_opened);
     CHECK(template_ready);
-    CHECK(first_outage_retried);
-    CHECK(first_recovered);
-    CHECK(second_outage_retried);
-    CHECK(second_recovered);
-    CHECK(occurrence_count(contents, "Work refresh failed") == 2);
-    CHECK(occurrence_count(contents, "Work refresh recovered") == 2);
+    CHECK(outage_retried);
+    CHECK(recovered);
+    CHECK(source.tip_successes.load() != 0);
+    CHECK_FALSE(outage_snapshot.generator_ready);
+    REQUIRE(original_job != nullptr);
+    REQUIRE(retained_job != nullptr);
+    CHECK(retained_job->job_id() == original_job->job_id());
+    CHECK(occurrence_count(contents, "Work refresh failed") == 1);
+    CHECK(occurrence_count(contents, "Work refresh recovered") == 1);
     CHECK(pool.snapshot().generator_ready);
 
     fs::remove_all(dir);

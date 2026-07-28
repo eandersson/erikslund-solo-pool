@@ -10,6 +10,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -17,6 +18,7 @@
 #include "bitcoin/rpc_client.hpp"
 #include "bitcoin/work_source_ipc.hpp"
 #include "bitcoin/work_source_rpc.hpp"
+#include "core/errors.hpp"
 #include "util/block_header.hpp"
 #include "util/hex.hpp"
 
@@ -24,6 +26,12 @@ using namespace erikslund;
 using namespace erikslund::bitcoin;
 
 namespace {
+
+std::string rpc_template_body(std::string_view previous_block_hash) {
+    return std::string(R"({"result":{"height":171,"version":536870912,"curtime":1700000000,)") +
+           R"("bits":"207fffff","coinbasevalue":5000000000,"previousblockhash":")" +
+           std::string(previous_block_hash) + R"(","transactions":[]},"error":null,"id":1})";
+}
 
 class FakeMiningClient final : public MiningIpcClient {
 public:
@@ -77,11 +85,47 @@ protected:
             return R"({"result":null,"error":null,"id":1})";
         if (payload.find("getblocktemplate") != std::string::npos) {
             ++template_requests;
-            return std::string(
-                       R"({"result":{"height":171,"version":536870912,"curtime":1700000000,)")
-                   + R"("bits":"207fffff","coinbasevalue":5000000000,"previousblockhash":")"
-                   + std::string(64, 'a') + R"(","transactions":[]},"error":null,"id":1})";
+            return rpc_template_body(std::string(64, 'a'));
         }
+        throw std::runtime_error("unexpected RPC request");
+    }
+};
+
+class FailbackRpc final : public RpcClient {
+public:
+    FailbackRpc()
+        : RpcClient(std::vector<RpcEndpoint>{{"http://primary", "user", "password"},
+                                             {"http://backup", "user", "password"}},
+                    1) {}
+
+    bool primary_available = false;
+    bool primary_template_available = true;
+    const std::string tip = std::string(64, 'a');
+    int primary_template_requests = 0;
+    int backup_template_requests = 0;
+
+protected:
+    std::string post_one(const Resolved& endpoint, const std::string& payload, long,
+                         long* http_status) override {
+        if (http_status)
+            *http_status = 200;
+        if (endpoint.url == "http://primary" && !primary_available)
+            throw RpcConnectionError("primary unavailable");
+        if (payload.find("getbestblockhash") != std::string::npos)
+            return R"({"result":")" + tip + R"(","error":null,"id":1})";
+        if (payload.find("getblocktemplate") != std::string::npos) {
+            if (endpoint.url == "http://primary") {
+                ++primary_template_requests;
+                if (!primary_template_available)
+                    throw RpcConnectionError("primary cannot serve a template");
+            } else {
+                ++backup_template_requests;
+            }
+            return rpc_template_body(tip);
+        }
+        if (payload.find("getblockheader") != std::string::npos)
+            return R"({"result":{"height":170,"confirmations":1,"bits":"207fffff",)"
+                   R"("mediantime":1700000000},"error":null,"id":1})";
         throw std::runtime_error("unexpected RPC request");
     }
 };
@@ -175,6 +219,63 @@ TEST_CASE("IpcWorkSource uses IPC only for templates") {
     CHECK(header.confirmations == 1);
     CHECK(header.bits_hex == "207fffff");
     CHECK_FALSE(sources.source.submit_block_hex("00").has_value());
+}
+
+TEST_CASE("IpcWorkSource returns a valid failback template then resumes IPC") {
+    FakeMiningClient ipc;
+    FailbackRpc rpc;
+    RpcWorkSource rpc_source{rpc};
+    IpcWorkSource source{ipc, rpc_source, "ipc:///tmp/mining.sock"};
+    ipc.block_template.height = 171;
+    ipc.block_template.previousblockhash = rpc.tip;
+
+    CHECK(source.fetch_template().previousblockhash == rpc.tip);
+    CHECK(ipc.creates == 1);
+    CHECK(source.active_index() == 0);
+    REQUIRE(rpc.active_index() == 1);
+
+    rpc.primary_available = true;
+    source.maybe_failback(rpc.tip);
+    CHECK(rpc.active_index() == 1);
+
+    CHECK(source.fetch_template().previousblockhash == rpc.tip);
+    CHECK(rpc.active_index() == 0);
+    CHECK(ipc.creates == 1);
+    CHECK(rpc.primary_template_requests == 1);
+    CHECK(rpc.backup_template_requests == 0);
+    CHECK(source.active_index() == 0);
+
+    CHECK(source.fetch_template().previousblockhash == rpc.tip);
+    CHECK(ipc.creates == 2);
+    CHECK(source.active_index() == 0);
+}
+
+TEST_CASE("a failed RPC failback candidate continues IPC without fetching from the backup") {
+    FakeMiningClient ipc;
+    FailbackRpc rpc;
+    RpcWorkSource rpc_source{rpc};
+    IpcWorkSource source{ipc, rpc_source, "ipc:///tmp/mining.sock"};
+    ipc.block_template.height = 171;
+    ipc.block_template.previousblockhash = rpc.tip;
+
+    CHECK(source.fetch_template().previousblockhash == rpc.tip);
+    REQUIRE(rpc.active_index() == 1);
+    REQUIRE(ipc.creates == 1);
+
+    rpc.primary_available = true;
+    rpc.primary_template_available = false;
+    source.maybe_failback(rpc.tip);
+
+    CHECK(source.fetch_template().previousblockhash == rpc.tip);
+    CHECK(rpc.active_index() == 1);
+    CHECK(ipc.creates == 2);
+    CHECK(rpc.primary_template_requests == 1);
+    CHECK(rpc.backup_template_requests == 0);
+    CHECK(source.active_index() == 0);
+
+    CHECK(source.fetch_template().previousblockhash == rpc.tip);
+    CHECK(ipc.creates == 3);
+    CHECK(rpc.primary_template_requests == 1);
 }
 
 // An IPC template that does not build on the RPC tip is rejected for THAT cycle only. A block

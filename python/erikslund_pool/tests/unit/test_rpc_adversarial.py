@@ -177,6 +177,7 @@ class TestResponseErrorParsing(unittest.TestCase):
             rpc.call("nope")
         self.assertEqual(ctx.exception.code, -32601)
         self.assertEqual(ctx.exception.message, "Method not found")
+        self.assertIn("-32601", str(ctx.exception))
 
     def test_non_dict_error_still_raises_cleanly(self):
         rpc = BitcoindRPC("http://a:1", "u", "p")

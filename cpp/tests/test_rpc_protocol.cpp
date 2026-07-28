@@ -98,6 +98,18 @@ TEST_CASE("a present, non-null error becomes RpcError carrying the node's messag
         const std::string what = e.what();
         CHECK(what.find("TX decode failed") != std::string::npos);
         CHECK(what.find("-22") != std::string::npos);
+        CHECK(e.code() == -22);
+    }
+}
+
+TEST_CASE("RpcError leaves the code absent when the node did not provide one") {
+    BodyRpc rpc;
+    rpc.body = R"({"result":null,"error":{"message":"failure"},"id":1})";
+    try {
+        rpc.call("test");
+        FAIL("expected RpcError");
+    } catch (const RpcError& error) {
+        CHECK_FALSE(error.code().has_value());
     }
 }
 

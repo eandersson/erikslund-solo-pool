@@ -1,9 +1,10 @@
 #pragma once
 // Synchronous bitcoind JSON-RPC over libcurl. One persistent easy handle PER THREAD, reused across
 // calls for HTTP keep-alive + DNS caching (an easy handle is not shared between threads).
-// Failover: a connection failure advances + sticks; an RPC error (node answered) does not.
+// Failover skips unreachable or temporarily unavailable nodes and sticks after a valid response.
 #include <atomic>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -39,6 +40,7 @@ public:
     size_t active_index() const { return current_.load(); }
 
     void maybe_failback(const std::string& expected_tip);
+    std::optional<BlockTemplate> try_fetch_failback_template();
     static constexpr double kFailbackProbeSeconds = 60.0;
 
     virtual ~RpcClient() = default;
@@ -55,6 +57,8 @@ protected:
 
 private:
     glz::generic call_payload(const std::string& payload, long timeout);
+    std::string make_getblocktemplate_payload();
+    BlockTemplate fetch_template_from(size_t index, const std::string& payload);
 
     std::vector<Resolved> endpoints_;
     std::atomic<size_t> current_{0};
@@ -63,8 +67,10 @@ private:
     long poll_timeout_;
     std::atomic<int> next_id_{0};
     std::atomic<double> last_failback_probe_{-std::numeric_limits<double>::infinity()};
+    mutable std::mutex failback_mutex_;
+    std::optional<std::string> failback_expected_tip_;
 
-    // getblocktemplate_parsed() only (single caller thread); response buffer reused across polls.
+    // Template fetches use one caller thread, so the response buffer can be reused across polls.
     std::string gbt_body_;
 };
 

@@ -25,7 +25,6 @@ from erikslund_pool.constants import DIFF1_TARGET
 from erikslund_pool.constants import MAX_ADDRESS_CACHE
 from erikslund_pool.constants import MAX_RECENT_JOBS
 from erikslund_pool.constants import REJECT_REASONS
-from erikslund_pool.exceptions import RPCConnectionError
 from erikslund_pool.exceptions import RPCError
 from erikslund_pool.exceptions import WorkError
 from erikslund_pool.hashrate import HASHRATE_WINDOWS
@@ -122,6 +121,7 @@ class Pool:
         self._baseline_diff = 0.0     # accepted diff recovered from a prior pool.status
         self.chain_info: dict = {}
         self.generator_ready = False
+        self._work_refresh_failing = False
         self.connector_ready = False
         self._empty_commitment = "6a24aa21a9ed" + dsha256(b"\x00" * 64).hex()
 
@@ -561,37 +561,45 @@ class Pool:
         await self._fan_out(lambda client: client.send_notify(job, clean))
         return True
 
+    def _report_work_failure(self, error: Exception) -> None:
+        self.generator_ready = False
+        if self._work_refresh_failing:
+            return
+        self._work_refresh_failing = True
+        LOG.warning("Work refresh failed: %s", error)
+
+    def _report_work_recovery(self) -> None:
+        self.generator_ready = True
+        if not self._work_refresh_failing:
+            return
+        self._work_refresh_failing = False
+        LOG.info("Work refresh recovered")
+
     async def _refresh_template(self, force: bool = False):
         try:
             template = await asyncio.to_thread(self.source.get_template,
                                                self._validate_template)
-        except RPCConnectionError as e:
-            self.generator_ready = False  # every endpoint down: /health degrades, re-latches on next RPC
-            LOG.error("getblocktemplate failed: %s", e)
-            return
         except RPCError as e:
-            LOG.error("getblocktemplate failed: %s", e)
+            self._report_work_failure(e)
             return
-        self.generator_ready = True
         await self._resolve_donation()
-        # Malformed template or un-assemblable work is skipped like an RPC failure, never unwinds the loop.
         try:
             prevhash = template["previousblockhash"]
             new_tip = prevhash != self._last_prevhash
-            if not (new_tip or force):
-                return
-            # Height monotonicity: a template below the current job's height comes from a behind
-            # node (e.g. lagging failover); broadcasting it would yank miners onto an orphan parent.
             job_now = self.current_job
             if job_now is not None and template["height"] < job_now.height:
+                self._report_work_recovery()
                 LOG.warning("Ignoring a GBT at height %d below the current job's height %d "
                             "(lagging bitcoind?); keeping the current work",
                             template["height"], job_now.height)
                 return
+            if not (new_tip or force):
+                self._report_work_recovery()
+                return
             clean = new_tip
             job = self._make_job(template, clean=clean)
         except (KeyError, ValueError, TypeError, WorkError) as e:
-            LOG.error("getblocktemplate produced unusable work: %s", e)
+            self._report_work_failure(e)
             return
         self._last_prevhash = prevhash
         self._last_template_time = time.monotonic()   # metric: a real template was fetched
@@ -602,6 +610,7 @@ class Pool:
         if await self._broadcast(job, clean):
             LOG.debug("New job %s height=%d txns=%d clean=%s",
                       job.job_id, job.height, job.txn_count, clean)
+        self._report_work_recovery()
 
     async def template_loop(self):
         while True:
@@ -620,17 +629,13 @@ class Pool:
                 force = (job is None
                          or time.monotonic() - self._last_broadcast_time
                          >= self.config.work_rebroadcast_seconds)
-                fetch = force
+                fetch = force or self._work_refresh_failing
                 if not fetch:
                     try:
                         tip = await asyncio.to_thread(self.source.get_tip)
-                    except RPCConnectionError as e:
-                        self.generator_ready = False  # all endpoints down: /health degrades
-                        LOG.error("getbestblockhash failed: %s", e)
                     except RPCError as e:
-                        LOG.error("getbestblockhash failed: %s", e)
+                        self._report_work_failure(e)
                     else:
-                        self.generator_ready = True
                         # Fetch when the tip moved, or when the current job isn't mining on the
                         # probed tip (self-heal: work/tip divergence corrected within one poll).
                         fetch = (tip != self._last_prevhash

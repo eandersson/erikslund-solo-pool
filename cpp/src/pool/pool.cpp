@@ -364,7 +364,7 @@ void Pool::refresh_work(const std::stop_token& stop) {
                 stats::steady_seconds() - last_broadcast_steady_.load() >=
                 config_.work_rebroadcast_seconds;
             const auto job = current_job();
-            bool fetch = refresh_due || job == nullptr;
+            bool fetch = refresh_failing || refresh_due || job == nullptr;
             if (!fetch) {
                 const std::string tip = source_.get_tip();
                 set_generator_ready(true);
@@ -377,22 +377,19 @@ void Pool::refresh_work(const std::stop_token& stop) {
             }
             if (fetch) {
                 auto block_template = source_.fetch_template();
-                set_generator_ready(true);
                 bool new_block = false;
                 {
                     const std::scoped_lock lock(mutex_);
                     new_block = block_template.previousblockhash != last_prevhash_;
                 }
                 build_and_broadcast(std::move(block_template), new_block);
+                set_generator_ready(true);
+                if (std::exchange(refresh_failing, false))
+                    log::info("Work refresh recovered");
             }
-            if (std::exchange(refresh_failing, false))
-                log::info("Work refresh recovered");
-        } catch (const RpcConnectionError& e) {
-            // Every endpoint unreachable: un-latch readiness so /health reports degraded (it
-            // re-latches on the next successful RPC).
-            set_generator_ready(false);
-            report_failure(e);
         } catch (const std::exception& e) {
+            // A reachable node may still be unable to serve mining work.
+            set_generator_ready(false);
             report_failure(e);
         }
         // Wait poll_interval, but wake immediately on a ZMQ block notification.

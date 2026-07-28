@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <exception>
+#include <utility>
 
 #include "core/errors.hpp"
 #include "core/logging.hpp"
@@ -11,6 +12,8 @@ namespace erikslund::bitcoin {
 BlockTemplate IpcWorkSource::fetch_template() {
     if (stopping_.load(std::memory_order_acquire))
         throw RpcConnectionError("IPC work source is stopping");
+    if (auto failback_template = rpc_.try_fetch_failback_template())
+        return std::move(*failback_template);
     if (!client_.available()) {
         ipc_active_.store(false, std::memory_order_relaxed);
         return rpc_.fetch_template();

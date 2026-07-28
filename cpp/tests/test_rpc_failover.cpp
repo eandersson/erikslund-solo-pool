@@ -2,12 +2,13 @@
 // Invariants pinned:
 //   * bitcoin_nodes[0] is primary; the rest are failover, tried in order.
 //   * a connection failure advances to the next endpoint and STICKS there.
-//   * an RPC error (the node answered) is final -- it never fails over.
+//   * RPC errors are final except -9/-10/-28, which mean the endpoint is temporarily unavailable.
 //   * all endpoints down -> RpcConnectionError after trying each once.
 #include <doctest/doctest.h>
 
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glaze/glaze.hpp>
@@ -21,17 +22,26 @@ using namespace erikslund::bitcoin;
 
 namespace {
 
+const std::string kTip(64, 'a');
+
+std::string gbt_body(std::string_view previous_block_hash) {
+    return std::string(R"({"result":{"height":170,"version":536870912,"curtime":1700000000,)") +
+           R"("bits":"1d00ffff","coinbasevalue":5000000000,"previousblockhash":")" +
+           std::string(previous_block_hash) + R"(","transactions":[]},"error":null,"id":1})";
+}
+
 // Drives call() without a network: each endpoint URL maps to a behaviour, and
 // every attempt is counted so tests can assert exactly which nodes were tried.
 class ScriptedRpc : public RpcClient {
 public:
-    enum class Mode { Ok, Down, RpcErr };
+    enum class Mode { Ok, Down, WorkUnavailable, RpcErr };
     explicit ScriptedRpc(const std::vector<RpcEndpoint>& endpoints)
         : RpcClient(endpoints, /*timeout_seconds=*/1) {}
 
     std::map<std::string, Mode> mode; // url -> behaviour
     std::map<std::string, int> hits;  // url -> times call_one ran
     glz::generic ok_result;           // when non-null, Mode::Ok returns this (e.g. a tip hash)
+    std::map<std::string, std::string> gbt_tips;
 
 protected:
     glz::generic call_one(const Resolved& endpoint, const std::string& /*payload*/,
@@ -40,8 +50,10 @@ protected:
         switch (mode.at(endpoint.url)) {
         case Mode::Down:
             throw RpcConnectionError("down: " + endpoint.url);
+        case Mode::WorkUnavailable:
+            throw RpcError("Bitcoin Core is not connected", -9);
         case Mode::RpcErr:
-            throw RpcError("node rejected the call");
+            throw RpcError("node rejected the call", -22);
         case Mode::Ok:
             break;
         }
@@ -50,6 +62,23 @@ protected:
         glz::generic served;
         served["served_by"] = endpoint.url;
         return served;
+    }
+
+    std::string post_one(const Resolved& endpoint, const std::string&, long,
+                         long*) override {
+        ++hits[endpoint.url];
+        switch (mode.at(endpoint.url)) {
+        case Mode::Down:
+            throw RpcConnectionError("down: " + endpoint.url);
+        case Mode::WorkUnavailable:
+            return R"({"result":null,"error":{"code":-9,"message":"Bitcoin Core is not connected!"},"id":1})";
+        case Mode::RpcErr:
+            return R"({"result":null,"error":{"code":-22,"message":"invalid request"},"id":1})";
+        case Mode::Ok:
+            const auto tip = gbt_tips.find(endpoint.url);
+            return gbt_body(tip == gbt_tips.end() ? kTip : tip->second);
+        }
+        return {};
     }
 };
 
@@ -104,6 +133,17 @@ TEST_CASE("an RPC error (node answered) is final -- it does NOT fail over") {
     CHECK(rpc.hits.count("http://backup1") == 0); // a live node's answer is authoritative
 }
 
+TEST_CASE("a work-unavailable RPC error fails over during startup calls") {
+    ScriptedRpc rpc(kEndpoints);
+    rpc.mode = {{"http://primary", ScriptedRpc::Mode::WorkUnavailable},
+                {"http://backup1", ScriptedRpc::Mode::Ok},
+                {"http://backup2", ScriptedRpc::Mode::Ok}};
+    CHECK(rpc.call("getblockchaininfo")["served_by"].get<std::string>() == "http://backup1");
+    CHECK(rpc.active_index() == 1);
+    CHECK(rpc.hits["http://primary"] == 1);
+    CHECK(rpc.hits["http://backup1"] == 1);
+}
+
 TEST_CASE("all endpoints down raises RpcConnectionError after trying each exactly once") {
     ScriptedRpc rpc(kEndpoints);
     rpc.mode = {{"http://primary", ScriptedRpc::Mode::Down},
@@ -144,8 +184,7 @@ TEST_CASE("endpoint_urls lists nodes in order; active_index tracks the current e
     CHECK(rpc.active_index() == 1); // advanced + stuck on backup1
 }
 
-TEST_CASE("maybe_failback returns to a recovered, CURRENT primary only") {
-    const std::string kTip(64, 'a'); // the tip the pool currently mines on
+TEST_CASE("maybe_failback schedules a primary GBT only after its tip catches up") {
     ScriptedRpc rpc(kEndpoints);
     rpc.mode = {{"http://primary", ScriptedRpc::Mode::Down},
                 {"http://backup1", ScriptedRpc::Mode::Ok},
@@ -161,26 +200,52 @@ TEST_CASE("maybe_failback returns to a recovered, CURRENT primary only") {
         rpc.maybe_failback(kTip);
         CHECK(rpc.hits["http://primary"] == 2);
     }
-    SUBCASE("primary recovered AND on the pool's tip -> fail back") {
+    SUBCASE("a matching tip and valid template fail back on the next GBT") {
         rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
         rpc.ok_result = kTip;
         rpc.maybe_failback(kTip);
-        CHECK(rpc.active_index() == 0);
+        CHECK(rpc.active_index() == 1);
         rpc.ok_result = glz::generic{};
+        CHECK(rpc.getblocktemplate_parsed().previousblockhash == kTip);
+        CHECK(rpc.active_index() == 0);
         CHECK(rpc.call("getblockcount")["served_by"].get<std::string>() =="http://primary");
     }
-    SUBCASE("primary answering with an RPC error (e.g. -28 warming up) -> do NOT fail back") {
-        // A warming-up/reindexing primary answers EVERY call with an error for hours;
-        // failing back would capture the pool (call() never rotates on RpcError): no
-        // work, and a solved block submitted only to the warming node. Stay put.
+    SUBCASE("an RPC error during the cheap probe does not schedule failback") {
         rpc.mode["http://primary"] = ScriptedRpc::Mode::RpcErr;
         rpc.maybe_failback(kTip);
         CHECK(rpc.active_index() == 1);
     }
-    SUBCASE("primary reachable but on a DIFFERENT (behind/forked) tip -> do NOT fail back") {
+    SUBCASE("a different tip does not schedule failback") {
         rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
-        rpc.ok_result = std::string(64, 'b'); // stale tip: still catching up
+        rpc.ok_result = std::string(64, 'b');
         rpc.maybe_failback(kTip);
+        CHECK(rpc.active_index() == 1);
+    }
+    SUBCASE("a candidate GBT error keeps serving from the active backup") {
+        rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
+        rpc.ok_result = kTip;
+        rpc.maybe_failback(kTip);
+        rpc.mode["http://primary"] = ScriptedRpc::Mode::RpcErr;
+        rpc.ok_result = glz::generic{};
+        CHECK(rpc.getblocktemplate_parsed().previousblockhash == kTip);
+        CHECK(rpc.active_index() == 1);
+    }
+    SUBCASE("a candidate unavailable response keeps serving from the active backup") {
+        rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
+        rpc.ok_result = kTip;
+        rpc.maybe_failback(kTip);
+        rpc.mode["http://primary"] = ScriptedRpc::Mode::WorkUnavailable;
+        rpc.ok_result = glz::generic{};
+        CHECK(rpc.getblocktemplate_parsed().previousblockhash == kTip);
+        CHECK(rpc.active_index() == 1);
+    }
+    SUBCASE("a candidate template for a different tip keeps the active backup") {
+        rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
+        rpc.ok_result = kTip;
+        rpc.maybe_failback(kTip);
+        rpc.gbt_tips["http://primary"] = std::string(64, 'b');
+        rpc.ok_result = glz::generic{};
+        CHECK(rpc.getblocktemplate_parsed().previousblockhash == kTip);
         CHECK(rpc.active_index() == 1);
     }
 }
@@ -200,29 +265,6 @@ TEST_CASE("maybe_failback is a no-op while already on the primary or with no tip
     CHECK(rpc.hits["http://primary"] == 1); // only the original failed call
 }
 
-TEST_CASE("a concurrent fail-back is not reverted by an in-flight call's success publish") {
-    // call() snapshots `start` and publishes via compare-exchange: if maybe_failback moved
-    // current_ to the primary while a backup call was in flight, the completing call must
-    // NOT re-stick the backup (its index equals its start, so it publishes nothing).
-    const std::string kTip(64, 'a');
-    ScriptedRpc rpc(kEndpoints);
-    rpc.mode = {{"http://primary", ScriptedRpc::Mode::Down},
-                {"http://backup1", ScriptedRpc::Mode::Ok},
-                {"http://backup2", ScriptedRpc::Mode::Ok}};
-    rpc.call("getblockcount"); // current_ -> backup1
-    REQUIRE(rpc.active_index() == 1);
-    rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
-    rpc.ok_result = kTip;
-    rpc.maybe_failback(kTip); // back on the primary
-    REQUIRE(rpc.active_index() == 0);
-    rpc.ok_result = nullptr;
-    // A call that (conceptually) started before the fail-back, served by the backup:
-    // simulate by a direct success on backup1 -- index == its own start would publish
-    // nothing; here a FRESH call simply starts on the primary and stays there.
-    CHECK(rpc.call("getblockcount")["served_by"].get<std::string>() =="http://primary");
-    CHECK(rpc.active_index() == 0); // fail-back held
-}
-
 TEST_CASE("from a backup, a fresh failure rotates and wraps to a recovered primary") {
     ScriptedRpc rpc(kEndpoints);
     rpc.mode = {{"http://primary", ScriptedRpc::Mode::Down},
@@ -236,24 +278,17 @@ TEST_CASE("from a backup, a fresh failure rotates and wraps to a recovered prima
     CHECK(rpc.hits["http://backup2"] == 1); // tried once on the wrap-around
 }
 
-// The raw GBT path (getblocktemplate_parsed) has its own failover loop over post_one: rotation on
-// a down endpoint, no rotation on an RPC error, body parsed straight into a BlockTemplate.
+// The raw GBT path parses directly into a BlockTemplate before publishing a new active endpoint.
 namespace {
 
 class ScriptedRawRpc : public RpcClient {
 public:
-    enum class Mode { Ok, Down, RpcErr, Garbage };
+    enum class Mode { Ok, Down, NotConnected, InitialDownload, Warmup, RpcErr, Garbage };
     explicit ScriptedRawRpc(const std::vector<RpcEndpoint>& endpoints)
         : RpcClient(endpoints, /*timeout_seconds=*/1) {}
 
     std::map<std::string, Mode> mode;
     std::map<std::string, int> hits;
-
-    static std::string gbt_body() {
-        return std::string(R"({"result":{"height":170,"version":536870912,"curtime":1700000000,)") +
-               R"("bits":"1d00ffff","coinbasevalue":5000000000,"previousblockhash":")" +
-               std::string(64, 'a') + R"(","transactions":[]},"error":null,"id":1})";
-    }
 
 protected:
     std::string post_one(const Resolved& endpoint, const std::string& /*payload*/, long /*timeout*/,
@@ -262,14 +297,20 @@ protected:
         switch (mode.at(endpoint.url)) {
         case Mode::Down:
             throw RpcConnectionError("down: " + endpoint.url);
+        case Mode::NotConnected:
+            return R"({"result":null,"error":{"code":-9,"message":"Bitcoin Core is not connected!"},"id":1})";
+        case Mode::InitialDownload:
+            return R"({"result":null,"error":{"code":-10,"message":"initial download"},"id":1})";
+        case Mode::Warmup:
+            return R"({"result":null,"error":{"code":-28,"message":"warming up"},"id":1})";
         case Mode::RpcErr:
-            return R"({"result":null,"error":{"code":-10,"message":"warming up"},"id":1})";
+            return R"({"result":null,"error":{"code":-22,"message":"invalid request"},"id":1})";
         case Mode::Garbage:
             return "not json at all";
         case Mode::Ok:
             break;
         }
-        return gbt_body();
+        return gbt_body(kTip);
     }
 };
 
@@ -296,7 +337,27 @@ TEST_CASE("getblocktemplate_parsed treats an unparseable body like a down endpoi
     CHECK(rpc.active_index() == 1);
 }
 
-TEST_CASE("getblocktemplate_parsed does NOT rotate on an RPC error (the node answered)") {
+TEST_CASE("getblocktemplate_parsed fails over when Core is not connected") {
+    ScriptedRawRpc rpc(kEndpoints);
+    rpc.mode = {{"http://primary", ScriptedRawRpc::Mode::NotConnected},
+                {"http://backup1", ScriptedRawRpc::Mode::Ok},
+                {"http://backup2", ScriptedRawRpc::Mode::Ok}};
+    CHECK(rpc.getblocktemplate_parsed().height == 170);
+    CHECK(rpc.active_index() == 1);
+    CHECK(rpc.hits["http://primary"] == 1);
+    CHECK(rpc.hits["http://backup1"] == 1);
+}
+
+TEST_CASE("getblocktemplate_parsed skips every temporary Core availability error") {
+    ScriptedRawRpc rpc(kEndpoints);
+    rpc.mode = {{"http://primary", ScriptedRawRpc::Mode::InitialDownload},
+                {"http://backup1", ScriptedRawRpc::Mode::Warmup},
+                {"http://backup2", ScriptedRawRpc::Mode::Ok}};
+    CHECK(rpc.getblocktemplate_parsed().height == 170);
+    CHECK(rpc.active_index() == 2);
+}
+
+TEST_CASE("getblocktemplate_parsed keeps arbitrary RPC errors terminal") {
     ScriptedRawRpc rpc(kEndpoints);
     rpc.mode = {{"http://primary", ScriptedRawRpc::Mode::RpcErr},
                 {"http://backup1", ScriptedRawRpc::Mode::Ok},
@@ -306,29 +367,20 @@ TEST_CASE("getblocktemplate_parsed does NOT rotate on an RPC error (the node ans
     CHECK(rpc.hits.count("http://backup1") == 0);   // backups never touched
 }
 
-TEST_CASE("getblocktemplate_parsed never STICKS to a backup that answered with an RPC error") {
-    // A brief primary blip + a warming/IBD backup (answers every call with an RPC error). The
-    // error reply must NOT move current_, or the pool is stranded on the non-serving backup and
-    // maybe_failback can't recover it. RpcError is terminal, so Ok isn't reached: current_ stays 0.
+TEST_CASE("getblocktemplate_parsed skips but never sticks to an unavailable backup") {
     ScriptedRawRpc rpc(kEndpoints);
     rpc.mode = {{"http://primary", ScriptedRawRpc::Mode::Down},
-                {"http://backup1", ScriptedRawRpc::Mode::RpcErr},
+                {"http://backup1", ScriptedRawRpc::Mode::Warmup},
                 {"http://backup2", ScriptedRawRpc::Mode::Ok}};
-    CHECK_THROWS_AS(rpc.getblocktemplate_parsed(), RpcError);
-    CHECK(rpc.active_index() == 0);               // NOT captured on the warming backup
-    CHECK(rpc.hits.count("http://backup2") == 0); // RpcError is terminal; Ok never reached
-
-    // The primary recovers: the next poll serves from it (we were never stuck on the backup).
-    rpc.mode["http://primary"] = ScriptedRawRpc::Mode::Ok;
     CHECK(rpc.getblocktemplate_parsed().height == 170);
-    CHECK(rpc.active_index() == 0);
+    CHECK(rpc.active_index() == 2);
 }
 
-TEST_CASE("getblocktemplate_parsed throws RpcConnectionError when every endpoint is down") {
+TEST_CASE("getblocktemplate_parsed reports all unavailable endpoints as a connection error") {
     ScriptedRawRpc rpc(kEndpoints);
-    rpc.mode = {{"http://primary", ScriptedRawRpc::Mode::Down},
-                {"http://backup1", ScriptedRawRpc::Mode::Down},
-                {"http://backup2", ScriptedRawRpc::Mode::Down}};
+    rpc.mode = {{"http://primary", ScriptedRawRpc::Mode::NotConnected},
+                {"http://backup1", ScriptedRawRpc::Mode::InitialDownload},
+                {"http://backup2", ScriptedRawRpc::Mode::Warmup}};
     CHECK_THROWS_AS(rpc.getblocktemplate_parsed(), RpcConnectionError);
     CHECK(rpc.hits["http://primary"] == 1);
     CHECK(rpc.hits["http://backup1"] == 1);

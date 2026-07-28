@@ -81,6 +81,12 @@ uint32_t require_header_u32(int64_t value, const char* field) {
     return static_cast<uint32_t>(value);
 }
 
+std::optional<int64_t> rpc_error_code(const glz::generic& error) {
+    if (!error.is_object() || !error.contains("code") || !error["code"].is_number())
+        return std::nullopt;
+    return static_cast<int64_t>(error["code"].get<double>());
+}
+
 template <typename T>
 const T& require_field(const std::optional<T>& field, const char* name) {
     if (!field)
@@ -98,7 +104,8 @@ BlockTemplate BlockTemplate::from_gbt(const std::string& response_json) {
         throw std::invalid_argument("getblocktemplate reply is not valid JSON: " +
                                     glz::format_error(ec, response_json));
     if (!envelope.error.is_null())
-        throw RpcError(glz::write_json(envelope.error).value_or("getblocktemplate error"));
+        throw RpcError(glz::write_json(envelope.error).value_or("getblocktemplate error"),
+                       rpc_error_code(envelope.error));
     if (!envelope.result)
         throw std::invalid_argument("getblocktemplate reply has no result");
     const gbt_detail::GbtReply& reply = *envelope.result;

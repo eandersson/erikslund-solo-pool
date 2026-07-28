@@ -24,6 +24,21 @@ struct CurlGlobal {
 };
 const CurlGlobal g_curl_global;
 
+constexpr int64_t kRpcClientNotConnected = -9;
+constexpr int64_t kRpcClientInInitialDownload = -10;
+constexpr int64_t kRpcInWarmup = -28;
+
+std::optional<int64_t> rpc_error_code(const glz::generic& error) {
+    if (!error.is_object() || !error.contains("code") || !error["code"].is_number())
+        return std::nullopt;
+    return static_cast<int64_t>(error["code"].get<double>());
+}
+
+bool endpoint_unavailable(const RpcError& error) {
+    return error.code() == kRpcClientNotConnected ||
+           error.code() == kRpcClientInInitialDownload || error.code() == kRpcInWarmup;
+}
+
 std::string base64(std::string_view input) {
     static constexpr char table[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -118,13 +133,15 @@ glz::generic RpcClient::call_payload(const std::string& payload, long timeout) {
                                  util::redact_url(endpoints_[index].url));
             }
             return result;
-        } catch (const RpcError&) {
-            throw; // node answered with an RPC error -> it is up, do not fail over
+        } catch (const RpcError& error) {
+            if (!endpoint_unavailable(error))
+                throw;
+            last_error = error.what();
         } catch (const RpcConnectionError& e) {
             last_error = e.what();
         }
     }
-    throw RpcConnectionError("all bitcoind endpoints unreachable: " + last_error);
+    throw RpcConnectionError("all bitcoind endpoints unavailable: " + last_error);
 }
 
 std::string RpcClient::post_one(const Resolved& endpoint, const std::string& payload, long timeout,
@@ -168,15 +185,17 @@ glz::generic RpcClient::call_one(const Resolved& endpoint, const std::string& pa
     if (glz::read_json(parsed, response))
         // Keep the HTTP code so a 401 (bad RPC creds) stays distinguishable from garbage.
         throw RpcConnectionError("unparseable body (HTTP " + std::to_string(http_status) + ")");
-    if (parsed.contains("error") && !parsed["error"].is_null())
-        throw RpcError(glz::write_json(parsed["error"]).value_or("rpc error"));
+    if (parsed.contains("error") && !parsed["error"].is_null()) {
+        const glz::generic& error = parsed["error"];
+        throw RpcError(glz::write_json(error).value_or("rpc error"), rpc_error_code(error));
+    }
     // Move the result subtree out; a copy would duplicate the whole DOM.
     if (parsed.contains("result"))
         return std::move(parsed["result"]);
     return glz::generic{};
 }
 
-BlockTemplate RpcClient::getblocktemplate_parsed() {
+std::string RpcClient::make_getblocktemplate_payload() {
     glz::generic request;
     request["rules"] = glz::generic::array_t{"segwit"};
     request["capabilities"] = glz::generic::array_t{"coinbasetxn", "workid", "coinbase/append"};
@@ -185,25 +204,41 @@ BlockTemplate RpcClient::getblocktemplate_parsed() {
     envelope["id"] = static_cast<double>(++next_id_);
     envelope["method"] = "getblocktemplate";
     envelope["params"] = glz::generic::array_t{request};
-    const std::string payload = glz::write_json(envelope).value_or("");
+    return glz::write_json(envelope).value_or("");
+}
 
+BlockTemplate RpcClient::fetch_template_from(size_t index, const std::string& payload) {
+    long http_status = 0;
+    gbt_body_ = post_one(endpoints_[index], payload, poll_timeout_, &http_status);
+    try {
+        return BlockTemplate::from_gbt(gbt_body_);
+    } catch (const std::invalid_argument& error) {
+        throw RpcConnectionError("unparseable body (HTTP " + std::to_string(http_status) +
+                                 "): " + error.what());
+    }
+}
+
+BlockTemplate RpcClient::getblocktemplate_parsed() {
+    if (auto failback_template = try_fetch_failback_template())
+        return std::move(*failback_template);
+
+    const std::string payload = make_getblocktemplate_payload();
     const size_t count = endpoints_.size();
     const size_t start = current_.load();
     std::string last_error;
-    for (size_t i = 0; i < count; ++i) {
-        const size_t index = (start + i) % count;
-        long http_status = 0;
+
+    for (size_t offset = 0; offset < count; ++offset) {
+        const size_t index = (start + offset) % count;
         BlockTemplate block_template;
         try {
-            gbt_body_ = post_one(endpoints_[index], payload, poll_timeout_, &http_status);
-            block_template = BlockTemplate::from_gbt(gbt_body_);
-        } catch (const RpcError&) {
-            throw;
+            block_template = fetch_template_from(index, payload);
+        } catch (const RpcError& error) {
+            if (!endpoint_unavailable(error))
+                throw;
+            last_error = error.what();
+            continue;
         } catch (const RpcConnectionError& e) {
             last_error = e.what();
-            continue;
-        } catch (const std::invalid_argument& e) {
-            last_error = "unparseable body (HTTP " + std::to_string(http_status) + "): " + e.what();
             continue;
         }
         // Only now is this endpoint proven to be serving work.
@@ -215,7 +250,7 @@ BlockTemplate RpcClient::getblocktemplate_parsed() {
         }
         return block_template;
     }
-    throw RpcConnectionError("all bitcoind endpoints unreachable: " + last_error);
+    throw RpcConnectionError("all bitcoind endpoints unavailable for mining work: " + last_error);
 }
 
 std::optional<std::string> RpcClient::submitblock(const std::string& block_hex) {
@@ -262,16 +297,37 @@ void RpcClient::maybe_failback(const std::string& expected_tip) {
     try {
         result = call_one(endpoints_[0], payload, poll_timeout_);
     } catch (const std::exception&) {
-        // A warming primary answers every call with RPC_IN_WARMUP (-28); failing back would
-        // capture the pool (call() never rotates on RpcError) with no work. Stay until it answers.
         return;
     }
-    // Reachable but on a different tip (catching up / stuck / forked): failing back would pin
-    // the pool to stale work. Wait until it reports the tip we mine on.
     if (!result.is_string() || result.get<std::string>() != expected_tip)
         return;
-    current_.store(0);
-    log::info("bitcoind RPC failed back to the primary {}", util::redact_url(endpoints_[0].url));
+    {
+        const std::scoped_lock lock(failback_mutex_);
+        failback_expected_tip_ = expected_tip;
+    }
+}
+
+std::optional<BlockTemplate> RpcClient::try_fetch_failback_template() {
+    std::optional<std::string> expected_tip;
+    {
+        const std::scoped_lock lock(failback_mutex_);
+        expected_tip = std::exchange(failback_expected_tip_, std::nullopt);
+    }
+    if (!expected_tip || current_.load() == 0)
+        return std::nullopt;
+
+    try {
+        BlockTemplate block_template =
+            fetch_template_from(0, make_getblocktemplate_payload());
+        if (block_template.previousblockhash != *expected_tip)
+            return std::nullopt;
+        if (current_.exchange(0) != 0)
+            log::info("bitcoind RPC failed back to the primary {}",
+                      util::redact_url(endpoints_[0].url));
+        return block_template;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 glz::generic RpcClient::getblockheader(const std::string& block_hash) {

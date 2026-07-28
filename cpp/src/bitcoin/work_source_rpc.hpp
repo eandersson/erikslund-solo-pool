@@ -27,6 +27,9 @@ public:
     void maybe_failback(const std::string& expected_tip) override {
         client_.maybe_failback(expected_tip);
     }
+    std::optional<BlockTemplate> try_fetch_failback_template() {
+        return client_.try_fetch_failback_template();
+    }
     std::vector<std::string> endpoint_urls() const override { return client_.endpoint_urls(); }
     std::size_t active_index() const override { return client_.active_index(); }
 

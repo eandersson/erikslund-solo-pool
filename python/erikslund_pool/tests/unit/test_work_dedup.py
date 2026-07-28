@@ -90,29 +90,56 @@ class TestDuplicateWorkSuppression(AsyncSoloPoolTestCase):
         await pool._refresh_template(force=True)
         self.assertIs(pool.current_job, current)  # lagging template ignored
 
-    async def test_readiness_unlatches_when_every_endpoint_is_unreachable(self):
-        # Unreachable bitcoind degrades readiness; a node that answers an RPC error stays
-        # latched (it is connected).
+    async def test_work_outage_degrades_readiness_and_keeps_the_current_job(self):
         template = self.make_template(txns=0)
         pool = self._pool(template)
         await pool._refresh_template(force=True)
         self.assertTrue(pool.generator_ready)
+        current = pool.current_job
 
         def unreachable(validate=None):
             raise RPCConnectionError("all bitcoind endpoints unreachable")
+
         pool.rpc.getblocktemplate = unreachable
         await pool._refresh_template(force=True)
-        self.assertFalse(pool.generator_ready)   # un-latched: outage is visible
+        self.assertFalse(pool.generator_ready)
+        self.assertIs(pool.current_job, current)
 
         pool.rpc.getblocktemplate = lambda validate=None: template
         await pool._refresh_template(force=True)
-        self.assertTrue(pool.generator_ready)    # re-latched on recovery
+        self.assertTrue(pool.generator_ready)
 
         def answers_with_error(validate=None):
             raise RPCResponseError({"code": -10, "message": "warming up"})
+
         pool.rpc.getblocktemplate = answers_with_error
         await pool._refresh_template(force=True)
-        self.assertTrue(pool.generator_ready)    # node answered -> still connected
+        self.assertFalse(pool.generator_ready)
+        self.assertIs(pool.current_job, current)
+
+    async def test_work_outage_logs_once_until_a_template_recovers(self):
+        template = self.make_template(txns=0)
+        pool = self._pool(template)
+        await pool._refresh_template(force=True)
+
+        def unavailable(validate=None):
+            raise RPCConnectionError(
+                "all bitcoind endpoints unavailable for mining work: "
+                "RPC error -9: Bitcoin Core is not connected!"
+            )
+
+        pool.rpc.getblocktemplate = unavailable
+        with patch("erikslund_pool.pool.LOG") as log:
+            await pool._refresh_template(force=True)
+            await pool._refresh_template(force=True)
+            log.warning.assert_called_once()
+            self.assertIn("-9", str(log.warning.call_args))
+            log.info.assert_not_called()
+
+            pool.rpc.getblocktemplate = lambda validate=None: template
+            await pool._refresh_template(force=True)
+            await pool._refresh_template(force=True)
+            log.info.assert_called_once_with("Work refresh recovered")
 
     async def test_changed_transactions_are_rebroadcast(self):
         template = self.make_template(txns=1)

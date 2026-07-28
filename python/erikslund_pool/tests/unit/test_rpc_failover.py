@@ -69,6 +69,24 @@ class RpcFailoverTests(unittest.TestCase):
             rpc.call("foo")
         self.assertEqual(calls, ["http://a:1"])  # node answered -> no failover
 
+    def test_work_unavailable_rpc_error_tries_the_backup(self):
+        rpc = BitcoindRPC("http://a:1", "u", "p", failover=[("http://b:2", "u", "p")])
+        calls = []
+
+        def post(url, auth, payload):
+            calls.append(url)
+            if "a:1" in url:
+                return {
+                    "result": None,
+                    "error": {"code": -28, "message": "Loading block index..."},
+                }
+            return {"result": {"chain": "main"}, "error": None}
+
+        rpc._post = post
+        self.assertEqual(rpc.getblockchaininfo(), {"chain": "main"})
+        self.assertEqual(calls, ["http://a:1", "http://b:2"])
+        self.assertEqual(rpc.active_index, 1)
+
     def test_rpc_error_reply_does_not_stick_failover(self):
         # A backup that answers only a JSON-RPC error must not be stuck on (error check precedes commit).
         rpc = BitcoindRPC("http://a:1", "u", "p", failover=[("http://b:2", "u", "p")])
@@ -111,6 +129,66 @@ class RpcFailoverTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(rpc._current, 1)   # stuck to the usable backup
 
+    def _assert_getblocktemplate_work_unavailable_tries_backup(self, unavailable_code):
+        rpc = BitcoindRPC(
+            "http://a:1",
+            "u",
+            "p",
+            failover=[("http://b:2", "u", "p")],
+        )
+        calls = []
+
+        def post(url, auth, payload):
+            calls.append(url)
+            if "a:1" in url:
+                return {
+                    "result": None,
+                    "error": {"code": unavailable_code, "message": "not ready"},
+                }
+            return {"result": {"ok": True}, "error": None}
+
+        rpc._post = post
+        self.assertEqual(rpc.getblocktemplate(validate=lambda result: None), {"ok": True})
+        self.assertEqual(calls, ["http://a:1", "http://b:2"])
+        self.assertEqual(rpc.active_index, 1)
+
+    def test_getblocktemplate_work_unavailable_tries_the_backup(self):
+        for unavailable_code in (-9, -10, -28):
+            with self.subTest(unavailable_code=unavailable_code):
+                self._assert_getblocktemplate_work_unavailable_tries_backup(unavailable_code)
+
+    def test_getblocktemplate_arbitrary_rpc_error_is_terminal(self):
+        rpc = BitcoindRPC(
+            "http://a:1",
+            "u",
+            "p",
+            failover=[("http://b:2", "u", "p")],
+        )
+        calls = []
+
+        def post(url, auth, payload):
+            calls.append(url)
+            return {"result": None, "error": {"code": -8, "message": "bad parameter"}}
+
+        rpc._post = post
+        with self.assertRaises(RPCResponseError) as error_context:
+            rpc.getblocktemplate()
+        self.assertEqual(error_context.exception.code, -8)
+        self.assertEqual(calls, ["http://a:1"])
+
+    def test_getblocktemplate_all_work_unavailable_reports_rpc_code(self):
+        rpc = BitcoindRPC("http://a:1", "u", "p")
+        rpc._post = lambda url, auth, payload: {
+            "result": None,
+            "error": {"code": -9, "message": "Bitcoin Core is not connected!"},
+        }
+
+        with self.assertRaises(RPCConnectionError) as error_context:
+            rpc.getblocktemplate()
+
+        self.assertIn("-9", str(error_context.exception))
+        self.assertIn("Bitcoin Core is not connected!", str(error_context.exception))
+
     def test_three_endpoints_skip_to_first_reachable(self):
         rpc = BitcoindRPC("http://a:1", "u", "p",
                           failover=[("http://b:2", "u", "p"), ("http://c:3", "u", "p")])
@@ -137,8 +215,7 @@ class RpcFailoverTests(unittest.TestCase):
 
 
 class RpcFailbackTests(unittest.TestCase):
-    """maybe_failback: fail back only when the primary probe SUCCEEDS and returns the
-    pool's own tip; a warming-up or catching-up primary must never capture the pool."""
+    """Fail back only when the primary supplies usable work for the pool's current tip."""
 
     TIP = "aa" * 32
 
@@ -152,14 +229,26 @@ class RpcFailbackTests(unittest.TestCase):
         rpc = self._failed_over()
         calls = []
 
-        def primary_on_our_tip(url, auth, payload):
-            calls.append(url)
-            return {"result": self.TIP, "error": None}
+        def post(url, auth, payload):
+            request = msgspec.json.decode(payload)
+            calls.append((url, request["method"]))
+            if request["method"] == "getbestblockhash":
+                return {"result": self.TIP, "error": None}
+            return {"result": {"previousblockhash": self.TIP}, "error": None}
 
-        rpc._post = primary_on_our_tip
-        rpc.maybe_failback(self.TIP)  # first probe is immediate (no prior probe recorded)
+        rpc._post = post
+        rpc.maybe_failback(self.TIP)
+        self.assertEqual(rpc.active_index, 1)
+        result = rpc.getblocktemplate(validate=lambda template: None)
+        self.assertEqual(result, {"previousblockhash": self.TIP})
         self.assertEqual(rpc._current, 0)
-        self.assertEqual(calls, ["http://primary:1"])
+        self.assertEqual(
+            calls,
+            [
+                ("http://primary:1", "getbestblockhash"),
+                ("http://primary:1", "getblocktemplate"),
+            ],
+        )
 
     def test_stays_on_the_backup_while_the_primary_is_down(self):
         rpc = self._failed_over()
@@ -178,8 +267,6 @@ class RpcFailbackTests(unittest.TestCase):
         self.assertEqual(calls, ["http://primary:1"])
 
     def test_a_warming_up_primary_does_not_capture_the_pool(self):
-        # A primary answering -28 (RPC_IN_WARMUP) would strand the pool: call() never
-        # rotates on an RPC error, so failing back means no work.
         rpc = self._failed_over()
         rpc._post = lambda url, auth, payload: {
             "result": None, "error": {"code": -28, "message": "Loading block index..."}}
@@ -187,11 +274,75 @@ class RpcFailbackTests(unittest.TestCase):
         self.assertEqual(rpc._current, 1)  # stay on the healthy backup
 
     def test_a_behind_primary_does_not_capture_the_pool(self):
-        # Reachable but on a stale tip: wait until it reports the tip we mine on.
         rpc = self._failed_over()
-        rpc._post = lambda url, auth, payload: {"result": "bb" * 32, "error": None}
+        rpc._post = lambda url, auth, payload: {
+            "result": "bb" * 32,
+            "error": None,
+        }
         rpc.maybe_failback(self.TIP)
         self.assertEqual(rpc._current, 1)
+
+    def test_an_unusable_template_does_not_capture_the_pool(self):
+        rpc = self._failed_over()
+
+        def post(url, auth, payload):
+            request = msgspec.json.decode(payload)
+            if request["method"] == "getbestblockhash":
+                return {"result": self.TIP, "error": None}
+            if "primary" in url:
+                return {"result": {"previousblockhash": self.TIP}, "error": None}
+            return {"result": {"previousblockhash": self.TIP, "valid": True}, "error": None}
+
+        def reject_template(template):
+            if not template.get("valid"):
+                raise ValueError("missing required fields")
+
+        rpc._post = post
+        rpc.maybe_failback(self.TIP)
+        result = rpc.getblocktemplate(validate=reject_template)
+        self.assertEqual(result, {"previousblockhash": self.TIP, "valid": True})
+        self.assertEqual(rpc._current, 1)
+
+    def test_a_candidate_rpc_error_falls_back_to_the_active_endpoint(self):
+        rpc = self._failed_over()
+
+        def post(url, auth, payload):
+            request = msgspec.json.decode(payload)
+            if request["method"] == "getbestblockhash":
+                return {"result": self.TIP, "error": None}
+            if "primary" in url:
+                return {"result": None, "error": {"code": -8, "message": "bad request"}}
+            return {"result": {"previousblockhash": self.TIP}, "error": None}
+
+        rpc._post = post
+        rpc.maybe_failback(self.TIP)
+        self.assertEqual(
+            rpc.getblocktemplate(validate=lambda template: None),
+            {"previousblockhash": self.TIP},
+        )
+        self.assertEqual(rpc.active_index, 1)
+
+    def test_a_candidate_unavailable_for_work_stays_on_the_active_endpoint(self):
+        rpc = self._failed_over()
+
+        def post(url, auth, payload):
+            request = msgspec.json.decode(payload)
+            if request["method"] == "getbestblockhash":
+                return {"result": self.TIP, "error": None}
+            if "primary" in url:
+                return {
+                    "result": None,
+                    "error": {"code": -9, "message": "Bitcoin Core is not connected!"},
+                }
+            return {"result": {"previousblockhash": self.TIP}, "error": None}
+
+        rpc._post = post
+        rpc.maybe_failback(self.TIP)
+        self.assertEqual(
+            rpc.getblocktemplate(validate=lambda template: None),
+            {"previousblockhash": self.TIP},
+        )
+        self.assertEqual(rpc.active_index, 1)
 
     def test_noop_while_already_on_the_primary_or_without_a_tip(self):
         rpc = BitcoindRPC("http://primary:1", "u", "p",
@@ -215,6 +366,19 @@ class RpcFailbackTests(unittest.TestCase):
         rpc._post = post_with_concurrent_failback
         self.assertEqual(rpc.call("getblockcount"), 1)  # served by the backup (start=1)
         self.assertEqual(rpc._current, 0)               # fail-back held, not reverted
+
+    def test_failback_probe_requests_only_the_tip(self):
+        rpc = self._failed_over()
+        captured = {}
+
+        def capture(url, auth, payload):
+            captured["payload"] = msgspec.json.decode(payload)
+            return {"result": self.TIP, "error": None}
+
+        rpc._post = capture
+        rpc.maybe_failback(self.TIP)
+
+        self.assertEqual(captured["payload"]["method"], "getbestblockhash")
 
 
 class RpcCallShapeTests(unittest.TestCase):

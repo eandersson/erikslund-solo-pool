@@ -41,7 +41,7 @@ class Pool : public stratum::PoolContext {
 public:
     Pool(Config config, bitcoin::WorkSource& source);
 
-    // Set the "bitcoind reachable" health atom. refresh_work drives it on every fetch.
+    // Set whether bitcoind can currently serve mining work.
     void set_generator_ready(bool ready) { generator_ready_.store(ready); }
 
     void detect_network();

@@ -24,7 +24,7 @@ class RPCError(PoolError):
 
 
 class RPCConnectionError(RPCError):
-    """bitcoind unreachable or returned no usable JSON-RPC body (down, bad port, 5xx)."""
+    """No configured bitcoind endpoint could provide a usable RPC result."""
 
 
 class RPCResponseError(RPCError):
@@ -38,4 +38,10 @@ class RPCResponseError(RPCError):
         else:
             self.code = None
             self.message = None
-        super().__init__(str(self.message) if self.message is not None else str(error))
+        if self.code is not None and self.message is not None:
+            detail = f"RPC error {self.code}: {self.message}"
+        elif self.code is not None:
+            detail = f"RPC error {self.code}"
+        else:
+            detail = str(self.message) if self.message is not None else str(error)
+        super().__init__(detail)
