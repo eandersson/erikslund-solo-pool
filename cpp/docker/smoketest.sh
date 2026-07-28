@@ -34,7 +34,8 @@ trap cleanup EXIT
 
 echo "==> 1/5 compile + unit tests"
 docker build -q -t erikslund-pool-cpp "$REPO_ROOT/cpp/docker" >/dev/null
-if docker run --rm -v "$REPO_ROOT/cpp:/src:ro" -v erikslund-cpp-build:/build \
+if docker run --rm -v "$REPO_ROOT/cpp:/src:ro" \
+        -v erikslund-cpp-build:/build \
         erikslund-pool-cpp >/tmp/cpp-build.log 2>&1; then
     pass "build + unit tests"
 else

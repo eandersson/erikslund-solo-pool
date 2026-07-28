@@ -22,11 +22,28 @@ def _session(address, *, diff=0.0, shares=0, rejected=0, best=0.0, last=0.0, wor
     hashrate = DecayingWindows(HASHRATE_WINDOWS, now - 600)
     if diff:
         hashrate.add(diff, now)
-    return SimpleNamespace(address=address, total_share_diff=diff, difficulty=diff,
-                           shares_accepted=shares, shares_rejected=rejected, best_diff=best,
-                           last_share_ts=last, worker=worker or address,
-                           peer=peer or f"{worker or address}:0",
-                           authorized=authorized, hashrate=hashrate)
+    session = SimpleNamespace(
+        address=address,
+        total_share_diff=diff,
+        difficulty=diff,
+        shares_accepted=shares,
+        shares_rejected=rejected,
+        best_diff=best,
+        best_difficulty=best,
+        last_share_ts=last,
+        worker=worker or address,
+        peer=peer or f"{worker or address}:0",
+        authorized=authorized,
+        hashrate=hashrate,
+    )
+
+    def connected_workers():
+        if not session.authorized or not session.address:
+            return ()
+        return ((session.address, session.worker or ""),)
+
+    session.connected_workers = connected_workers
+    return session
 
 
 def _rows_from_sessions(sessions, now):

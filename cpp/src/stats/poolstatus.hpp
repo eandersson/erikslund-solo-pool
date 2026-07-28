@@ -27,7 +27,6 @@ std::string format_rfc9557(int64_t epoch);
 int64_t parse_rfc9557(const std::string& value);
 
 glz::generic build_pool_status(const api::PoolSnapshot& snapshot);
-// Renders one address's users/<address> object from its registry rows and live connection count.
 glz::generic build_user_stats(const std::string& address, const api::PoolSnapshot& snapshot);
 
 // One worker row recovered from a users/<address> file at startup; the pool seeds its registry

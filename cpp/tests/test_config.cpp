@@ -91,6 +91,89 @@ TEST_CASE("a single stratum_listen string is accepted") {
     CHECK(config.stratum_ports() == std::vector<uint16_t>{3333});
 }
 
+TEST_CASE("SV2 plaintext listeners are disabled by default and default to loopback") {
+    CHECK(Config::from_string("{}").sv2_plaintext_ports.empty());
+
+    const Config config = Config::from_string(
+        R"({"sv2_plaintext_listen": [":3334", ":3335"]})");
+    CHECK(config.sv2_plaintext_host == "127.0.0.1");
+    CHECK(config.sv2_plaintext_ports == std::vector<uint16_t>{3334, 3335});
+}
+
+TEST_CASE("SV2 plaintext listeners reject mixed hosts") {
+    CHECK_THROWS_AS(
+        Config::from_string(
+            R"({"sv2_plaintext_listen": ["127.0.0.1:3334", "0.0.0.0:3335"]})"),
+        ConfigError);
+    CHECK_THROWS_AS(
+        Config::from_string(R"({"sv2_plaintext_listen": "0.0.0.0:3334"})"),
+        ConfigError);
+}
+
+TEST_CASE("SV2 Noise listeners require a complete responder credential set") {
+    CHECK(Config::from_string("{}").sv2_ports.empty());
+    CHECK_THROWS_AS(
+        Config::from_string(R"({"sv2_listen": ":3334"})"),
+        ConfigError);
+    CHECK_THROWS_AS(
+        Config::from_string(
+            R"({"sv2_static_secret_key_file": "static.key"})"),
+        ConfigError);
+
+    const Config config = Config::from_string(R"({
+        "sv2_listen": [":3334", ":3335"],
+        "sv2_static_secret_key_file": "/run/secrets/sv2-static",
+        "sv2_authority_public_key_file": "/run/secrets/sv2-authority",
+        "sv2_certificate_file": "/run/secrets/sv2-certificate"
+    })");
+    CHECK(config.sv2_host == "0.0.0.0");
+    CHECK(config.sv2_ports == std::vector<uint16_t>{3334, 3335});
+    CHECK(config.sv2_static_secret_key_file == "/run/secrets/sv2-static");
+}
+
+TEST_CASE("SV2 Noise listeners reject mixed hosts") {
+    CHECK_THROWS_AS(
+        Config::from_string(R"({
+            "sv2_listen": ["127.0.0.1:3334", "0.0.0.0:3335"],
+            "sv2_static_secret_key_file": "static.key",
+            "sv2_authority_public_key_file": "authority.pub",
+            "sv2_certificate_file": "certificate.bin"
+        })"),
+        ConfigError);
+}
+
+TEST_CASE("authenticated and plaintext SV2 listeners must use distinct ports") {
+    const std::string credentials = R"(
+        "sv2_static_secret_key_file": "static.key",
+        "sv2_authority_public_key_file": "authority.pub",
+        "sv2_certificate_file": "certificate.bin"
+    )";
+
+    CHECK_THROWS_AS(
+        Config::from_string(
+            R"({"sv2_listen": "127.0.0.1:3334",
+                "sv2_plaintext_listen": "127.0.0.1:3334",)" +
+            credentials + "}"),
+        ConfigError);
+    CHECK_THROWS_AS(
+        Config::from_string(
+            R"({"sv2_listen": ":3334",
+                "sv2_plaintext_listen": ":3334",)" +
+            credentials + "}"),
+        ConfigError);
+
+    CHECK_THROWS_AS(
+        Config::from_string(
+            R"({"sv2_listen": "192.0.2.1:3334",
+                "sv2_plaintext_listen": "127.0.0.1:3334",)" +
+            credentials + "}"),
+        ConfigError);
+    CHECK_NOTHROW(Config::from_string(
+        R"({"sv2_listen": "127.0.0.1:3334",
+            "sv2_plaintext_listen": "127.0.0.1:13334",)" +
+        credentials + "}"));
+}
+
 TEST_CASE("proxy_protocol_from: absent -> empty (feature off)") {
     CHECK(Config::from_string("{}").proxy_protocol_from.empty());
 }
@@ -340,6 +423,13 @@ TEST_CASE("block_poll_milliseconds converts to a fractional second poll interval
 TEST_CASE("worker_threads 0 (auto) is a valid value that survives parsing") {
     CHECK(Config::from_string(R"({"worker_threads": 0})").worker_threads == 0);
     CHECK(Config::from_string(R"({"worker_threads": 12})").worker_threads == 12);
+}
+
+TEST_CASE("max_line_bytes must be positive") {
+    CHECK_THROWS_AS(Config::from_string(R"({"max_line_bytes": 0})"), ConfigError);
+    CHECK_THROWS_AS(
+        Config::from_string(R"({"max_line_bytes": 16777216})"),
+        ConfigError);
 }
 
 TEST_CASE("the scriptSig budget tracks the extranonce sizes, not just the signature length") {

@@ -283,7 +283,7 @@ glz::generic build_pool_status(const api::PoolSnapshot& snapshot) {
 
 glz::generic build_user_stats_from(const std::string& address,
                                    const std::vector<const api::WorkerSnapshot*>& workers,
-                                   size_t connection_count, const api::PoolSnapshot& snapshot) {
+                                   size_t active_workers, const api::PoolSnapshot& snapshot) {
     const int64_t wall_now = snapshot.starttime + snapshot.uptime;
     const auto age = [wall_now](int64_t ts) -> int64_t {
         return ts > 0 ? std::max<int64_t>(0, wall_now - ts) : 0;
@@ -324,8 +324,7 @@ glz::generic build_user_stats_from(const std::string& address,
     glz::generic out = hashrate_fields(user_windows);
     out["lastshare"] = format_rfc9557(last_share_timestamp);
     out["last_share_age"] = static_cast<double>(age(last_share_timestamp));
-    // live connections (registry rows persist past disconnect)
-    out["workers"] = static_cast<double>(connection_count);
+    out["workers"] = static_cast<double>(active_workers);
     out["shares_accepted"] = static_cast<double>(total_shares);
     out["shares_rejected"] = static_cast<double>(total_rejected);
     out["bestshare"] = format_json_number(best_difficulty); // float in Python
@@ -341,10 +340,10 @@ glz::generic build_user_stats(const std::string& address, const api::PoolSnapsho
     for (const auto& worker : snapshot.workers)
         if (worker.address == address)
             workers.push_back(&worker);
-    size_t connections = 0;
+    size_t active_workers = 0;
     for (const auto& client : snapshot.clients)
-        connections += client.address == address;
-    return build_user_stats_from(address, workers, connections, snapshot);
+        active_workers += client.address == address;
+    return build_user_stats_from(address, workers, active_workers, snapshot);
 }
 
 std::optional<RecoveredStats> read_pool_status(const std::string& stats_directory) {
@@ -467,10 +466,10 @@ void write_user_files(const std::string& stats_directory, const api::PoolSnapsho
             by_address[worker.address].push_back(&worker);
             address_shares[worker.address] += worker.shares_accepted + worker.shares_rejected;
         }
-    std::unordered_map<std::string, size_t> connections;
+    std::unordered_map<std::string, size_t> active_workers;
     for (const auto& client : snapshot.clients)
         if (client.authorized && is_safe_address(client.address))
-            ++connections[client.address];
+            ++active_workers[client.address];
 
     struct DirRegistry {
         std::unordered_set<std::string> known;
@@ -522,10 +521,11 @@ void write_user_files(const std::string& stats_directory, const api::PoolSnapsho
             }
             registry.known.insert(address);
         }
-        const auto conn_it = connections.find(address);
-        const size_t connection_count = conn_it != connections.end() ? conn_it->second : 0;
+        const auto worker_entry = active_workers.find(address);
+        const size_t worker_count =
+            worker_entry != active_workers.end() ? worker_entry->second : 0;
         const std::string text =
-            to_yaml(build_user_stats_from(address, workers, connection_count, snapshot));
+            to_yaml(build_user_stats_from(address, workers, worker_count, snapshot));
         atomic_write(users_dir / address, text);
     }
 

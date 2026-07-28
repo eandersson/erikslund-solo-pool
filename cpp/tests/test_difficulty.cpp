@@ -1,5 +1,11 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 #include "util/difficulty.hpp"
@@ -7,6 +13,34 @@
 
 using namespace erikslund;
 using namespace erikslund::util;
+
+namespace {
+
+constexpr std::size_t kParitySampleCount = 50'000;
+constexpr std::size_t kTargetByteCount = 32;
+constexpr std::size_t kWordByteCount = sizeof(uint64_t);
+constexpr std::size_t kByteBits = std::numeric_limits<uint8_t>::digits;
+constexpr uint64_t kSplitMixSeed = 0x6a09e667f3bcc909;
+constexpr uint64_t kSplitMixIncrement = 0x9e3779b97f4a7c15;
+constexpr uint64_t kSplitMixFirstMultiplier = 0xbf58476d1ce4e5b9;
+constexpr uint64_t kSplitMixSecondMultiplier = 0x94d049bb133111eb;
+constexpr uint64_t kFnvOffsetBasis = 0xcbf29ce484222325;
+constexpr uint64_t kFnvPrime = 0x100000001b3;
+constexpr uint64_t kPythonParityFingerprint = 0xb6b622b67b9e9ca7;
+
+uint64_t next_splitmix_word(uint64_t& state) {
+    state += kSplitMixIncrement;
+    uint64_t mixed = state;
+    mixed = (mixed ^ (mixed >> 30)) * kSplitMixFirstMultiplier;
+    mixed = (mixed ^ (mixed >> 27)) * kSplitMixSecondMultiplier;
+    return mixed ^ (mixed >> 31);
+}
+
+void fingerprint_byte(uint64_t& fingerprint, uint8_t byte) {
+    fingerprint = (fingerprint ^ byte) * kFnvPrime;
+}
+
+} // namespace
 
 TEST_CASE("difficulty-1 compact target") {
     const auto target = target_from_compact(0x1d00ffff);
@@ -72,8 +106,57 @@ TEST_CASE("regtest-easy nBits 0x207fffff is a near-maximum target") {
     CHECK(difficulty_from_compact(0x207fffff) < 1.0);
 }
 
-TEST_CASE("difficulty_from_target of the zero target is zero (no divide-by-zero)") {
-    CHECK(difficulty_from_target(uint256{}) == doctest::Approx(0.0));
+TEST_CASE("difficulty_from_target of the zero target is positive infinity") {
+    CHECK(difficulty_from_target(uint256{}) ==
+          std::numeric_limits<double>::infinity());
+}
+
+TEST_CASE("target difficulty uses exact rational IEEE-754 rounding") {
+    const auto target = uint256::from_display_hex(
+        "b2317b89161291897871d7aa7854da6b"
+        "3552120a91d8a9b2a5df94a848229100");
+    const double difficulty = difficulty_from_target(target);
+
+    // Exact integer division must match Python's rounding.
+    CHECK(std::bit_cast<uint64_t>(difficulty) == 0x3df6fc65889cc8db);
+    CHECK(target_from_difficulty(difficulty * 2.0).to_display_hex() ==
+          "5918bdc48b094c000000000000000000"
+          "00000000000000000000000000000000");
+}
+
+TEST_CASE("target conversion matches the Python wire parity corpus") {
+    uint64_t random_state = kSplitMixSeed;
+    uint64_t fingerprint = kFnvOffsetBasis;
+
+    for (std::size_t sample = 0; sample < kParitySampleCount; ++sample) {
+        std::array<uint8_t, kTargetByteCount> target_bytes{};
+        for (std::size_t word = 0;
+             word < target_bytes.size() / kWordByteCount;
+             ++word) {
+            const uint64_t random_word = next_splitmix_word(random_state);
+            for (std::size_t byte = 0; byte < kWordByteCount; ++byte)
+                target_bytes[word * kWordByteCount + byte] =
+                    static_cast<uint8_t>(random_word >> (byte * kByteBits));
+        }
+        if (std::ranges::all_of(target_bytes,
+                                [](uint8_t byte) { return byte == 0; }))
+            target_bytes.front() = 1;
+
+        const double difficulty =
+            difficulty_from_target(uint256::from_le_bytes(target_bytes));
+        const uint64_t difficulty_bits = std::bit_cast<uint64_t>(difficulty);
+        for (std::size_t byte = 0; byte < kWordByteCount; ++byte)
+            fingerprint_byte(
+                fingerprint,
+                static_cast<uint8_t>(difficulty_bits >> (byte * kByteBits)));
+
+        const auto doubled_target =
+            target_from_difficulty(difficulty * 2.0).le_bytes();
+        for (uint8_t byte : doubled_target)
+            fingerprint_byte(fingerprint, byte);
+    }
+
+    CHECK(fingerprint == kPythonParityFingerprint);
 }
 
 TEST_CASE("target_from_difficulty(0) yields the all-ones (max) target") {

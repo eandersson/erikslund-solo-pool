@@ -55,3 +55,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-config" (include "erikslund-pool.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "erikslund-pool.validateValues" -}}
+{{- if .Values.sv2.enabled -}}
+{{- if empty .Values.sv2.existingSecret -}}
+{{- fail "sv2.existingSecret is required when sv2.enabled=true" -}}
+{{- end -}}
+{{- if empty (trim (toString .Values.sv2.credentialsVersion)) -}}
+{{- fail "sv2.credentialsVersion is required when sv2.enabled=true; change it whenever credentials rotate" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

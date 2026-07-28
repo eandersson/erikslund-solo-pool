@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 
 from erikslund_pool import coinbase as cb
-from erikslund_pool.constants import _UINT32_MAX
+from erikslund_pool import constants
 from erikslund_pool.constants import DIFF1_TARGET
 from erikslund_pool.constants import NTIME_SLACK
 from erikslund_pool.constants import NTIME_SUBMIT_MARGIN
@@ -35,6 +35,23 @@ class ShareResult:
     legacy_coinbase: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class StandardWork:
+    """Payout-specific fields advertised by one SV2 Standard Mining Job."""
+
+    legacy_coinbase: bytes
+    merkle_root: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ExtendedWork:
+    """Payout-specific fields advertised by one SV2 Extended Mining Job."""
+
+    coinbase_tx_prefix: bytes
+    coinbase_tx_suffix: bytes
+    merkle_path: tuple[bytes, ...]
+
+
 def _rejected(reason: str) -> ShareResult:
     return ShareResult(False, reason, 0.0, False, "", b"", b"")
 
@@ -58,7 +75,8 @@ class Job:
         self.version = template["version"]
         self.curtime = template["curtime"]
         if not (isinstance(self.version, int) and isinstance(self.curtime, int)
-                and 0 <= self.version <= _UINT32_MAX and 0 <= self.curtime <= _UINT32_MAX):
+                and 0 <= self.version <= constants._UINT32_MAX
+                and 0 <= self.curtime <= constants._UINT32_MAX):
             raise WorkError("template version/curtime out of uint32 range")
         self.bits = int(template["bits"], 16)
         self.network_target = bits_to_target(self.bits)
@@ -74,6 +92,8 @@ class Job:
         self._segwit_gbt = isinstance(commitment, str)
 
         self.tag = tag
+        self.publication_sequence = 0
+        self.extranonce_size = extranonce1_size + extranonce2_size
         self.extranonce2_size = extranonce2_size
         self._load_transactions(template.get("transactions", []))
 
@@ -120,6 +140,28 @@ class Job:
         return cb.build_coinbase2(payout_script, self.coinbasevalue, self.witness_commitment,
                                self.tag, self.donation_script, self.donation_percent)
 
+    def build_standard_work(
+        self,
+        payout_script: bytes,
+        extranonce_prefix: bytes,
+    ) -> StandardWork:
+        """Build the payout-specific fields for an SV2 Standard Mining Job."""
+        if len(extranonce_prefix) != self.extranonce_size:
+            raise ValueError("SV2 extranonce prefix does not fill the template extranonce")
+        coinbase = self.coinbase1 + extranonce_prefix + self.build_coinbase2(payout_script)
+        return StandardWork(
+            legacy_coinbase=coinbase,
+            merkle_root=merkle_root(dsha256(coinbase), self.merkle_branch),
+        )
+
+    def build_extended_work(self, payout_script: bytes) -> ExtendedWork:
+        """Return the legacy coinbase halves and Merkle path for an SV2 Extended Job."""
+        return ExtendedWork(
+            coinbase_tx_prefix=self.coinbase1,
+            coinbase_tx_suffix=self.build_coinbase2(payout_script),
+            merkle_path=tuple(self.merkle_branch),
+        )
+
     def _header(self, merkle_root_bytes: bytes, ntime: int, nonce: int, version: int) -> bytes:
         return (ser_uint32(version) + self.prevhash_internal + merkle_root_bytes
                 + ser_uint32(ntime) + ser_uint32(self.bits) + ser_uint32(nonce))
@@ -162,7 +204,10 @@ class Job:
             return _rejected("malformed share field")
         if len(extranonce2) != self.extranonce2_size:
             return _rejected("invalid extranonce2 size")
-        if not (0 <= nonce <= _UINT32_MAX and 0 <= ntime <= _UINT32_MAX):
+        if not (
+            0 <= nonce <= constants._UINT32_MAX
+            and 0 <= ntime <= constants._UINT32_MAX
+        ):
             return _rejected("nonce/ntime out of range")
         if not (self.curtime <= ntime <= now + NTIME_SLACK - NTIME_SUBMIT_MARGIN):
             return _rejected("ntime out of range")
@@ -173,7 +218,79 @@ class Job:
 
         coinbase = self.coinbase1 + extranonce1 + extranonce2 + coinbase2
         root = merkle_root(dsha256(coinbase), self.merkle_branch)
-        header = self._header(root, ntime, nonce, version)
+        return self._validate_header(
+            legacy_coinbase=coinbase,
+            merkle_root_bytes=root,
+            ntime=ntime,
+            nonce=nonce,
+            version=version,
+            share_target=share_target,
+        )
+
+    def validate_standard_share(self, *, legacy_coinbase: bytes, merkle_root_bytes: bytes,
+                                ntime: int, nonce: int, version: int, share_target: int,
+                                version_mask: int = constants.SERVER_VERSION_MASK,
+                                now: float | None = None) -> ShareResult:
+        """Validate an SV2 header-only share against the exact issued Standard Job."""
+        now = time.time() if now is None else now
+        if not all(isinstance(value, int) and not isinstance(value, bool)
+                   and 0 <= value <= constants._UINT32_MAX
+                   for value in (ntime, nonce, version)):
+            return _rejected("malformed share field")
+        if len(merkle_root_bytes) != 32:
+            return _rejected("malformed share field")
+        if not (self.curtime <= ntime <= now + NTIME_SLACK - NTIME_SUBMIT_MARGIN):
+            return _rejected("ntime out of range")
+        if (version & ~version_mask) != (self.version & ~version_mask):
+            return _rejected("version bits outside negotiated mask")
+        return self._validate_header(
+            legacy_coinbase=legacy_coinbase,
+            merkle_root_bytes=merkle_root_bytes,
+            ntime=ntime,
+            nonce=nonce,
+            version=version,
+            share_target=share_target,
+        )
+
+    def validate_extended_share(
+            self, *, issued_work: ExtendedWork, extranonce_prefix: bytes,
+            extranonce: bytes, extranonce_size: int, ntime: int, nonce: int,
+            version: int,
+            share_target: int,
+            version_mask: int = constants.SERVER_VERSION_MASK,
+            now: float | None = None) -> ShareResult:
+        """Validate one Extended Channel share against the exact issued coinbase fields."""
+        if (not isinstance(extranonce_prefix, bytes)
+                or not isinstance(extranonce, bytes)
+                or not isinstance(extranonce_size, int)
+                or isinstance(extranonce_size, bool)
+                or extranonce_size < 0
+                or len(extranonce) != extranonce_size
+                or len(extranonce_prefix) + extranonce_size != self.extranonce_size):
+            return _rejected("invalid extranonce2 size")
+
+        coinbase = (
+            issued_work.coinbase_tx_prefix
+            + extranonce_prefix
+            + extranonce
+            + issued_work.coinbase_tx_suffix
+        )
+        root = merkle_root(dsha256(coinbase), issued_work.merkle_path)
+        return self.validate_standard_share(
+            legacy_coinbase=coinbase,
+            merkle_root_bytes=root,
+            ntime=ntime,
+            nonce=nonce,
+            version=version,
+            share_target=share_target,
+            version_mask=version_mask,
+            now=now,
+        )
+
+    def _validate_header(self, *, legacy_coinbase: bytes, merkle_root_bytes: bytes,
+                         ntime: int, nonce: int, version: int,
+                         share_target: int) -> ShareResult:
+        header = self._header(merkle_root_bytes, ntime, nonce, version)
         block_hash = dsha256(header)
         hash_value = hash_to_int(block_hash)
         difficulty = DIFF1_TARGET / hash_value if hash_value else float("inf")
@@ -181,8 +298,10 @@ class Job:
 
         is_block = hash_value <= self.network_target
         if not is_block and hash_value > share_target:
-            return ShareResult(False, "above target", difficulty, False, display_hash, header, coinbase)
-        return ShareResult(True, None, difficulty, is_block, display_hash, header, coinbase)
+            return ShareResult(
+                False, "above target", difficulty, False, display_hash, header, legacy_coinbase)
+        return ShareResult(
+            True, None, difficulty, is_block, display_hash, header, legacy_coinbase)
 
     def build_block_hex(self, legacy_coinbase: bytes, header: bytes) -> str:
         """Assemble the full block for submitblock; coinbase re-serialized as segwit if witnessed."""

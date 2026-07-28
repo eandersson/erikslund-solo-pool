@@ -1,4 +1,5 @@
 #pragma once
+// Pool configuration and validation.
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -22,6 +23,17 @@ struct Config {
     uint16_t bind_port = 3333;
     // Additional normal stratum ports to bind; empty = just bind_port.
     std::vector<uint16_t> bind_ports;
+    // Optional SV2 compatibility listeners secured by Noise. Empty disables them.
+    std::string sv2_host = "0.0.0.0";
+    std::vector<uint16_t> sv2_ports;
+    // Raw responder credential files: 32-byte static secret, 32-byte x-only authority public key,
+    // and 74-byte pre-signed certificate. The authority private key never enters the pool.
+    std::string sv2_static_secret_key_file;
+    std::string sv2_authority_public_key_file;
+    std::string sv2_certificate_file;
+    // Development-only plaintext SV2 listeners. Empty disables them; only loopback is accepted.
+    std::string sv2_plaintext_host = "127.0.0.1";
+    std::vector<uint16_t> sv2_plaintext_ports;
     // Trusted upstreams (exact IP or IPv4 CIDR) allowed to send a PROXY-protocol header, attributed
     // to the real client IP. Empty = off. Non-trusted sources are treated as direct (no spoofing).
     std::vector<std::string> proxy_protocol_from;
@@ -81,7 +93,7 @@ struct Config {
     // count toward address totals; their per-worker stats fold into one bucket under the bare
     // address. Not a connection cap. 0 = unlimited.
     int max_workers_per_address = 256;
-    size_t max_line_bytes = 16384;
+    size_t max_line_bytes = 16384; // maximum SV1 line or SV2 frame payload
     int drop_idle_seconds = 3600; // drop a client idle this long (0 = never)
     int auth_timeout_seconds = 30; // drop a client that never authorizes (0 = never)
     int max_protocol_errors = 100; // drop after this many bad requests since the last accepted share (0 = never)

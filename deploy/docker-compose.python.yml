@@ -4,8 +4,8 @@ services:
   pool:
     network_mode: host
     build:
-      context: ../python
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: python/Dockerfile
     image: erikslund-pool-py:latest
     restart: unless-stopped
     user: "1000:1000"

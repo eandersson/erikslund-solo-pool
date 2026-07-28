@@ -38,8 +38,9 @@ print("%.0f" % peak)'; }
 
 echo "==> Building images" >&2
 docker build -q -t erikslund-pool-cpp cpp/docker >/dev/null
-docker run --rm -v "$ROOT/cpp:/src:ro" -v erikslund-cpp-build:/build erikslund-pool-cpp >/dev/null 2>&1
-docker build -q -t erikslund-pool-py-ft python >/dev/null 2>&1
+docker run --rm -v "$ROOT/cpp:/src:ro" \
+    -v erikslund-cpp-build:/build erikslund-pool-cpp >/dev/null 2>&1
+docker build -q -t erikslund-pool-py-ft -f "$ROOT/python/Dockerfile" "$ROOT" >/dev/null 2>&1
 
 echo "==> Starting bitcoind" >&2
 $REG up -d bitcoind >/dev/null 2>&1

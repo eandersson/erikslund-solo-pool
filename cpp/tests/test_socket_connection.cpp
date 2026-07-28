@@ -6,7 +6,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -122,6 +124,22 @@ TEST_CASE("send_lines coalesces several lines into one framed flight") {
         const ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
         REQUIRE(n == 11);
         CHECK(std::string(buf, 11) == "alpha\nbeta\n");
+    }
+    ::close(sv[1]);
+}
+
+TEST_CASE("send_bytes preserves binary framing without adding a delimiter") {
+    int sv[2];
+    make_pair(sv);
+    {
+        SocketConnection conn(sv[0], 30.0, "test:bytes");
+        const std::array<uint8_t, 5> payload{0x00, 0x0a, 0xff, 0x01, 0x00};
+        conn.send_bytes(erikslund::ByteView(payload));
+        char buffer[8] = {};
+        const ssize_t size = ::recv(sv[1], buffer, sizeof(buffer), 0);
+        REQUIRE(size == static_cast<ssize_t>(payload.size()));
+        CHECK(std::equal(payload.begin(), payload.end(),
+                         reinterpret_cast<const uint8_t*>(buffer)));
     }
     ::close(sv[1]);
 }

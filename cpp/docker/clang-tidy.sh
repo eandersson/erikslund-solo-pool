@@ -7,7 +7,8 @@
 #
 # Source is mounted read-only at /src; compile_commands.json and the generated IPC
 # headers come from a CMake build tree in the /build volume. Invoke via the toolchain image:
-#   docker run --rm -v "$PWD/cpp:/src:ro" -v erikslund-cpp-build:/build \
+#   docker run --rm -v "$PWD/cpp:/src:ro" \
+#       -v erikslund-cpp-build:/build \
 #       --entrypoint /usr/local/bin/clang-tidy.sh erikslund-pool-cpp
 #
 set -euo pipefail

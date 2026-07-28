@@ -26,5 +26,5 @@ Checks: >
 WarningsAsErrors: ''
 # Lint our own headers (src/<subsystem>/*.hpp); skip vendored third_party/*.h and
 # system / third-party headers (glaze, yaml-cpp, libstdc++).
-HeaderFilterRegex: 'src/(api|bitcoin|core|net|pool|stats|stratum|util)/'
+HeaderFilterRegex: 'src/(api|bitcoin|core|mining|net|pool|stats|stratum|sv2|util)/'
 FormatStyle: none

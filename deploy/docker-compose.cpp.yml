@@ -4,8 +4,8 @@ services:
   pool:
     network_mode: host
     build:
-      context: ../cpp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: cpp/Dockerfile
     image: erikslund-pool-cpp-rt:latest
     restart: unless-stopped
     user: "1000:1000"

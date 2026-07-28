@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -23,11 +24,17 @@ using namespace erikslund::net;
 
 namespace erikslund::net {
 struct ServerTestPeek {
+    // Listener::port holds the CONFIGURED port, which is 0 here, so ask the socket for the one the
+    // kernel actually assigned. Select by protocol: listeners_ also carries the SV2 ports.
     static uint16_t listener_port(const Server& server) {
+        const auto listener =
+            std::ranges::find_if(server.listeners_, [](const Server::Listener& value) {
+                return value.protocol == WireProtocol::Sv1;
+            });
         sockaddr_in address{};
         socklen_t address_size = sizeof(address);
-        if (server.listeners_.empty() ||
-            ::getsockname(server.listeners_.front().fd, reinterpret_cast<sockaddr*>(&address),
+        if (listener == server.listeners_.end() ||
+            ::getsockname(listener->socket.get(), reinterpret_cast<sockaddr*>(&address),
                           &address_size) != 0)
             throw std::runtime_error("could not read test listener port");
         return ntohs(address.sin_port);

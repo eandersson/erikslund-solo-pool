@@ -6,6 +6,8 @@ singletons run on the primary loop. Cross-loop state is lock-guarded.
 
 import asyncio
 import concurrent.futures
+import dataclasses
+import heapq
 import logging
 import os
 import sys
@@ -32,11 +34,15 @@ from erikslund_pool.hashrate import SPS_WINDOWS
 from erikslund_pool.hashrate import DecayingWindows
 from erikslund_pool.rpc import BitcoindRPC
 from erikslund_pool.stratum import ClientSession
+from erikslund_pool.sv2 import noise as sv2_noise
+from erikslund_pool.sv2 import noise_stream as sv2_noise_stream
+from erikslund_pool.sv2.session import Sv2Session
 from erikslund_pool.util import dsha256
 from erikslund_pool.util import redact_url
 from erikslund_pool.work import Job
 from erikslund_pool.work_source import RpcWorkSource
-from erikslund_pool.work_source import SolvedBlock
+
+type MiningSession = ClientSession | Sv2Session
 
 LOG = logging.getLogger(__name__)
 
@@ -45,6 +51,11 @@ LOG = logging.getLogger(__name__)
 GHOST_ROW_GRACE_SECONDS = 3600.0
 LISTEN_BACKLOG = 1024
 NOTIFY_SEND_TIMEOUT_SECONDS = 2.0
+SV2_NOISE_HANDSHAKE_TIMEOUT_SECONDS = 10.0
+MAX_PENDING_SV2_NOISE_HANDSHAKES = 32
+BLOCK_SUBMIT_RETRY_INITIAL_SECONDS = 1.0
+BLOCK_SUBMIT_RETRY_MAX_SECONDS = 30.0
+BLOCK_SUBMIT_SHUTDOWN_WAIT_SECONDS = 2.0
 
 
 def block_subsidy(height: int, halving_interval: int) -> int:
@@ -67,13 +78,33 @@ class _WorkerStat:
         self.last_activity_ts = 0     # wall: last attach/accept/reject (prune clock)
 
 
+@dataclasses.dataclass(slots=True)
+class _PendingBlock:
+    height: int
+    block_hash: str
+    block_hex: str
+    address: str
+    worker: str
+    spool_path: str
+    credit_on_success: bool = True
+    failures: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _AuthenticatedSv2Status:
+    ready: bool | None
+    failure_reason: str | None
+    certificate_expiry_timestamp: int | None
+
+
 def classify_submit(reason: str | None) -> str:
-    """Classify submitblock's reply (BIP22): None/"inconclusive" => valid block we produced;
-    "duplicate"/"duplicate-inconclusive" => already in a chain (a win); else rejected."""
-    if reason is None or reason == "inconclusive":
+    """Classify submitblock's BIP22 reply. Only a null reply confirms acceptance."""
+    if reason is None:
         return "accepted"
-    if reason in ("duplicate", "duplicate-inconclusive"):
+    if reason == "duplicate":
         return "already_known"
+    if reason in ("inconclusive", "duplicate-inconclusive"):
+        return "inconclusive"
     return "rejected"
 
 
@@ -87,11 +118,12 @@ class Pool:
                       for e in settings.rpc_failover])
         self.source = RpcWorkSource(lambda: self.rpc)
         self._run_zmq = bool(settings.zmq_block_endpoint)
-        self.clients: set[ClientSession] = set()
+        self.clients: set[MiningSession] = set()
 
         self.current_job: Job | None = None
         self._recent: dict[str, Job] = {}
         self._job_counter = 0
+        self._publication_counter = 0
         self.started = time.time()
         # Random high half of job ids -> unique across restarts and non-sequential; low half is
         # the counter (see _make_job).
@@ -111,6 +143,7 @@ class Pool:
         self.blocks_found = 0
         self.last_block_found = 0  # wall epoch of most recent accepted block (0 = none)
         self._blocks_by_address: dict[str, int] = {}
+        self._credited_blocks: set[str] = set()
         self.shares_accepted = 0
         self.shares_rejected = 0
         self.shares_rejected_by_reason = {reason: 0 for reason in REJECT_REASONS}
@@ -128,9 +161,17 @@ class Pool:
         self.block_spool_dir = os.path.join(settings.stats_directory, "blocks")
         self._servers: list = []
         self._tasks: list[asyncio.Task] = []
-        # Dedicated pool so a validateaddress flood on a hung node can't starve a block submit.
-        self._submit_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="submitblock")
+        self._sv2_noise_credentials: sv2_noise.NoiseCredentials | None = None
+        self._authenticated_sv2_lock = threading.Lock()
+        self._authenticated_sv2_ready: bool | None = False if settings.sv2_ports else None
+        self._authenticated_sv2_failure_reason: str | None = None
+        self._sv2_certificate_expiry_timestamp: int | None = None
+        self._submit_condition = threading.Condition()
+        self._submit_queue: list[tuple[float, int, _PendingBlock]] = []
+        self._pending_block_hashes: set[str] = set()
+        self._submit_sequence = 0
+        self._submit_stopping = False
+        self._submit_thread: threading.Thread | None = None
         # validateaddress on its own bounded pool so an authorize flood (one RPC per novel
         # username) can't stall new-job delivery; pending calls bounded by max_clients.
         self._validate_executor = concurrent.futures.ThreadPoolExecutor(
@@ -157,6 +198,7 @@ class Pool:
         # Connections past the accept gate but not yet registered (e.g. in the ~2s PROXY-header
         # read). Counted toward max_clients; guarded by _clients_lock with len(self.clients).
         self._inflight = 0
+        self._pending_sv2_noise_handshakes = 0
 
     def assign_extranonce1(self) -> bytes:
         size = self.config.extranonce1_size
@@ -168,15 +210,15 @@ class Pool:
             value = self._extranonce1_counter
         return prefix + value.to_bytes(counter_size, "big")
 
-    def register(self, session: ClientSession):
+    def register(self, session: MiningSession):
         with self._clients_lock:
             self.clients.add(session)
 
-    def unregister(self, session: ClientSession):
+    def unregister(self, session: MiningSession):
         with self._clients_lock:
             self.clients.discard(session)
 
-    def _snapshot_clients(self) -> list[ClientSession]:
+    def _snapshot_clients(self) -> list[MiningSession]:
         with self._clients_lock:
             return list(self.clients)
 
@@ -192,8 +234,39 @@ class Pool:
             self._inflight += 1
             return True
 
+    def _admit_sv2(self, requires_noise_handshake: bool) -> bool:
+        """Reserve an SV2 slot while keeping at least one quarter available to SV1."""
+        with self._clients_lock:
+            sv2_limit = self.config.max_clients * 3 // 4
+            if len(self.clients) + self._inflight >= sv2_limit:
+                return False
+            if (
+                requires_noise_handshake
+                and self._pending_sv2_noise_handshakes
+                >= MAX_PENDING_SV2_NOISE_HANDSHAKES
+            ):
+                return False
+            self._inflight += 1
+            if requires_noise_handshake:
+                self._pending_sv2_noise_handshakes += 1
+            return True
+
+    def _release_sv2_noise_handshake(self) -> None:
+        with self._clients_lock:
+            if self._pending_sv2_noise_handshakes <= 0:
+                raise RuntimeError("no pending SV2 Noise handshake to release")
+            self._pending_sv2_noise_handshakes -= 1
+
     def _release_inflight(self) -> None:
         with self._clients_lock:
+            self._inflight -= 1
+
+    def _register_admitted(self, session: MiningSession) -> None:
+        """Atomically replace one reserved accept slot with its live session."""
+        with self._clients_lock:
+            if self._inflight <= 0:
+                raise RuntimeError("no in-flight client reservation to register")
+            self.clients.add(session)
             self._inflight -= 1
 
     def _resolve_worker_key(self, workers: dict, worker: str) -> str:
@@ -280,10 +353,10 @@ class Pool:
         live "" bucket as idle. Caller holds _user_stats_lock."""
         keys = set()
         for client in self._snapshot_clients():
-            if client.authorized and client.address:
-                workers = self._user_stats.get(client.address, {})
-                key = self._resolve_worker_key(workers, client.worker or "")
-                keys.add((client.address, key))
+            for address, worker in client.connected_workers():
+                workers = self._user_stats.get(address, {})
+                key = self._resolve_worker_key(workers, worker)
+                keys.add((address, key))
         return keys
 
     def _snapshot_user_stats(self, now: float, now_wall: float) -> list[dict]:
@@ -524,6 +597,7 @@ class Pool:
         its writer): same-loop awaited here, others dispatched cross-thread."""
         current_loop = asyncio.get_running_loop()
         local_coroutines = []
+        remote_futures = []
         for client in self._snapshot_clients():
             loop = client.loop
             if loop is None or not loop.is_running():
@@ -532,14 +606,21 @@ class Pool:
             if loop is current_loop:
                 local_coroutines.append(coroutine)
             else:
+                timed_coroutine = asyncio.wait_for(
+                    coroutine, NOTIFY_SEND_TIMEOUT_SECONDS)
                 try:
-                    asyncio.run_coroutine_threadsafe(coroutine, loop)
+                    future = asyncio.run_coroutine_threadsafe(
+                        timed_coroutine, loop)
                 except RuntimeError:
+                    timed_coroutine.close()
                     coroutine.close()
-        if local_coroutines:
+                else:
+                    remote_futures.append(asyncio.wrap_future(future))
+        if local_coroutines or remote_futures:
             await asyncio.gather(
                 *(asyncio.wait_for(coroutine, NOTIFY_SEND_TIMEOUT_SECONDS)
                   for coroutine in local_coroutines),
+                *remote_futures,
                 return_exceptions=True)
 
     async def _broadcast(self, job: Job, clean: bool, require_new_prevhash: bool = False) -> bool:
@@ -554,6 +635,8 @@ class Pool:
             if (require_new_prevhash and self.current_job is not None
                     and job.prevhash_stratum == self.current_job.prevhash_stratum):
                 return False
+            self._publication_counter += 1
+            job.publication_sequence = self._publication_counter
             self.current_job = job
             self._recent[job.job_id] = job
             while len(self._recent) > MAX_RECENT_JOBS:
@@ -745,10 +828,10 @@ class Pool:
             loop.call_soon_threadsafe(self._new_block_event.set)
 
     def _spool_block(self, height: int, block_hash: str, block_hex: str,
-                     address: str = "?", worker: str = "?"):
+                     address: str = "?", worker: str = "?") -> str:
+        path = os.path.join(self.block_spool_dir, f"{height}_{block_hash}.hex")
         try:
             os.makedirs(self.block_spool_dir, exist_ok=True)
-            path = os.path.join(self.block_spool_dir, f"{height}_{block_hash}.hex")
             # Temp file, fsync, atomic rename: a crash mid-write must never leave a truncated .hex.
             tmp = f"{path}.tmp.{os.getpid()}"
             with open(tmp, "w", encoding="ascii") as f:
@@ -760,11 +843,10 @@ class Pool:
                      "recover with: bitcoin-cli submitblock <contents>)", path, address, worker)
         except OSError as e:
             LOG.error("CRITICAL: could not spool block hex (%s); HEX FOLLOWS: %s", e, block_hex)
+        return path
 
-    def _resubmit_spooled_blocks(self) -> None:
-        """Re-submit any block a previous run spooled but never confirmed; bitcoind safely rejects
-        a stale/duplicate. Each file is archived after handling so it is never retried. Synchronous
-        (call via asyncio.to_thread)."""
+    def _enqueue_spooled_blocks(self) -> None:
+        """Load durable candidates from a previous run into the normal submit queue."""
         try:
             names = sorted(n for n in os.listdir(self.block_spool_dir) if n.endswith(".hex"))
         except OSError:
@@ -772,25 +854,33 @@ class Pool:
         for name in names:
             path = os.path.join(self.block_spool_dir, name)
             try:
+                height_text, block_hash = name[:-4].split("_", 1)
+                height = int(height_text)
+                if len(block_hash) != 64:
+                    raise ValueError
+                int(block_hash, 16)
+            except ValueError:
+                LOG.warning("Ignoring malformed block spool filename %s", name)
+                continue
+            try:
                 with open(path, "r", encoding="ascii") as f:
                     block_hex = f.read().strip()
             except OSError:
                 continue
             if not block_hex:
                 continue
-            LOG.warning("Resubmitting block %s spooled by a previous run", name)
-            try:
-                reason = self.source.submit_block_hex(block_hex)
-            except RPCError as e:
-                LOG.error("Could not resubmit spooled block %s (bitcoind unreachable: %s); "
-                          "leaving it on disk for the next restart", name, e)
-                continue
-            if classify_submit(reason) != "rejected":
-                LOG.info("Spooled block %s accepted/already known; archiving", name)
-                self._archive_spooled(path, ".submitted")
-            else:
-                LOG.warning("Spooled block %s rejected by bitcoind (%s); archiving", name, reason)
-                self._archive_spooled(path, ".rejected")
+            # The crashed run may already have credited this block; re-submit without crediting.
+            block = _PendingBlock(
+                height,
+                block_hash,
+                block_hex,
+                "?",
+                "",
+                path,
+                credit_on_success=False,
+            )
+            if self._enqueue_block(block):
+                LOG.warning("Queued block %s spooled by a previous run", name)
 
     @staticmethod
     def _archive_spooled(path: str, suffix: str) -> None:
@@ -799,35 +889,156 @@ class Pool:
         except OSError:
             pass
 
-    async def on_block_found(self, session: ClientSession, job: Job, result):
-        address = session.address or "?"
-        worker = session.worker or ""
-        block_hex = job.build_block_hex(result.legacy_coinbase, result.header)
-        self._spool_block(job.height, result.block_hash_hex, block_hex, address, worker)
-        solved = SolvedBlock(job.height, result.block_hash_hex, result.header,
-                             result.legacy_coinbase, lambda: block_hex)
+    def _enqueue_block(self, block: _PendingBlock) -> bool:
+        with self._submit_condition:
+            if block.block_hash in self._pending_block_hashes:
+                return False
+            self._pending_block_hashes.add(block.block_hash)
+            self._schedule_block_locked(block, 0.0)
+            self._submit_condition.notify()
+        return True
+
+    def _schedule_block_locked(self, block: _PendingBlock, delay: float) -> None:
+        self._submit_sequence += 1
+        heapq.heappush(
+            self._submit_queue,
+            (time.monotonic() + delay, self._submit_sequence, block),
+        )
+
+    def _credit_block(self, block: _PendingBlock) -> bool:
+        with self._stats_lock:
+            if block.block_hash in self._credited_blocks:
+                return False
+            self._credited_blocks.add(block.block_hash)
+            self.blocks_found += 1
+            self.last_block_found = int(time.time())
+            if block.address not in ("", "?"):
+                self._blocks_by_address[block.address] = (
+                    self._blocks_by_address.get(block.address, 0) + 1
+                )
+        return True
+
+    def _submit_block(self, block: _PendingBlock) -> bool:
         try:
-            reason = await asyncio.get_running_loop().run_in_executor(
-                self._submit_executor, self.source.submit_block, solved)
+            reason = self.source.submit_block_hex(block.block_hex)
         except RPCError as e:
-            LOG.error("submitblock failed: %s", e)
-            return
+            LOG.error("submitblock failed for %s: %s", block.block_hash, e)
+            return True
+
         outcome = classify_submit(reason)
+        if outcome == "inconclusive":
+            LOG.warning("Block %s submission was inconclusive; will retry", block.block_hash)
+            return True
+        if outcome == "rejected":
+            LOG.error("Block %s REJECTED by bitcoind: %s", block.block_hash, reason)
+            self._archive_spooled(block.spool_path, ".rejected")
+            self._wake_template_loop()
+            return False
+
+        credited = block.credit_on_success and self._credit_block(block)
         if outcome == "accepted":
-            with self._stats_lock:
-                self.blocks_found += 1
-                self.last_block_found = int(time.time())
-                if session.address:
-                    self._blocks_by_address[session.address] = \
-                        self._blocks_by_address.get(session.address, 0) + 1
-            LOG.info("BLOCK ACCEPTED height=%d hash=%s address=%s worker=%s",
-                     job.height, result.block_hash_hex, address, worker)
-        elif outcome == "already_known":
-            # Already in a chain (double-submit or retry): a win, not a rejection.
-            LOG.info("Block %s already known (submitblock: %s)", result.block_hash_hex, reason)
+            if credited:
+                LOG.info("BLOCK ACCEPTED height=%d hash=%s address=%s worker=%s",
+                         block.height, block.block_hash, block.address, block.worker)
+            else:
+                LOG.info("Recovered block %s accepted; archiving", block.block_hash)
+        elif credited:
+            LOG.info("BLOCK ACCEPTED (as duplicate; the accepting reply was lost) "
+                     "height=%d hash=%s address=%s worker=%s",
+                     block.height, block.block_hash, block.address, block.worker)
         else:
-            LOG.error("Block %s REJECTED by bitcoind: %s", result.block_hash_hex, reason)
+            LOG.info("Block %s already known (submitblock: %s)", block.block_hash, reason)
+        self._archive_spooled(block.spool_path, ".submitted")
         self._wake_template_loop()
+        return False
+
+    def _submit_loop(self) -> None:
+        while True:
+            with self._submit_condition:
+                while True:
+                    if self._submit_stopping:
+                        return
+                    if not self._submit_queue:
+                        self._submit_condition.wait()
+                        continue
+                    ready_at, _sequence, block = self._submit_queue[0]
+                    remaining = ready_at - time.monotonic()
+                    if remaining > 0:
+                        self._submit_condition.wait(remaining)
+                        continue
+                    heapq.heappop(self._submit_queue)
+                    break
+
+            try:
+                retry = self._submit_block(block)
+            except Exception:
+                LOG.exception("Unexpected submitblock failure for %s; will retry",
+                              block.block_hash)
+                retry = True
+
+            with self._submit_condition:
+                if retry and not self._submit_stopping:
+                    block.failures += 1
+                    exponent = min(block.failures - 1, 30)
+                    delay = min(
+                        BLOCK_SUBMIT_RETRY_INITIAL_SECONDS * (2 ** exponent),
+                        BLOCK_SUBMIT_RETRY_MAX_SECONDS,
+                    )
+                    self._schedule_block_locked(block, delay)
+                    self._submit_condition.notify()
+                else:
+                    self._pending_block_hashes.discard(block.block_hash)
+
+    def _start_submit_worker(self) -> None:
+        with self._submit_condition:
+            if self._submit_thread is not None:
+                return
+            self._submit_stopping = False
+            self._submit_thread = threading.Thread(
+                target=self._submit_loop, daemon=True, name="submitblock")
+            thread = self._submit_thread
+        thread.start()
+
+    def _stop_submit_worker(self) -> None:
+        with self._submit_condition:
+            thread = self._submit_thread
+            if thread is None:
+                return
+            self._submit_stopping = True
+            self._submit_condition.notify_all()
+        thread.join(timeout=BLOCK_SUBMIT_SHUTDOWN_WAIT_SECONDS)
+        if thread.is_alive():
+            LOG.warning(
+                "submitblock is still in progress during shutdown; "
+                "the durable candidate will be retried on restart"
+            )
+            return
+        with self._submit_condition:
+            if self._submit_thread is thread:
+                self._submit_thread = None
+
+    async def on_block_found(
+        self,
+        session: MiningSession,
+        job: Job,
+        result,
+        *,
+        address: str | None = None,
+        worker: str | None = None,
+    ):
+        payout_address = address if address is not None else session.address or "?"
+        worker_name = worker if worker is not None else session.worker or ""
+        block_hex = job.build_block_hex(result.legacy_coinbase, result.header)
+        spool_path = self._spool_block(
+            job.height, result.block_hash_hex, block_hex, payout_address, worker_name)
+        self._enqueue_block(_PendingBlock(
+            job.height,
+            result.block_hash_hex,
+            block_hex,
+            payout_address,
+            worker_name,
+            spool_path,
+        ))
 
     def _recover_stats(self):
         """Seed cumulative counters from a prior pool.status."""
@@ -878,13 +1089,13 @@ class Pool:
     def _make_handler(self):
         async def handler(reader, writer):
             # Reserve an in-flight slot before the (up to ~2s) PROXY-header read so a burst can't
-            # overshoot max_clients while connections sit unregistered. Released once the session
-            # registers into self.clients, or in the finally if dropped first.
+            # overshoot max_clients while connections sit unregistered.
             if not self._admit():
                 LOG.warning("Max clients (%d) reached; dropping connection", self.config.max_clients)
                 writer.close()
                 return
             inflight_held = True
+            session = None
             try:
                 peer_override: str | None = None
                 prebuffer = b""
@@ -903,39 +1114,343 @@ class Pool:
                             peer_override = result.address
                         else:  # DIRECT / UNKNOWN / LOCAL health check -> keep TCP peer
                             prebuffer = result.prebuffer
-                # Hand the slot off to self.clients: session.run() registers synchronously below.
-                self._release_inflight()
-                inflight_held = False
                 session = ClientSession(self, reader, writer, self.assign_extranonce1(),
                                         peer_override=peer_override, prebuffer=prebuffer)
+                self._register_admitted(session)
+                inflight_held = False
                 await session.run()
             finally:
                 if inflight_held:
                     self._release_inflight()
+                elif session is not None:
+                    self.unregister(session)
         return handler
 
-    async def _start_servers(self, *, reuse_port: bool, log: bool) -> list:
-        servers = []
-        for port in (self.config.bind_ports or [self.config.bind_port]):
-            # `limit` caps a single buffered line, bounding per-connection memory.
-            server = await asyncio.start_server(
-                self._make_handler(), self.config.bind_host, port,
-                limit=self.config.max_line_bytes, reuse_port=reuse_port,
-                backlog=LISTEN_BACKLOG)
-            servers.append(server)
-            if log:
+    def _load_sv2_noise_credentials(self) -> None:
+        if not self.config.sv2_ports or self._sv2_noise_credentials is not None:
+            return
+
+        library_path = os.environ.get(
+            "ERIKSLUND_SV2_NOISE_LIBRARY",
+            "libsv2_noise.so",
+        )
+        backend = sv2_noise.NativeNoiseBackend(library_path)
+        try:
+            credentials = sv2_noise.NoiseCredentials.from_files(
+                backend,
+                self.config.sv2_static_secret_key_file,
+                self.config.sv2_authority_public_key_file,
+                self.config.sv2_certificate_file,
+            )
+        except sv2_noise.NoiseError as error:
+            try:
+                with self._authenticated_sv2_lock:
+                    self._sv2_certificate_expiry_timestamp = (
+                        error.certificate_expiry_timestamp
+                    )
+            except (RuntimeError, MemoryError):
+                pass
+            raise
+
+        certificate_expiry_timestamp = credentials.certificate_expiry_timestamp
+        try:
+            with self._authenticated_sv2_lock:
+                self._sv2_certificate_expiry_timestamp = certificate_expiry_timestamp
+            if certificate_expiry_timestamp is not None:
+                LOG.info(
+                    "SV2 Noise certificate expires at Unix timestamp %d",
+                    certificate_expiry_timestamp,
+                )
+        except BaseException:
+            try:
+                credentials.close()
+            except (OSError, RuntimeError, MemoryError):
+                pass
+            raise
+        self._sv2_noise_credentials = credentials
+
+    def _mark_authenticated_sv2_unavailable(self, reason: str) -> bool:
+        with self._authenticated_sv2_lock:
+            changed = self._authenticated_sv2_ready is True
+            self._authenticated_sv2_ready = False
+            self._authenticated_sv2_failure_reason = reason
+            return changed
+
+    def _mark_authenticated_sv2_ready(self) -> None:
+        with self._authenticated_sv2_lock:
+            self._authenticated_sv2_ready = True
+            self._authenticated_sv2_failure_reason = None
+
+    def _authenticated_sv2_status(self) -> _AuthenticatedSv2Status:
+        with self._authenticated_sv2_lock:
+            ready = self._authenticated_sv2_ready
+            failure_reason = self._authenticated_sv2_failure_reason
+            certificate_expiry_timestamp = self._sv2_certificate_expiry_timestamp
+        if (
+            ready is True
+            and certificate_expiry_timestamp is not None
+            and int(time.time()) > certificate_expiry_timestamp
+        ):
+            ready = False
+        return _AuthenticatedSv2Status(
+            ready=ready,
+            failure_reason=failure_reason,
+            certificate_expiry_timestamp=certificate_expiry_timestamp,
+        )
+
+    def _make_sv2_handler(
+        self,
+        noise_credentials: sv2_noise.NoiseCredentials | None = None,
+    ):
+        async def handler(reader, writer):
+            requires_noise_handshake = noise_credentials is not None
+            if not self._admit_sv2(requires_noise_handshake):
+                LOG.debug("SV2 admission limit reached; dropping connection")
+                writer.close()
+                return
+            inflight_held = True
+            noise_handshake_held = requires_noise_handshake
+            session = None
+            try:
+                if noise_credentials is not None:
+                    peername = writer.get_extra_info("peername")
+                    peer = f"{peername[0]}:{peername[1]}" if peername else "unknown"
+                    try:
+                        stream = await sv2_noise_stream.NoiseStream.accept(
+                            reader,
+                            writer,
+                            noise_credentials,
+                            timeout=SV2_NOISE_HANDSHAKE_TIMEOUT_SECONDS,
+                            max_payload_size=self.config.max_line_bytes,
+                        )
+                        reader = stream
+                        writer = stream
+                        self._release_sv2_noise_handshake()
+                        noise_handshake_held = False
+                        self._mark_authenticated_sv2_ready()
+                    except TimeoutError:
+                        LOG.debug(
+                            "SV2 Noise handshake from %s timed out after %.0fs",
+                            peer,
+                            SV2_NOISE_HANDSHAKE_TIMEOUT_SECONDS,
+                        )
+                        return
+                    except sv2_noise.NoiseNativeError as error:
+                        if error.status in sv2_noise.CREDENTIAL_VALIDITY_ERROR_STATUSES:
+                            if self._mark_authenticated_sv2_unavailable(str(error)):
+                                LOG.warning(
+                                    "SV2 Noise credentials rejected handshake from %s: %s",
+                                    peer,
+                                    error,
+                                )
+                            return
+                        LOG.debug("SV2 Noise handshake failed from %s: %s", peer, error)
+                        return
+                    except (ConnectionError, OSError, ValueError) as error:
+                        LOG.debug("SV2 Noise handshake failed from %s: %s", peer, error)
+                        return
+                session = Sv2Session(
+                    self, reader, writer, self.assign_extranonce1())
+                self._register_admitted(session)
+                inflight_held = False
+                await session.run()
+            finally:
+                if noise_handshake_held:
+                    self._release_sv2_noise_handshake()
+                if inflight_held:
+                    self._release_inflight()
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except (ConnectionError, OSError, RuntimeError):
+                        pass
+                elif session is not None:
+                    self.unregister(session)
+        return handler
+
+    @staticmethod
+    async def _close_servers(servers: list[asyncio.Server]) -> None:
+        for server in servers:
+            server.close()
+        if servers:
+            await asyncio.gather(
+                *(server.wait_closed() for server in servers),
+                return_exceptions=True,
+            )
+
+    async def _open_listener_group(
+        self,
+        *,
+        handler,
+        host: str,
+        ports: list[int],
+        reuse_port: bool,
+    ) -> list[asyncio.Server]:
+        servers: list[asyncio.Server] = []
+        unowned_server: asyncio.Server | None = None
+        try:
+            for port in ports:
+                unowned_server = await asyncio.start_server(
+                    handler,
+                    host,
+                    port,
+                    limit=self.config.max_line_bytes,
+                    reuse_port=reuse_port,
+                    backlog=LISTEN_BACKLOG,
+                )
+                servers.append(unowned_server)
+                unowned_server = None
+        except BaseException:
+            if unowned_server is not None:
+                unowned_server.close()
+            await self._close_servers(servers)
+            raise
+        return servers
+
+    async def _start_authenticated_sv2_servers(
+        self,
+        *,
+        reuse_port: bool,
+        report_startup: bool,
+    ) -> list[asyncio.Server]:
+        if not self.config.sv2_ports:
+            return []
+
+        status = self._authenticated_sv2_status()
+        if status.failure_reason is not None:
+            return []
+
+        if self._sv2_noise_credentials is None:
+            try:
+                self._load_sv2_noise_credentials()
+            except (sv2_noise.NoiseError, OSError, ValueError, MemoryError) as error:
+                failure_reason = (
+                    "MemoryError: out of memory while loading authenticated SV2 credentials"
+                    if isinstance(error, MemoryError)
+                    else f"{type(error).__name__}: {error}"
+                )
+                self._mark_authenticated_sv2_unavailable(failure_reason)
+                try:
+                    LOG.warning(
+                        "Authenticated SV2 disabled; SV1 remains available: %s",
+                        failure_reason,
+                    )
+                except MemoryError:
+                    pass
+                return []
+
+        credentials = self._sv2_noise_credentials
+        if credentials is None:
+            return []
+
+        status = self._authenticated_sv2_status()
+        try:
+            servers = await self._open_listener_group(
+                handler=self._make_sv2_handler(credentials),
+                host=self.config.sv2_host,
+                ports=self.config.sv2_ports,
+                reuse_port=reuse_port,
+            )
+        except (OSError, MemoryError) as error:
+            failure_reason = f"{type(error).__name__}: {error}"
+            if status.ready is not True:
+                self._mark_authenticated_sv2_unavailable(failure_reason)
+                self._sv2_noise_credentials = None
+                try:
+                    credentials.close()
+                except (OSError, RuntimeError, MemoryError):
+                    pass
+            listener_log = LOG.debug if status.ready is True else LOG.warning
+            listener_log(
+                "Authenticated SV2 listener disabled on this event loop; "
+                "SV1 remains available: %s",
+                failure_reason,
+            )
+            return []
+
+        self._mark_authenticated_sv2_ready()
+        if report_startup:
+            for port in self.config.sv2_ports:
+                LOG.info(
+                    "Authenticated SV2 listening on %s:%d",
+                    self.config.sv2_host,
+                    port,
+                )
+        return servers
+
+    async def _start_plaintext_sv2_servers(
+        self,
+        *,
+        reuse_port: bool,
+        report_startup: bool,
+    ) -> list[asyncio.Server]:
+        try:
+            servers = await self._open_listener_group(
+                handler=self._make_sv2_handler(None),
+                host=self.config.sv2_plaintext_host,
+                ports=self.config.sv2_plaintext_ports,
+                reuse_port=reuse_port,
+            )
+        except (OSError, MemoryError) as error:
+            listener_log = LOG.warning if report_startup else LOG.debug
+            listener_log(
+                "Development-only plaintext SV2 listener disabled on this event loop; "
+                "SV1 remains available: %s: %s",
+                type(error).__name__,
+                error,
+            )
+            return []
+
+        if report_startup:
+            for port in self.config.sv2_plaintext_ports:
+                LOG.warning(
+                    "Development-only plaintext SV2 listening on %s:%d; "
+                    "do not expose this listener",
+                    self.config.sv2_plaintext_host,
+                    port,
+                )
+        return servers
+
+    async def _start_servers(
+        self,
+        *,
+        reuse_port: bool,
+        report_startup: bool,
+    ) -> list[asyncio.Server]:
+        ports = self.config.bind_ports or [self.config.bind_port]
+        servers = await self._open_listener_group(
+            handler=self._make_handler(),
+            host=self.config.bind_host,
+            ports=ports,
+            reuse_port=reuse_port,
+        )
+        if report_startup:
+            for port in ports:
                 LOG.info("Stratum listening on %s:%d", self.config.bind_host, port)
-        if log:
+        servers.extend(
+            await self._start_authenticated_sv2_servers(
+                reuse_port=reuse_port,
+                report_startup=report_startup,
+            )
+        )
+        servers.extend(
+            await self._start_plaintext_sv2_servers(
+                reuse_port=reuse_port,
+                report_startup=report_startup,
+            )
+        )
+        if report_startup:
             trusted = self.config.proxy_protocol_from
             if not trusted:
                 LOG.info("PROXY protocol: disabled (all connections direct)")
             else:
                 LOG.info("PROXY protocol: trusting headers from %d source(s): %s",
                          len(trusted), ", ".join(trusted))
-                for src in trusted:
-                    if not proxy_protocol.valid_trusted_source(src):
+                for trusted_source in trusted:
+                    if not proxy_protocol.valid_trusted_source(trusted_source):
                         LOG.warning("PROXY protocol: trusted source %r is not a valid IP or CIDR; "
-                                    "it will never match (check for stray characters)", src)
+                                    "it will never match (check for stray characters)",
+                                    trusted_source)
         return servers
 
     def _register_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -948,7 +1463,9 @@ class Pool:
         asyncio.set_event_loop(loop)
         servers: list = []
         try:
-            servers = loop.run_until_complete(self._start_servers(reuse_port=True, log=False))
+            servers = loop.run_until_complete(
+                self._start_servers(reuse_port=True, report_startup=False)
+            )
             self._register_loop(loop)
             for server in servers:
                 loop.create_task(server.serve_forever())
@@ -979,14 +1496,16 @@ class Pool:
         except RPCError as e:
             LOG.error("Bitcoind not reachable at startup (%s); will keep retrying", e)
 
-        # Re-submit any block a previous run couldn't confirm (only with bitcoind up). Off-loop:
-        # submitblock is a blocking RPC.
-        if self.generator_ready:
-            await asyncio.to_thread(self._resubmit_spooled_blocks)
+        # Loading is synchronous and cheap; every submit RPC stays on the worker thread.
+        self._enqueue_spooled_blocks()
+        self._start_submit_worker()
 
         # Primary loop serves connections (SO_REUSEPORT shares the port with worker loops) and runs
         # the singleton background tasks.
-        self._servers = await self._start_servers(reuse_port=self.num_loops > 1, log=True)
+        self._servers = await self._start_servers(
+            reuse_port=self.num_loops > 1,
+            report_startup=True,
+        )
         self.connector_ready = True
         if self.num_loops > 1:
             for _ in range(self.num_loops - 1):
@@ -1021,6 +1540,7 @@ class Pool:
             except Exception:
                 LOG.exception("Background task failed during shutdown")
         self._tasks = []
+        self._stop_submit_worker()
         self._write_stats()   # flush so a restart resumes from the latest stats
         with self._loops_lock:
             worker_loops = [loop for loop in self._loops if loop is not self._primary_loop]
@@ -1029,10 +1549,13 @@ class Pool:
         for thread in self._worker_threads:
             thread.join(timeout=2)
         self._worker_threads = []
-        # Don't block shutdown on an in-flight submit to a hung node; the block hex was spooled
-        # before submission, so it's recoverable.
-        self._submit_executor.shutdown(wait=False)
         self._validate_executor.shutdown(wait=False)
+        if self._sv2_noise_credentials is not None:
+            self._sv2_noise_credentials.close()
+            self._sv2_noise_credentials = None
+        if self.config.sv2_ports:
+            with self._authenticated_sv2_lock:
+                self._authenticated_sv2_ready = False
 
     @property
     def ready(self) -> bool:
@@ -1042,6 +1565,7 @@ class Pool:
         return self.ready
 
     def status(self) -> dict:
+        authenticated_sv2 = self._authenticated_sv2_status()
         return {
             "name": "erikslund-solo-pool",
             "version": __version__,
@@ -1051,14 +1575,26 @@ class Pool:
             "bitcoind_connected": self.generator_ready,
             "work_ready": self.current_job is not None,
             "accepting_connections": self.connector_ready,
+            "sv2_authenticated_ready": authenticated_sv2.ready,
+            "sv2_certificate_expiry_timestamp": (
+                authenticated_sv2.certificate_expiry_timestamp
+            ),
             "ready": self.ready,
         }
 
-    def pool_stats(self, clients: list[ClientSession] | None = None) -> dict:
+    def pool_stats(self, clients: list[MiningSession] | None = None) -> dict:
         uptime = time.monotonic() - self._started_monotonic
         if clients is None:
             clients = self._snapshot_clients()
-        addresses = {client.address for client in clients if client.address}
+        connected_workers = [
+            worker
+            for client in clients
+            for worker in client.connected_workers()
+        ]
+        addresses = {
+            address
+            for address, _worker in connected_workers
+        }
         job = self.current_job
         # Counters mutated by the share path under _stats_lock; read consistently.
         with self._stats_lock:
@@ -1070,13 +1606,15 @@ class Pool:
             best_diff = self.best_diff
         hashrate = total_share_diff * 2 ** 32 / uptime if uptime > 0 else 0.0
         network_diff = DIFF1_TARGET / job.network_target if job else None
-        best_share = max([best_diff] + [client.best_diff for client in clients])
+        best_share = max(
+            [best_diff] + [client.best_difficulty for client in clients]
+        )
         return {
             "runtime": int(uptime),
             "height": job.height if job else None,
             "network_diff": network_diff,
             "current_job": job.job_id if job else None,
-            "workers": len(clients),
+            "workers": len(connected_workers),
             "users": len(addresses),
             "blocks_found": blocks_found,
             "last_block_found": poolstatus._format_rfc9557(last_block_found) or None,
@@ -1101,13 +1639,17 @@ class Pool:
             "merkle_branch_len": len(job.merkle_branch) if job else None,
         }
 
-    def connector_stats(self, clients: list[ClientSession] | None = None) -> dict:
+    def connector_stats(self, clients: list[MiningSession] | None = None) -> dict:
         if clients is None:
             clients = self._snapshot_clients()
         return {
-            "workers": len(clients),
-            "subscribed": sum(1 for client in clients if client.subscribed),
-            "authorized": sum(1 for client in clients if client.authorized),
+            "workers": sum(len(client.connected_workers()) for client in clients),
+            "subscribed": sum(
+                client.channel_count for client in clients if client.subscribed
+            ),
+            "authorized": sum(
+                client.channel_count for client in clients if client.authorized
+            ),
         }
 
     def generator_stats(self) -> dict:
@@ -1128,27 +1670,35 @@ class Pool:
 
     def client_stats(self, address: str) -> dict | None:
         address = address.split(".", 1)[0]
-        sessions = [client for client in self._snapshot_clients() if client.address == address]
-        if not sessions:
+        session_rows: list[dict] = []
+        for client in self._snapshot_clients():
+            session_rows.extend(client.stats_for_address(address))
+        if not session_rows:
             return None
         return {
             "address": address,
-            "workers": len(sessions),
-            "shares_accepted": sum(client.shares_accepted for client in sessions),
-            "shares_rejected": sum(client.shares_rejected for client in sessions),
-            "best_diff": max((client.best_diff for client in sessions), default=0.0),
-            "last_share_ts": max((client.last_share_ts for client in sessions), default=0),
-            "sessions": [client.stats() for client in sessions],
+            "workers": len(session_rows),
+            "shares_accepted": sum(row["shares_accepted"] for row in session_rows),
+            "shares_rejected": sum(row["shares_rejected"] for row in session_rows),
+            "best_diff": max((row["best_diff"] for row in session_rows), default=0.0),
+            "last_share_ts": max(
+                (row["last_share_ts"] for row in session_rows), default=0),
+            "sessions": session_rows,
         }
 
     def metrics(self) -> dict:
         clients = self._snapshot_clients()   # one snapshot, shared by pool+connector stats
+        authenticated_sv2 = self._authenticated_sv2_status()
         return {
             "uptime_seconds": int(time.monotonic() - self._started_monotonic),
             "ready": self.ready,
             "bitcoind_connected": self.generator_ready,
             "work_ready": self.current_job is not None,
             "accepting_connections": self.connector_ready,
+            "sv2_authenticated_ready": authenticated_sv2.ready,
+            "sv2_certificate_expiry_timestamp": (
+                authenticated_sv2.certificate_expiry_timestamp
+            ),
             "pool": self.pool_stats(clients),
             "stratifier": self.stratifier_stats(),
             "connector": self.connector_stats(clients),

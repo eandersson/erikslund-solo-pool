@@ -12,6 +12,10 @@ spec:
     - ports:
         - port: stratum
           protocol: TCP
+        {{- if .Values.sv2.enabled }}
+        - port: sv2
+          protocol: TCP
+        {{- end }}
     - from:
         - podSelector: {}
         {{- range .Values.networkPolicy.apiAllowNamespaces }}

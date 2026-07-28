@@ -2,9 +2,9 @@ name: Python
 
 on:
   push:
-    paths: ['python/**', '.github/workflows/python.yml']
+    paths: ['python/**', 'cpp/src/sv2_noise/**', 'conf/pool.schema.json', '.github/workflows/python.yml']
   pull_request:
-    paths: ['python/**', '.github/workflows/python.yml']
+    paths: ['python/**', 'cpp/src/sv2_noise/**', 'conf/pool.schema.json', '.github/workflows/python.yml']
 
 concurrency:
   group: py-${{ github.ref }}
@@ -22,17 +22,87 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Validate production Dockerfile
+        working-directory: .
+        run: docker build --check -f python/Dockerfile .
+
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.14'
+          python-version: '3.14t'
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]" ruff
 
+      - name: Build native Noise binding and disposable credentials
+        run: |
+          secp_source="$RUNNER_TEMP/secp256k1"
+          secp_install="$RUNNER_TEMP/secp256k1-install"
+          secp_commit=1a53f4961f337b4d166c25fce72ef0dc88806618
+          git init -q "$secp_source"
+          git -C "$secp_source" fetch -q --depth 1 \
+            https://github.com/bitcoin-core/secp256k1.git "$secp_commit"
+          git -C "$secp_source" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$secp_source" rev-parse HEAD)" = "$secp_commit"
+          cmake -S "$secp_source" -B "$secp_source/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$secp_install" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCMAKE_C_VISIBILITY_PRESET=hidden \
+            -DSECP256K1_INSTALL=ON \
+            -DSECP256K1_ENABLE_API_VISIBILITY_ATTRIBUTES=OFF \
+            -DSECP256K1_ENABLE_MODULE_EXTRAKEYS=ON \
+            -DSECP256K1_ENABLE_MODULE_SCHNORRSIG=ON \
+            -DSECP256K1_ENABLE_MODULE_ELLSWIFT=ON \
+            -DSECP256K1_ENABLE_MODULE_ECDH=OFF \
+            -DSECP256K1_ENABLE_MODULE_RECOVERY=OFF \
+            -DSECP256K1_ENABLE_MODULE_MUSIG=OFF \
+            -DSECP256K1_BUILD_TESTS=OFF \
+            -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF \
+            -DSECP256K1_BUILD_CTIME_TESTS=OFF \
+            -DSECP256K1_BUILD_BENCHMARK=OFF \
+            -DSECP256K1_BUILD_EXAMPLES=OFF \
+            -DSECP256K1_VALGRIND=OFF
+          cmake --build "$secp_source/build" --parallel 2
+          cmake --install "$secp_source/build"
+          cmake -S ../cpp/src/sv2_noise -B ../build/sv2-noise \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$secp_install" \
+            -DSV2_NOISE_BUILD_STATIC=OFF \
+            -DSV2_NOISE_BUILD_SHARED=ON \
+            -DSV2_NOISE_BUILD_CREDENTIAL_TOOL=ON \
+            -DSV2_NOISE_BUILD_TESTS=OFF
+          cmake --build ../build/sv2-noise --parallel 2 \
+            --target sv2_noise_shared sv2_noise_credentials
+          nm -D --defined-only ../build/sv2-noise/libsv2_noise.so \
+            | awk '{print $3}' | sort > "$RUNNER_TEMP/sv2-noise-exports.txt"
+          diff -u ../cpp/src/sv2_noise/tests/expected_exports.txt \
+            "$RUNNER_TEMP/sv2-noise-exports.txt"
+          credentials="$RUNNER_TEMP/sv2-credentials"
+          install -d -m 700 "$credentials"
+          ../build/sv2-noise/sv2-noise-credentials keypair \
+            "$credentials/server.secret" \
+            "$credentials/server.public"
+          ../build/sv2-noise/sv2-noise-credentials keypair \
+            "$credentials/authority.secret" \
+            "$credentials/authority.public"
+          certificate_lifetime_seconds=86400
+          valid_from="$(date +%s)"
+          not_valid_after="$((valid_from + certificate_lifetime_seconds))"
+          ../build/sv2-noise/sv2-noise-credentials issue \
+            "$credentials/authority.secret" \
+            "$credentials/server.public" \
+            "$credentials/runtime-authority.public" \
+            "$credentials/server.cert" \
+            "$valid_from" "$not_valid_after"
+
       - name: Lint (ruff)
         run: ruff check .
 
       - name: Tests
         run: python -m unittest discover -t . -s erikslund_pool/tests -v
+        env:
+          ERIKSLUND_SV2_NOISE_LIBRARY: ${{ github.workspace }}/build/sv2-noise/libsv2_noise.so
+          ERIKSLUND_SV2_NOISE_TEST_CREDENTIAL_DIR: ${{ runner.temp }}/sv2-credentials

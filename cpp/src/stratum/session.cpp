@@ -106,9 +106,9 @@ void Session::maybe_retarget() {
     }
 }
 
-Session::SessionStats Session::stats(bool include_worker_accounting) const {
+mining::ClientStats Session::stats(bool include_worker_accounting) const {
     const std::scoped_lock lock(mutex_);
-    SessionStats snapshot;
+    mining::ClientStats snapshot;
     snapshot.address = address_.value_or("");
     snapshot.worker = worker_.value_or("");
     snapshot.peer = connection_.peer();
@@ -121,12 +121,26 @@ Session::SessionStats Session::stats(bool include_worker_accounting) const {
     snapshot.last_share_timestamp = last_share_timestamp_; // wall: DISPLAYED
     snapshot.connected_at = connected_at_;                 // wall: DISPLAYED
     const double now_steady = stats::steady_seconds();     // monotonic
-    snapshot.connected_for = static_cast<int64_t>(now_steady - connected_at_steady_);
+    snapshot.connected_seconds = static_cast<int64_t>(now_steady - connected_at_steady_);
     snapshot.subscribed = subscribed_;
     snapshot.authorized = authorized_;
     snapshot.hashrate_windows = hashrate_.snapshot(now_steady);
-    if (include_worker_accounting)
-        snapshot.worker_accounting = worker_accounting_;
+    if (authorized_ && address_) {
+        mining::ClientChannelStats channel;
+        channel.address = *address_;
+        channel.worker = worker_.value_or("");
+        channel.difficulty = difficulty_;
+        channel.best_difficulty = best_difficulty_;
+        channel.total_share_difficulty = total_share_difficulty_;
+        channel.shares_accepted = shares_accepted_;
+        channel.shares_rejected = shares_rejected_;
+        channel.last_share_timestamp = last_share_timestamp_;
+        channel.connected_seconds = snapshot.connected_seconds;
+        channel.hashrate_windows = snapshot.hashrate_windows;
+        if (include_worker_accounting)
+            channel.worker_accounting = worker_accounting_;
+        snapshot.channels.push_back(std::move(channel));
+    }
     return snapshot;
 }
 
@@ -226,21 +240,21 @@ void Session::do_send_set_difficulty() {
 
 void Session::send_notify(const Job& job, bool clean) {
     const std::scoped_lock lock(mutex_);
-    do_send_notify(job, clean);
+    const uint64_t publication_sequence = job.publication_sequence();
+    if (publication_sequence != 0 &&
+        publication_sequence <=
+            last_notified_publication_sequence_)
+        return;
+    if (auto line = build_notify_line(job, clean))
+        connection_.send_line(*line);
 }
 
 std::optional<std::string> Session::build_notify_line(const Job& job, bool clean) {
     if (!subscribed_ || !authorized_ || !payout_script_)
         return std::nullopt;
-    // Publication-order guard: concurrent broadcasters (GBT refresh vs ZMQ fastblock) aren't
-    // ordered, so skip any job below what was already delivered (else the miner grinds superseded
-    // work). seq 0 = never pool-published (tests / direct sends): always deliver.
-    const uint64_t seq = job.publish_seq();
-    if (seq != 0) {
-        if (seq < last_notified_seq_)
-            return std::nullopt;
-        last_notified_seq_ = seq;
-    }
+    last_notified_publication_sequence_ =
+        std::max(last_notified_publication_sequence_,
+                 job.publication_sequence());
     const std::shared_ptr<const Coinbase2Cache> coinbase2 = coinbase2_for(job);
     // Keep one generation of lookback on a clean job (old jobs still accept shares). Skip when the
     // live set is already empty, else we'd demote the empty set and discard a live generation.
@@ -255,11 +269,6 @@ std::optional<std::string> Session::build_notify_line(const Job& job, bool clean
     // The new difficulty (if any) is now in effect from this job on; stop honoring the old one.
     pending_difficulty_change_ = false;
     return line;
-}
-
-void Session::do_send_notify(const Job& job, bool clean) {
-    if (auto line = build_notify_line(job, clean))
-        connection_.send_line(*line);
 }
 
 void Session::send_difficulty_then_work() {

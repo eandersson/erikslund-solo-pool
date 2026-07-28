@@ -9,6 +9,9 @@ namespace erikslund::util {
 inline uint16_t read_le16(const uint8_t* p) {
     return static_cast<uint16_t>(uint16_t(p[0]) | uint16_t(p[1]) << 8);
 }
+inline uint32_t read_le24(const uint8_t* p) {
+    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16;
+}
 inline uint32_t read_le32(const uint8_t* p) {
     return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
 }
@@ -32,6 +35,10 @@ inline uint64_t read_be64(const uint8_t* p) {
 inline void write_le16(uint8_t* p, uint16_t v) {
     p[0] = uint8_t(v);
     p[1] = uint8_t(v >> 8);
+}
+inline void write_le24(uint8_t* p, uint32_t v) {
+    for (int i = 0; i < 3; ++i)
+        p[i] = uint8_t(v >> (8 * i));
 }
 inline void write_le32(uint8_t* p, uint32_t v) {
     for (int i = 0; i < 4; ++i)

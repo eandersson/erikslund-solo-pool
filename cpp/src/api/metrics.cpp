@@ -172,6 +172,15 @@ std::string build_prometheus(const PoolSnapshot& snapshot) {
            "# TYPE erikslundpool_info gauge\n";
     out += std::format("erikslundpool_info{{version=\"{}\"}} 1\n", snapshot.version);
 
+    if (snapshot.sv2_authenticated_ready)
+        metric("erikslundpool_sv2_authenticated_ready", "gauge",
+               "1 when configured authenticated SV2 listeners can accept new sessions",
+               *snapshot.sv2_authenticated_ready ? 1 : 0);
+    if (snapshot.sv2_certificate_expiry_timestamp)
+        metric("erikslundpool_sv2_certificate_expiry_timestamp_seconds", "gauge",
+               "Unix timestamp when the configured SV2 certificate expires",
+               *snapshot.sv2_certificate_expiry_timestamp);
+
     if (!snapshot.bitcoind_nodes.empty()) {
         out += "# HELP erikslundpool_bitcoind_node_active 1 for the bitcoind RPC endpoint currently "
                "in use, 0 for standby\n"
@@ -225,6 +234,9 @@ glz::generic status_json(const PoolSnapshot& snapshot) {
     j["bitcoind_connected"] = snapshot.generator_ready;
     j["work_ready"] = snapshot.stratifier_ready;
     j["accepting_connections"] = snapshot.connector_ready;
+    j["sv2_authenticated_ready"] = or_null(snapshot.sv2_authenticated_ready);
+    j["sv2_certificate_expiry_timestamp"] = or_null(
+        snapshot.sv2_certificate_expiry_timestamp);
     j["ready"] = snapshot.ready;
     return j;
 }
@@ -301,6 +313,9 @@ glz::generic metrics_json(const PoolSnapshot& snapshot) {
     j["bitcoind_connected"] = snapshot.generator_ready;
     j["work_ready"] = snapshot.stratifier_ready;
     j["accepting_connections"] = snapshot.connector_ready;
+    j["sv2_authenticated_ready"] = or_null(snapshot.sv2_authenticated_ready);
+    j["sv2_certificate_expiry_timestamp"] = or_null(
+        snapshot.sv2_certificate_expiry_timestamp);
     j["pool"] = pool_stats_json(snapshot);
     j["stratifier"] = stratifier_stats_json(snapshot);
     j["connector"] = connector_stats_json(snapshot);

@@ -121,13 +121,17 @@ def build_pool_status(pool) -> dict:
     now = time.monotonic()       # uptime + decaying-window snapshots
     uptime = max(now - pool._started_monotonic, 1e-9)
     clients = pool._snapshot_clients()
-    addresses = {client.address for client in clients if client.address}
+    addresses = {
+        address
+        for client in clients
+        for address, _worker in client.connected_workers()
+    }
 
     # Fold live sessions into the best share under the stats lock (RMW races note_accepted_share).
     with pool._stats_lock:
         best_share = pool.best_diff
         for client in clients:
-            best_share = max(best_share, client.best_diff)
+            best_share = max(best_share, client.best_difficulty)
         pool.best_diff = best_share
         blocks_found = pool.blocks_found
         last_block_found = pool.last_block_found
@@ -148,7 +152,7 @@ def build_pool_status(pool) -> dict:
             "runtime": int(uptime),
             "lastupdate": _format_rfc9557(now_wall),
             "users": len(addresses),
-            "workers": len(clients),
+            "workers": sum(len(client.connected_workers()) for client in clients),
             "blocks_found": blocks_found,
             "last_block_found": _format_rfc9557(last_block_found),
         },
@@ -225,11 +229,9 @@ def read_pool_status(stats_dir: str) -> dict | None:
         return None  # corrupt file recovers as "no prior stats" rather than crashing startup
 
 
-def build_user_stats(address: str, worker_rows: list, connection_count: int = 0,
+def build_user_stats(address: str, worker_rows: list, active_workers: int = 0,
                      blocks: int = 0) -> dict:
-    """Build the per-address ``users/<address>`` object from registry rows. One row per worker name,
-    rendered in name order; an empty name renders under the bare address. Rows persist past
-    disconnect, so ``connection_count`` (live connections) feeds the ``workers`` field separately."""
+    """Build one persisted per-address stats record."""
     wall_now = time.time()  # for last-share age (last_share_ts is wall)
     user_windows = {window: 0.0 for window in HASHRATE_WINDOWS}
     total_shares = total_rejected = 0
@@ -261,7 +263,7 @@ def build_user_stats(address: str, worker_rows: list, connection_count: int = 0,
     stats.update({
         "lastshare": _format_rfc9557(last_share),
         "last_share_age": max(0, int(wall_now - last_share)) if last_share else 0,
-        "workers": connection_count,  # live connections (rows persist past disconnect)
+        "workers": active_workers,
         "shares_accepted": total_shares,
         "shares_rejected": total_rejected,
         "bestshare": best_share,
@@ -301,10 +303,11 @@ def write_user_files(pool, stats_dir: str, *, retention_seconds: float = 0.0,
     for row in pool._snapshot_user_stats(now, now_wall):
         if _is_safe_address(row["address"]):  # defense-in-depth on the filename
             by_address.setdefault(row["address"], []).append(row)
-    connections: dict[str, int] = {}
+    active_workers: dict[str, int] = {}
     for client in pool._snapshot_clients():
-        if client.authorized and _is_safe_address(client.address):
-            connections[client.address] = connections.get(client.address, 0) + 1
+        for address, _worker in client.connected_workers():
+            if _is_safe_address(address):
+                active_workers[address] = active_workers.get(address, 0) + 1
     with pool._stats_lock:
         blocks_by_address = dict(pool._blocks_by_address)
 
@@ -341,7 +344,7 @@ def write_user_files(pool, stats_dir: str, *, retention_seconds: float = 0.0,
                                 MAX_USER_FILES)
                 continue
             known.add(address)
-        stats = build_user_stats(address, worker_rows, connections.get(address, 0),
+        stats = build_user_stats(address, worker_rows, active_workers.get(address, 0),
                                  blocks_by_address.get(address, 0))
         text = yaml.safe_dump(stats, sort_keys=False, default_flow_style=False)
         _atomic_write(os.path.join(users_dir, address), text)

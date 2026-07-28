@@ -14,12 +14,17 @@ ADDR = "bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf"
 
 
 class _FakeSession:
-    """Minimal ClientSession stand-in: only address/worker/authorized are read."""
-
-    def __init__(self, address, worker, authorized=True):
+    def __init__(self, address, worker):
         self.address = address
         self.worker = worker
-        self.authorized = authorized
+
+    def connected_workers(self):
+        return ((self.address, self.worker),)
+
+
+class _MultiChannelSession:
+    def connected_workers(self):
+        return ((ADDR, "first"), (ADDR, "second"))
 
 
 def _rows(pool, address):
@@ -117,6 +122,23 @@ class TestRegistry(unittest.TestCase):
         pool.register(_FakeSession(ADDR, "live"))  # now connected
         pool.prune_user_stats()
         self.assertEqual({r["worker"] for r in _rows(pool, ADDR)}, {"live"})
+
+    def test_every_live_multi_channel_worker_is_protected_from_pruning(self):
+        pool = Pool(Settings(user_stats_retention_days=1))
+        pool.attach_worker(ADDR, "first")
+        pool.attach_worker(ADDR, "second")
+        old = time.time() - 2 * 86400
+        with pool._user_stats_lock:
+            for stat in pool._user_stats[ADDR].values():
+                stat.last_activity_ts = old
+                stat.last_share_ts = old
+        pool.register(_MultiChannelSession())
+
+        pool.prune_user_stats()
+
+        rows = _rows(pool, ADDR)
+        self.assertEqual([row["worker"] for row in rows], ["first", "second"])
+        self.assertTrue(all(row["connected"] for row in rows))
 
     def test_rejected_only_active_rig_still_gets_a_file(self):
         # A rig with only rejected shares (0 accepted) is still active and must get a file.

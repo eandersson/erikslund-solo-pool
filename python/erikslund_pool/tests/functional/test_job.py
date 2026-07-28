@@ -37,6 +37,95 @@ class TestShareValidation(SoloPoolTestCase):
         self.assertEqual(len(result.block_hash_hex), 64)
         self.assertLessEqual(int(result.block_hash_hex, 16), job.network_target)
 
+    def test_standard_share_matches_equivalent_sv1_work(self):
+        job = self.make_job()
+        extranonce1 = b"\x00\x00\x00\x01"
+        extranonce2 = bytes(job.extranonce2_size)
+        standard_work = job.build_standard_work(
+            self.P2WPKH_SPK,
+            extranonce1 + extranonce2,
+        )
+
+        standard_result = None
+        winning_nonce = None
+        for nonce in range(1_000):
+            candidate = job.validate_standard_share(
+                legacy_coinbase=standard_work.legacy_coinbase,
+                merkle_root_bytes=standard_work.merkle_root,
+                ntime=job.curtime,
+                nonce=nonce,
+                version=job.version,
+                share_target=job.network_target,
+            )
+            if candidate.valid and candidate.is_block:
+                standard_result = candidate
+                winning_nonce = nonce
+                break
+        self.assertIsNotNone(standard_result)
+        self.assertIsNotNone(winning_nonce)
+
+        sv1_result = job.validate_share(
+            coinbase2=job.build_coinbase2(self.P2WPKH_SPK),
+            extranonce1=extranonce1,
+            extranonce2_hex=extranonce2.hex(),
+            ntime_hex=format(job.curtime, "08x"),
+            nonce_hex=format(winning_nonce, "08x"),
+            share_target=job.network_target,
+        )
+        self.assertEqual(standard_result, sv1_result)
+
+    def test_standard_coinbase_requires_the_full_extranonce(self):
+        job = self.make_job()
+        with self.assertRaisesRegex(ValueError, "does not fill"):
+            job.build_standard_work(
+                self.P2WPKH_SPK, bytes(job.extranonce_size - 1))
+
+    def test_extended_share_matches_equivalent_sv1_work(self):
+        job = self.make_job()
+        extranonce_prefix = b"\x00\x00\x00\x01"
+        extranonce = bytes(job.extranonce2_size)
+        extended_work = job.build_extended_work(self.P2WPKH_SPK)
+
+        extended_result = job.validate_extended_share(
+            issued_work=extended_work,
+            extranonce_prefix=extranonce_prefix,
+            extranonce=extranonce,
+            extranonce_size=job.extranonce2_size,
+            ntime=job.curtime,
+            nonce=0,
+            version=job.version,
+            share_target=(1 << 256) - 1,
+        )
+        sv1_result = job.validate_share(
+            coinbase2=job.build_coinbase2(self.P2WPKH_SPK),
+            extranonce1=extranonce_prefix,
+            extranonce2_hex=extranonce.hex(),
+            ntime_hex=job.ntime_hex,
+            nonce_hex="00000000",
+            share_target=(1 << 256) - 1,
+        )
+
+        self.assertEqual(extended_work.coinbase_tx_prefix, job.coinbase1)
+        self.assertEqual(extended_work.coinbase_tx_suffix,
+                         job.build_coinbase2(self.P2WPKH_SPK))
+        self.assertEqual(extended_work.merkle_path, tuple(job.merkle_branch))
+        self.assertEqual(extended_result, sv1_result)
+
+    def test_extended_share_requires_the_negotiated_extranonce_size(self):
+        job = self.make_job()
+        result = job.validate_extended_share(
+            issued_work=job.build_extended_work(self.P2WPKH_SPK),
+            extranonce_prefix=b"\x00\x00\x00\x01",
+            extranonce=bytes(job.extranonce2_size - 1),
+            extranonce_size=job.extranonce2_size,
+            ntime=job.curtime,
+            nonce=0,
+            version=job.version,
+            share_target=(1 << 256) - 1,
+        )
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "invalid extranonce2 size")
+
     def test_low_difficulty_share_rejected(self):
         # Hard network target + tiny share target: a single nonce is above both.
         job = self.make_job(self.make_template(bits="1d00ffff"))

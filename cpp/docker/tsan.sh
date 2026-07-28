@@ -9,7 +9,8 @@
 #
 # Source is mounted read-only at /src; the instrumented build lives in /build.
 # Invoke via the toolchain image:
-#   docker run --rm -v "$PWD/cpp:/src:ro" -v erikslund-cpp-tsan-build:/build \
+#   docker run --rm -v "$PWD/cpp:/src:ro" \
+#       -v erikslund-cpp-tsan-build:/build \
 #       --entrypoint /usr/local/bin/tsan.sh erikslund-pool-cpp
 #
 set -euo pipefail
@@ -18,8 +19,11 @@ BUILD_DIR=/build/cmake
 echo "==> configure (Debug + TSan)"
 cmake -S /src -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DSANITIZE_THREAD=ON >/dev/null
 
-echo "==> build erikslund_tests (instrumented)"
-cmake --build "$BUILD_DIR" --target erikslund_tests -j"$(nproc)"
+# Every executable ctest will invoke (see the note in sanitize.sh). The sv2-noise tests are
+# single-threaded, so TSan has nothing to find there; they are built so ctest can run the suite.
+echo "==> build test targets (instrumented)"
+cmake --build "$BUILD_DIR" -j"$(nproc)" --target \
+    erikslund_tests sv2_noise_tests sv2_noise_credentials_tests sv2_noise_credentials
 
 echo "==> test (TSan halt-on-error)"
 export TSAN_OPTIONS=halt_on_error=1:abort_on_error=1:second_deadlock_stack=1

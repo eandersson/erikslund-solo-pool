@@ -54,6 +54,20 @@ def render_prometheus(pool) -> str:
         "# TYPE erikslundpool_info gauge\n"
         f'erikslundpool_info{{version="{_VERSION}"}} 1\n'
     )
+    lines += [
+        _metric(
+            "erikslundpool_sv2_authenticated_ready",
+            "gauge",
+            "1 when configured authenticated SV2 listeners can accept new sessions",
+            data.get("sv2_authenticated_ready"),
+        ),
+        _metric(
+            "erikslundpool_sv2_certificate_expiry_timestamp_seconds",
+            "gauge",
+            "Unix timestamp when the configured SV2 certificate expires",
+            data.get("sv2_certificate_expiry_timestamp"),
+        ),
+    ]
 
     nodes = (data.get("generator") or {}).get("bitcoind_nodes") or []
     if nodes:

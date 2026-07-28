@@ -14,7 +14,7 @@ spec:
   loadBalancerIP: {{ .Values.stratumService.loadBalancerIP }}
   {{- end }}
   {{- if ne .Values.stratumService.type "ClusterIP" }}
-  # Local preserves the miner's source IP (per-IP stats); Cluster spreads evenly but SNATs.
+  # Local preserves miner source addresses.
   externalTrafficPolicy: {{ .Values.stratumService.externalTrafficPolicy }}
   {{- end }}
   {{- if eq .Values.stratumService.sessionAffinity "ClientIP" }}
@@ -32,3 +32,12 @@ spec:
       {{- if and (eq .Values.stratumService.type "NodePort") .Values.stratumService.nodePort }}
       nodePort: {{ .Values.stratumService.nodePort }}
       {{- end }}
+    {{- if .Values.sv2.enabled }}
+    - name: sv2
+      port: {{ .Values.sv2.port }}
+      targetPort: sv2
+      protocol: TCP
+      {{- if and (eq .Values.stratumService.type "NodePort") .Values.sv2.nodePort }}
+      nodePort: {{ .Values.sv2.nodePort }}
+      {{- end }}
+    {{- end }}

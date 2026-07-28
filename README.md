@@ -2,8 +2,9 @@
 
 Two independent implementations of a **Bitcoin solo mining pool** -- one in modern
 **C++**, one in **free-threaded Python** -- sharing a config format, an
-HTTP/Prometheus API, and a Docker regtest harness. Both speak Stratum v1, build
-block templates from `bitcoind`, validate miner shares, and submit solved blocks.
+HTTP/Prometheus API, and a Docker regtest harness. Both build work from `bitcoind`,
+validate shares, and submit solved blocks. SV1 is the default miner protocol;
+authenticated SV2 Standard and Extended Channels are optional.
 
 *Solo* means every block a miner finds pays **that miner's address in full**
 (minus an optional donation); the pool coordinates and distributes work, it does
@@ -61,6 +62,7 @@ zmq_block_endpoint: tcp://bitcoind:28332   # instant new-block work
 | Port | Purpose                                                                       |
 | --- |--------------------------------------------------------------------------------|
 | `3333` | Stratum V1 -- miners connect here                                            |
+| `3334` | Optional authenticated Stratum V2 Standard/Extended endpoint                  |
 | `7777` | HTTP status JSON + Prometheus `/metrics` (`/health`, `/status`, `/stats/*`) |
 
 ## Benchmarks
@@ -109,6 +111,7 @@ connections (ephemeral source ports, 60999-32768), and `conn-bench.yml` caps
 | --- | --- |
 | [`cpp/`](cpp/) | C++26 pool -- sources, tests (doctest), Docker build + smoke test |
 | [`python/`](python/) | Free-threaded Python pool -- package `erikslund_pool`, tests, Docker image |
+| [`cpp/src/sv2_noise/`](cpp/src/sv2_noise/) | Shared native SV2 Noise core and offline credential tool used by both pools |
 | [`conf/`](conf/) | Shared `pool.yml` + JSON-Schema |
 | [`tools/`](tools/) | Dev & test tooling -- `regtest/` harness (bitcoind + miner), `bench/` (share-validation benchmark), CPU miner, fake bitcoind, status page |
 | [`deploy/`](deploy/) | Production Compose stacks (embedded / external bitcoind) |

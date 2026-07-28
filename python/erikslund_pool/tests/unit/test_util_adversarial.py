@@ -69,6 +69,9 @@ class TestDifficultyTargetGuards(unittest.TestCase):
         # 1/inf -> 0.0 -> int(0.0) == 0; no exception.
         self.assertEqual(difficulty_to_target(float("inf")), 0)
 
+    def test_tiny_positive_difficulty_clamps_to_uint256(self):
+        self.assertEqual(difficulty_to_target(1e-12), (1 << 256) - 1)
+
     def test_nan_difficulty_raises_value_error(self):
         # int(nan) raises; clamp helpers reject NaN upstream, so this stays hard.
         with self.assertRaises(ValueError):

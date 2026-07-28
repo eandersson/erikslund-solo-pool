@@ -16,7 +16,9 @@ LOG = logging.getLogger(__name__)
 
 # Accepted top-level keys; `$schema` is accepted and ignored.
 _SCHEMA_KEYS = frozenset({
-    "$schema", "bitcoin_nodes", "stratum_listen", "api_listen",
+    "$schema", "bitcoin_nodes", "stratum_listen", "sv2_listen", "sv2_plaintext_listen",
+    "sv2_static_secret_key_file", "sv2_authority_public_key_file", "sv2_certificate_file",
+    "api_listen",
     "coinbase_signature", "coinbase_version",
     "initial_difficulty", "minimum_difficulty", "maximum_difficulty",
     "variable_difficulty", "vardiff_target_shares_per_minute", "vardiff_retarget_seconds",
@@ -46,6 +48,20 @@ def _split_host_port(host_port: str) -> tuple[str, int]:
     return host, int(port_str)
 
 
+def _validate_listener_ports(
+    listeners: tuple[tuple[str, list[int]], ...],
+) -> None:
+    owner_by_port: dict[int, str] = {}
+    for listener_name, listener_ports in listeners:
+        for port in listener_ports:
+            existing_owner = owner_by_port.get(port)
+            if existing_owner is not None:
+                raise ConfigError(
+                    f"{existing_owner} and {listener_name} cannot both bind port {port}"
+                )
+            owner_by_port[port] = listener_name
+
+
 def resolve_worker_count(configured: int) -> int:
     """Resolve worker_threads: explicit value as-is; 0 = one per usable CPU, clamped."""
     if configured > 0:
@@ -68,6 +84,15 @@ class Settings:
     bind_port: int = 3333
     # Extra stratum ports to bind (all behave identically).
     bind_ports: list = dataclasses.field(default_factory=list)
+    # Optional authenticated SV2 compatibility listeners.
+    sv2_host: str = "0.0.0.0"
+    sv2_ports: list = dataclasses.field(default_factory=list)
+    sv2_static_secret_key_file: str = ""
+    sv2_authority_public_key_file: str = ""
+    sv2_certificate_file: str = ""
+    # Development-only plaintext SV2 listeners; loopback only.
+    sv2_plaintext_host: str = "127.0.0.1"
+    sv2_plaintext_ports: list = dataclasses.field(default_factory=list)
     api_host: str = "127.0.0.1"
     api_port: int = 7777
 
@@ -112,7 +137,7 @@ class Settings:
     # into one bucket under the bare address. Connections still mine and count toward address
     # totals -- not a connection cap. 0 = unlimited.
     max_workers_per_address: int = 256
-    max_line_bytes: int = 16384      # cap one Stratum line (anti-OOM)
+    max_line_bytes: int = 16384      # cap one SV1 line or SV2 plaintext payload
     drop_idle_seconds: int = 3600    # drop a client idle this long (0 = never)
     auth_timeout_seconds: int = 30   # drop a client that never authorizes (0 = never)
     max_protocol_errors: int = 100   # drop after this many bad requests since the last accepted share (0 = never)
@@ -144,6 +169,31 @@ class Settings:
     def _validate(self) -> None:
         """Reject values _parse accepts but that break at runtime (e.g. zero intervals busy-loop,
         zero difficulty divides by zero)."""
+        credential_files = (
+            self.sv2_static_secret_key_file,
+            self.sv2_authority_public_key_file,
+            self.sv2_certificate_file,
+        )
+        configured_credentials = sum(bool(path) for path in credential_files)
+        if configured_credentials not in (0, 3):
+            raise ConfigError(
+                "SV2 Noise credentials require all three of sv2_static_secret_key_file, "
+                "sv2_authority_public_key_file, and sv2_certificate_file"
+            )
+        if self.sv2_ports and configured_credentials != 3:
+            raise ConfigError("sv2_listen requires all three SV2 Noise credential files")
+        if self.sv2_plaintext_ports and self.sv2_plaintext_host != "127.0.0.1":
+            raise ConfigError(
+                "sv2_plaintext_listen is development-only and must bind 127.0.0.1"
+            )
+        _validate_listener_ports(
+            (
+                ("stratum_listen", self.bind_ports or [self.bind_port]),
+                ("sv2_listen", self.sv2_ports),
+                ("sv2_plaintext_listen", self.sv2_plaintext_ports),
+                ("api_listen", [self.api_port]),
+            )
+        )
         if self.initial_difficulty <= 0:
             raise ConfigError("initial_difficulty must be > 0")
         if self.minimum_difficulty <= 0:
@@ -196,6 +246,8 @@ class Settings:
             raise ConfigError("max_clients must be >= 0")
         if self.max_workers_per_address < 0:
             raise ConfigError("max_workers_per_address must be >= 0 (0 = unlimited)")
+        if not 1 <= self.max_line_bytes <= 0xFF_FFFF:
+            raise ConfigError("max_line_bytes must be in [1, 16777215]")
         if self.drop_idle_seconds < 0:
             raise ConfigError("drop_idle_seconds must be >= 0")
         if self.auth_timeout_seconds < 0:
@@ -238,6 +290,38 @@ class Settings:
                                       f"(per-port hosts are not supported): {url}")
                 fields["bind_ports"].append(port)
             fields["bind_port"] = fields["bind_ports"][0]
+        sv2_listen = data.get("sv2_listen")
+        if sv2_listen:
+            urls = [sv2_listen] if isinstance(sv2_listen, str) else list(sv2_listen)
+            first_host = _split_host_port(urls[0])[0] or "0.0.0.0"
+            fields["sv2_host"] = first_host
+            fields["sv2_ports"] = []
+            for url in urls:
+                host, port = _split_host_port(url)
+                host = host or "0.0.0.0"
+                if host != first_host:
+                    raise ConfigError(
+                        "sv2_listen entries must all use the same host "
+                        f"(per-port hosts are not supported): {url}")
+                fields["sv2_ports"].append(port)
+        sv2_plaintext_listen = data.get("sv2_plaintext_listen")
+        if sv2_plaintext_listen:
+            urls = (
+                [sv2_plaintext_listen]
+                if isinstance(sv2_plaintext_listen, str)
+                else list(sv2_plaintext_listen)
+            )
+            first_host = _split_host_port(urls[0])[0] or "127.0.0.1"
+            fields["sv2_plaintext_host"] = first_host
+            fields["sv2_plaintext_ports"] = []
+            for url in urls:
+                host, port = _split_host_port(url)
+                host = host or "127.0.0.1"
+                if host != first_host:
+                    raise ConfigError(
+                        "sv2_plaintext_listen entries must all use the same host "
+                        f"(per-port hosts are not supported): {url}")
+                fields["sv2_plaintext_ports"].append(port)
         api_listen = data.get("api_listen")
         if api_listen:
             host_port = api_listen if isinstance(api_listen, str) else api_listen[0]
@@ -276,6 +360,8 @@ class Settings:
             "extranonce1_size", "extranonce2_size",
             "zmq_block_endpoint", "fast_block_notify",
             "work_source",
+            "sv2_static_secret_key_file", "sv2_authority_public_key_file",
+            "sv2_certificate_file",
             "work_rebroadcast_seconds", "donation_percent", "donation_address",
             "max_clients", "max_workers_per_address",
     "drop_idle_seconds", "auth_timeout_seconds", "max_protocol_errors",

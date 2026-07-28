@@ -21,6 +21,8 @@ PoolSnapshot sample() {
     s.connector_ready = true;
     s.stratifier_ready = true;
     s.ready = true;
+    s.sv2_authenticated_ready = true;
+    s.sv2_certificate_expiry_timestamp = 2'000'000'000;
     s.height = 200;
     s.network_diff = 1.0;
     s.current_job = "a";
@@ -120,7 +122,9 @@ TEST_CASE("prometheus emits every expected metric name + TYPE") {
           "erikslundpool_block_height", "erikslundpool_blocks_found_total",
           "erikslundpool_shares_accepted_total", "erikslundpool_shares_rejected_total",
           "erikslundpool_best_share", "erikslundpool_users", "erikslundpool_workers",
-          "erikslundpool_hashrate_hashes_per_second"}) {
+          "erikslundpool_hashrate_hashes_per_second",
+          "erikslundpool_sv2_authenticated_ready",
+          "erikslundpool_sv2_certificate_expiry_timestamp_seconds"}) {
         CHECK(contains(m, std::string("# TYPE ") + name));
     }
     // Types, labels, and integer values.
@@ -138,6 +142,10 @@ TEST_CASE("prometheus emits every expected metric name + TYPE") {
     CHECK(contains(m, "erikslundpool_shares_rejected_total 6"));
     CHECK(contains(m, "erikslundpool_workers 2"));
     CHECK(contains(m, "erikslundpool_block_height 200"));
+    CHECK(contains(m, "erikslundpool_sv2_authenticated_ready 1"));
+    CHECK(contains(
+        m,
+        "erikslundpool_sv2_certificate_expiry_timestamp_seconds 2000000000"));
 }
 
 TEST_CASE("prometheus emits a by-reason reject series that sums to the total") {
@@ -162,6 +170,25 @@ TEST_CASE("optional gauges are omitted with no job, counters remain") {
     CHECK(contains(m, "erikslundpool_shares_accepted_total 10"));
 }
 
+TEST_CASE("SV2 observability is omitted when authenticated SV2 is disabled") {
+    PoolSnapshot s = sample();
+    s.sv2_authenticated_ready = std::nullopt;
+    s.sv2_certificate_expiry_timestamp = std::nullopt;
+
+    const std::string prometheus = build_prometheus(s);
+    CHECK_FALSE(contains(prometheus, "erikslundpool_sv2_authenticated_ready"));
+    CHECK_FALSE(contains(
+        prometheus,
+        "erikslundpool_sv2_certificate_expiry_timestamp_seconds"));
+
+    const auto status = status_json(s);
+    CHECK(status["sv2_authenticated_ready"].is_null());
+    CHECK(status["sv2_certificate_expiry_timestamp"].is_null());
+    const auto metrics = metrics_json(s);
+    CHECK(metrics["sv2_authenticated_ready"].is_null());
+    CHECK(metrics["sv2_certificate_expiry_timestamp"].is_null());
+}
+
 TEST_CASE("JSON bodies match the C/Python contract") {
     const auto s = sample();
 
@@ -172,6 +199,9 @@ TEST_CASE("JSON bodies match the C/Python contract") {
     CHECK(st["work_ready"].get<bool>() == true);
     CHECK(st["accepting_connections"].get<bool>() == true);
     CHECK(st["ready"].get<bool>() == true);
+    CHECK(st["sv2_authenticated_ready"].get<bool>() == true);
+    CHECK(st["sv2_certificate_expiry_timestamp"].get<double>() ==
+          2'000'000'000);
 
     auto ps = pool_stats_json(s);
     CHECK(ps["height"].get<double>() == 200);
@@ -189,6 +219,9 @@ TEST_CASE("JSON bodies match the C/Python contract") {
     auto m = metrics_json(s);
     CHECK_FALSE(m.contains("mode"));
     CHECK(m["bitcoind_connected"].get<bool>() == true);
+    CHECK(m["sv2_authenticated_ready"].get<bool>() == true);
+    CHECK(m["sv2_certificate_expiry_timestamp"].get<double>() ==
+          2'000'000'000);
     CHECK(m["pool"]["height"].get<double>() == 200);
     CHECK(m["generator"]["chain"].get<std::string>() == "regtest");
     CHECK(m["stratifier"]["txns_in_job"].get<double>() == 2);

@@ -103,6 +103,22 @@ void SocketConnection::send_lines(std::span<const std::string_view> lines) {
         outbox_.append(line);
         outbox_.push_back('\n');
     }
+    flush_after_enqueue_locked();
+}
+
+void SocketConnection::send_bytes(ByteView bytes) {
+    const std::scoped_lock lock(write_mutex_);
+    if (dead_.load(std::memory_order_relaxed))
+        return;
+    if (outbox_pos_ > 0) {
+        outbox_.erase(0, outbox_pos_);
+        outbox_pos_ = 0;
+    }
+    outbox_.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    flush_after_enqueue_locked();
+}
+
+void SocketConnection::flush_after_enqueue_locked() {
     if (outbox_.size() > kMaxOutboxBytes) {
         fail_locked(); // peer cannot keep up; drop it rather than buffer unboundedly
         return;

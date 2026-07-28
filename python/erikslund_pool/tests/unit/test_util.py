@@ -1,5 +1,7 @@
 """Known-answer tests for erikslund_pool.util encoders."""
 
+import struct
+
 from erikslund_pool.constants import DIFF1_TARGET
 from erikslund_pool.tests.base import SoloPoolTestCase
 from erikslund_pool.util import ascii_worker
@@ -17,6 +19,33 @@ from erikslund_pool.util import ser_varint
 from erikslund_pool.util import serialize_height
 from erikslund_pool.util import target_to_difficulty
 from erikslund_pool.util import unhex
+
+_PARITY_SAMPLE_COUNT = 50_000
+_TARGET_BYTE_COUNT = 32
+_WORD_BYTE_COUNT = 8
+_TARGET_WORD_COUNT = _TARGET_BYTE_COUNT // _WORD_BYTE_COUNT
+_SPLITMIX_MASK = (1 << 64) - 1
+_SPLITMIX_SEED = 0x6A09E667F3BCC909
+_SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
+_SPLITMIX_FIRST_MULTIPLIER = 0xBF58476D1CE4E5B9
+_SPLITMIX_SECOND_MULTIPLIER = 0x94D049BB133111EB
+_FNV_OFFSET_BASIS = 0xCBF29CE484222325
+_FNV_PRIME = 0x100000001B3
+_PYTHON_PARITY_FINGERPRINT = 0xB6B622B67B9E9CA7
+
+
+def _next_splitmix_word(state: int) -> tuple[int, int]:
+    state = (state + _SPLITMIX_INCREMENT) & _SPLITMIX_MASK
+    mixed = state
+    mixed = ((mixed ^ (mixed >> 30)) * _SPLITMIX_FIRST_MULTIPLIER) & _SPLITMIX_MASK
+    mixed = ((mixed ^ (mixed >> 27)) * _SPLITMIX_SECOND_MULTIPLIER) & _SPLITMIX_MASK
+    return state, mixed ^ (mixed >> 31)
+
+
+def _fingerprint_bytes(fingerprint: int, payload: bytes) -> int:
+    for byte in payload:
+        fingerprint = ((fingerprint ^ byte) * _FNV_PRIME) & _SPLITMIX_MASK
+    return fingerprint
 
 
 class TestDoubleSha(SoloPoolTestCase):
@@ -116,6 +145,45 @@ class TestTargets(SoloPoolTestCase):
             target = difficulty_to_target(difficulty)
             self.assertAlmostEqual(target_to_difficulty(target), difficulty,
                                    delta=difficulty * 1e-9 + 1e-9)
+
+    def test_target_difficulty_exact_rounding_vector(self):
+        target = int(
+            "b2317b89161291897871d7aa7854da6b"
+            "3552120a91d8a9b2a5df94a848229100",
+            16,
+        )
+        difficulty = target_to_difficulty(target)
+
+        self.assertEqual(struct.pack("!d", difficulty).hex(), "3df6fc65889cc8db")
+        self.assertEqual(
+            difficulty_to_target(difficulty * 2),
+            int(
+                "5918bdc48b094c000000000000000000"
+                "00000000000000000000000000000000",
+                16,
+            ),
+        )
+
+    def test_target_conversion_wire_parity_corpus(self):
+        random_state = _SPLITMIX_SEED
+        fingerprint = _FNV_OFFSET_BASIS
+
+        for _sample in range(_PARITY_SAMPLE_COUNT):
+            target_bytes = bytearray()
+            for _word in range(_TARGET_WORD_COUNT):
+                random_state, random_word = _next_splitmix_word(random_state)
+                target_bytes.extend(random_word.to_bytes(_WORD_BYTE_COUNT, "little"))
+            target = int.from_bytes(target_bytes, "little") or 1
+
+            difficulty = target_to_difficulty(target)
+            fingerprint = _fingerprint_bytes(fingerprint, struct.pack("<d", difficulty))
+            doubled_target = difficulty_to_target(difficulty * 2)
+            fingerprint = _fingerprint_bytes(
+                fingerprint,
+                doubled_target.to_bytes(_TARGET_BYTE_COUNT, "little"),
+            )
+
+        self.assertEqual(fingerprint, _PYTHON_PARITY_FINGERPRINT)
 
     def test_higher_difficulty_is_a_smaller_target(self):
         self.assertGreater(difficulty_to_target(1), difficulty_to_target(2))

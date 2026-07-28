@@ -100,6 +100,7 @@ Job::Job(std::string job_id, bitcoin::BlockTemplate block_template, ByteView tag
       coinbase_witness_(std::move(block_template.coinbase_witness)),
       coinbase_required_outputs_(std::move(block_template.coinbase_required_outputs)),
       tag_(tag.begin(), tag.end()),
+      extranonce_size_(extranonce1_size + extranonce2_size),
       extranonce2_size_(extranonce2_size),
       txn_count_(block_template.txn_count),
       // Steal the concatenated tx blob (multi-MB on mainnet) -- the point of taking by value.
@@ -154,6 +155,25 @@ Bytes Job::build_coinbase2(ByteView payout_script) const {
     }
     return bitcoin::build_coinbase2(outputs, coinbase_required_outputs_, tag_, coinbase_sequence_,
                                     coinbase_lock_time_);
+}
+
+StandardWork Job::build_standard_work(ByteView payout_script, ByteView extranonce_prefix) const {
+    if (extranonce_prefix.size() != extranonce_size_)
+        throw std::invalid_argument("SV2 extranonce prefix does not fill the template extranonce");
+
+    StandardWork work;
+    const Bytes coinbase2 = build_coinbase2(payout_script);
+    work.legacy_coinbase.reserve(coinbase1_.size() + extranonce_prefix.size() + coinbase2.size());
+    append(work.legacy_coinbase, coinbase1_);
+    append(work.legacy_coinbase, extranonce_prefix);
+    append(work.legacy_coinbase, coinbase2);
+    work.merkle_root =
+        util::merkle_root_from_branch(util::sha256d(work.legacy_coinbase), merkle_branch_);
+    return work;
+}
+
+ExtendedWork Job::build_extended_work(ByteView payout_script) const {
+    return {coinbase1_, build_coinbase2(payout_script), merkle_branch_};
 }
 
 double Job::network_difficulty() const {
@@ -227,16 +247,68 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
     append(coinbase, *extranonce2);
     append(coinbase, input.coinbase2);
 
-    const util::Hash256 coinbase_txid = util::sha256d(coinbase);
-    const util::Hash256 root = util::merkle_root_from_branch(coinbase_txid, merkle_branch_);
-    const std::array<uint8_t, util::kHeaderSize> header = build_header(root, ntime, nonce, version);
+    const util::Hash256 root =
+        util::merkle_root_from_branch(util::sha256d(coinbase), merkle_branch_);
+    return validate_header(std::move(coinbase), root, ntime, nonce, version, input.share_target);
+}
+
+std::expected<ShareResult, ShareRejection>
+Job::validate_standard_share(const StandardShareInput& input) const {
+    const int64_t ntime_min = static_cast<int64_t>(curtime_);
+    const int64_t ntime_max = input.now_unix + kNtimeSlack - kNtimeSubmitMargin;
+    if (static_cast<int64_t>(input.ntime) < ntime_min ||
+        static_cast<int64_t>(input.ntime) > ntime_max) [[unlikely]]
+        return rejected(ShareReject::NtimeOutOfRange);
+
+    if ((input.version & ~input.version_mask) != (version_ & ~input.version_mask)) [[unlikely]]
+        return rejected(ShareReject::VersionBitsOutsideMask);
+
+    return validate_header(Bytes(input.legacy_coinbase.begin(), input.legacy_coinbase.end()),
+                           input.merkle_root, input.ntime, input.nonce, input.version,
+                           input.share_target);
+}
+
+std::expected<ShareResult, ShareRejection>
+Job::validate_extended_share(const ExtendedWork& work, const ExtendedShareInput& input) const {
+    if (input.extranonce.size() != input.extranonce_size ||
+        input.extranonce_prefix.size() > extranonce_size_ ||
+        input.extranonce_size != extranonce_size_ - input.extranonce_prefix.size()) [[unlikely]]
+        return rejected(ShareReject::InvalidExtranonce2Size);
+
+    Bytes coinbase;
+    coinbase.reserve(work.coinbase_tx_prefix.size() + input.extranonce_prefix.size() +
+                     input.extranonce.size() + work.coinbase_tx_suffix.size());
+    append(coinbase, work.coinbase_tx_prefix);
+    append(coinbase, input.extranonce_prefix);
+    append(coinbase, input.extranonce);
+    append(coinbase, work.coinbase_tx_suffix);
+
+    StandardShareInput standard_input;
+    standard_input.legacy_coinbase = coinbase;
+    standard_input.merkle_root =
+        util::merkle_root_from_branch(util::sha256d(coinbase), work.merkle_path);
+    standard_input.ntime = input.ntime;
+    standard_input.nonce = input.nonce;
+    standard_input.version = input.version;
+    standard_input.version_mask = input.version_mask;
+    standard_input.share_target = input.share_target;
+    standard_input.now_unix = input.now_unix;
+    return validate_standard_share(standard_input);
+}
+
+std::expected<ShareResult, ShareRejection>
+Job::validate_header(Bytes legacy_coinbase, const util::Hash256& merkle_root, uint32_t ntime,
+                     uint32_t nonce, uint32_t version,
+                     const util::uint256& share_target) const {
+    const std::array<uint8_t, util::kHeaderSize> header =
+        build_header(merkle_root, ntime, nonce, version);
     const util::Hash256 block_hash = util::sha256d(header);
     const util::uint256 hash_value = util::uint256::from_le_bytes(block_hash);
 
     const double difficulty = util::difficulty_from_target(hash_value);
     const bool is_block = util::meets_target(hash_value, network_target_);
 
-    if (!is_block && !util::meets_target(hash_value, input.share_target))
+    if (!is_block && !util::meets_target(hash_value, share_target))
         return std::unexpected(ShareRejection{ShareReject::AboveTarget, difficulty});
 
     ShareResult result;
@@ -244,7 +316,7 @@ std::expected<ShareResult, ShareRejection> Job::validate_share(const ShareInput&
     result.is_block = is_block;
     result.header = header;
     util::to_hex_reversed_into(result.block_hash_chars, block_hash);
-    result.legacy_coinbase = std::move(coinbase);
+    result.legacy_coinbase = std::move(legacy_coinbase);
     return result;
 }
 

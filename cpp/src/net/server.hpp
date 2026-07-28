@@ -1,7 +1,6 @@
 #pragma once
-// Stratum TCP server: a pool of epoll reactor threads. Each connection is owned by exactly one
-// reactor, so per-connection state needs no locking; the work thread notifies sessions lock-free
-// via the connection's shared_ptr.
+// Epoll mining server for SV1 and authenticated or plaintext SV2.
+// Reactor bookkeeping is worker-owned; sockets and sessions synchronize cross-thread pool calls.
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -9,6 +8,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -16,18 +16,27 @@
 
 #include "core/config.hpp"
 #include "pool/pool.hpp"
+#include "util/unique_fd.hpp"
+
+namespace erikslund::sv2 {
+class NoiseCredentials;
+}
 
 namespace erikslund::net {
 
 struct ServerWorker; // per-reactor epoll state; defined in server.cpp
 struct ServerTestPeek;
 
+enum class WireProtocol : uint8_t { Sv1, Sv2Noise, Sv2Plaintext };
+
 class Server {
 public:
     Server(Pool& pool, const Config& config);
 
-    // Bind + listen on every configured port. Throws on failure.
     void start();
+
+    // Test-only: the port actually bound when configured as 0.
+    uint16_t bound_port(WireProtocol protocol) const;
 
     // Accept loop, round-robin onto reactors. Returns once `stop` fires (joins reactors).
     void run(const std::stop_token& stop);
@@ -36,10 +45,16 @@ public:
 
 private:
     struct Listener {
-        int fd;
+        util::UniqueFd socket;
         uint16_t port;
+        WireProtocol protocol;
     };
 
+    void bind_listener_group(const std::string& host,
+                             const std::vector<uint16_t>& ports,
+                             WireProtocol protocol);
+    void start_authenticated_sv2();
+    void start_plaintext_sv2();
     void worker_loop(ServerWorker& worker, const std::stop_token& stop);
 
     // A trusted-source connection awaiting its PROXY header, deferred to the reader pool so a
@@ -55,11 +70,23 @@ private:
     void proxy_reader_loop(const std::stop_token& stop);
     // Hand an accepted fd to reactor `worker_index` for adoption (queue + wake). Thread-safe:
     // called from the acceptor and the proxy reader pool.
-    void deliver_to_worker(size_t worker_index, int fd, std::string peer);
+    void deliver_to_worker(size_t worker_index, int fd, std::string peer, WireProtocol protocol);
+    bool reserve_noise_handshake();
+    void release_noise_handshake();
 
     Pool& pool_;
     std::string host_;
     std::vector<uint16_t> ports_;
+    std::string sv2_host_;
+    std::vector<uint16_t> sv2_ports_;
+    std::string sv2_static_secret_key_file_;
+    std::string sv2_authority_public_key_file_;
+    std::string sv2_certificate_file_;
+    std::shared_ptr<const sv2::NoiseCredentials> sv2_noise_credentials_;
+    std::optional<int64_t> sv2_certificate_expiry_timestamp_;
+    std::atomic<bool> certificate_validity_warning_logged_{false};
+    std::string sv2_plaintext_host_;
+    std::vector<uint16_t> sv2_plaintext_ports_;
     int max_clients_;
     size_t max_line_bytes_;
     int drop_idle_seconds_;
@@ -68,6 +95,7 @@ private:
     double work_rebroadcast_seconds_;
     std::vector<std::string> proxy_protocol_from_; // trusted PROXY-header sources (empty = off)
     unsigned worker_count_;
+    std::atomic<size_t> incomplete_noise_handshakes_{0};
     std::vector<Listener> listeners_;
     std::vector<std::unique_ptr<ServerWorker>> workers_;
 

@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "mining/client.hpp"
 #include "stats/share_accounting.hpp"
 #include "stratum/job.hpp"
 #include "stratum/message.hpp"
@@ -25,7 +26,7 @@ inline constexpr size_t kMaxSeenShares = 16384;
 struct SessionTestPeek; // test-only access to private dedup internals
 
 // Outbound side of a connection (socket in prod, recorder in tests).
-class Connection {
+class Connection : public virtual mining::Connection {
 public:
     virtual ~Connection() = default;
     virtual void send_line(std::string_view line) = 0;
@@ -33,7 +34,6 @@ public:
         for (std::string_view line : lines)
             send_line(line);
     }
-    virtual std::string peer() const = 0;
 };
 
 // Everything a session needs from the pool. Implemented by Pool; faked in tests.
@@ -73,8 +73,8 @@ public:
         (void)worker;
         return {};
     }
-    virtual void on_block_found(const std::string& address, const std::string& worker, const Job& job,
-                                const ShareResult& result) = 0;
+    virtual void on_block_found(const std::string& address, const std::string& worker,
+                                const Job& job, const ShareResult& result) = 0;
 
     // Vardiff + protocol parameters (sourced from Config).
     virtual bool vardiff_enabled() const = 0;
@@ -85,7 +85,7 @@ public:
     virtual uint32_t version_mask() const = 0;
 };
 
-class Session {
+class Session : public mining::Client {
 public:
     Session(PoolContext& pool, Connection& connection, Bytes extranonce1);
 
@@ -95,13 +95,16 @@ public:
     // Thread-safe: work thread pushes work while the read thread may be in a submit.
     void send_set_difficulty();
     void send_notify(const Job& job, bool clean);
+    void publish_job(const Job& job, bool clean) override { send_notify(job, clean); }
 
     // Thread-safe; called periodically by the pool's vardiff loop.
-    void maybe_retarget();
+    void maybe_retarget() override;
 
     bool subscribed() const { return subscribed_; }
     bool authorized() const { return authorized_; }
-    int protocol_errors() const { return protocol_errors_; }
+    bool ever_authorized() const override { return authorized_; }
+    int protocol_errors() const override { return protocol_errors_; }
+    bool should_close() const override { return false; }
     const std::string& extranonce1_hex() const { return extranonce1_hex_; }
     double difficulty() const { return difficulty_; }
     uint32_t version_mask() const { return version_mask_; }
@@ -112,27 +115,8 @@ public:
     double best_difficulty() const { return best_difficulty_; }
     std::string peer() const { return connection_.peer(); }
 
-    struct SessionStats {
-        std::string address;
-        std::string worker;
-        std::string peer;
-        std::string user_agent;
-        double difficulty = 0.0;
-        double best_difficulty = 0.0;
-        double total_share_difficulty = 0.0;
-        uint64_t shares_accepted = 0;
-        uint64_t shares_rejected = 0;
-        int64_t last_share_timestamp = 0; // wall epoch (DISPLAYED)
-        int64_t connected_at = 0;         // wall epoch (DISPLAYED)
-        int64_t connected_for = 0;        // monotonic duration in seconds
-        bool subscribed = false;
-        bool authorized = false;
-        // Decaying hashrate (diff/s) per window, aged to snapshot time.
-        std::array<double, 7> hashrate_windows{};
-        stats::WorkerAccountingHandle worker_accounting;
-    };
     // Thread-safe snapshot of this session's stats (for the HTTP API).
-    SessionStats stats(bool include_worker_accounting = false) const;
+    mining::ClientStats stats(bool include_worker_accounting = false) const override;
 
 private:
     void dispatch(const Request& request);
@@ -144,7 +128,6 @@ private:
 
     // Caller holds mutex_; the public send_* wrap these.
     void do_send_set_difficulty();
-    void do_send_notify(const Job& job, bool clean);
     std::string set_difficulty_line();
     std::optional<std::string> build_notify_line(const Job& job, bool clean);
     void send_difficulty_then_work();
@@ -193,7 +176,7 @@ private:
     double previous_difficulty_ = 0.0;
     bool pending_difficulty_change_ = false;
     int64_t connected_at_ = 0;          // wall epoch: DISPLAYED
-    double connected_at_steady_ = 0.0;  // monotonic: decay clock + connected_for
+    double connected_at_steady_ = 0.0;  // monotonic: decay clock + connected_seconds
     int64_t last_share_timestamp_ = 0;  // wall epoch: DISPLAYED
     double last_retarget_ = 0.0;        // monotonic: retarget interval is a duration
     uint64_t shares_since_retarget_ = 0;
@@ -211,9 +194,8 @@ private:
     std::unordered_set<std::string> seen_shares_current_;
     std::unordered_set<std::string> seen_shares_previous_;
     void rotate_seen_shares();
-    // Highest publication seq delivered to this miner (under mutex_); drops out-of-order older
-    // jobs so a slow sender can't leave the miner grinding superseded work.
-    uint64_t last_notified_seq_ = 0;
+    // Highest pool publication delivered; sequence 0 is an unstamped direct job.
+    uint64_t last_notified_publication_sequence_ = 0;
     // Reused response-line buffer for the per-share ack/error fast paths (guarded by mutex_);
     // capacity persists so steady-state responses allocate nothing.
     std::string response_scratch_;

@@ -28,6 +28,7 @@
 #include "bitcoin/network.hpp"
 #include "bitcoin/work_source.hpp"
 #include "core/config.hpp"
+#include "mining/client.hpp"
 #include "stats/hashrate.hpp"
 #include "stats/share_accounting.hpp"
 #include "stratum/job.hpp"
@@ -36,6 +37,11 @@
 namespace erikslund {
 
 struct PoolTestPeek; // test-only access to the registry prune
+
+namespace sv2 {
+class Connection;
+class Session;
+} // namespace sv2
 
 class Pool : public stratum::PoolContext {
 public:
@@ -59,10 +65,14 @@ public:
     void notify_new_block();
 
     std::shared_ptr<stratum::Session> add_client(std::shared_ptr<stratum::Connection> connection);
-    void remove_client(const std::shared_ptr<stratum::Session>& session);
+    std::shared_ptr<sv2::Session> add_sv2_client(std::shared_ptr<sv2::Connection> connection);
+    void remove_client(const std::shared_ptr<mining::Client>& session);
     size_t client_count() const;
 
     void set_connector_ready(bool ready);
+    void set_sv2_authenticated_state(
+        std::optional<bool> ready,
+        std::optional<int64_t> certificate_expiry_timestamp);
 
     // include_workers samples the persistent per-worker registry into snapshot.workers (an
     // O(registry) walk under user_stats_mutex_). Only the stats-file writer passes true; the HTTP
@@ -94,7 +104,8 @@ public:
     // windows by the file's age. Call once at startup before serving.
     void recover_user_stats();
     void on_block_found(const std::string& address, const std::string& worker,
-                        const stratum::Job& job, const stratum::ShareResult& result) override;
+                        const stratum::Job& job,
+                        const stratum::ShareResult& result) override;
     bool vardiff_enabled() const override { return config_.variable_difficulty; }
     double min_difficulty() const override { return config_.minimum_difficulty; }
     double max_difficulty() const override { return config_.maximum_difficulty; }
@@ -111,9 +122,22 @@ public:
     std::string next_job_id();
 
 private:
-    struct Client {
-        std::shared_ptr<stratum::Connection> connection;
-        std::shared_ptr<stratum::Session> session;
+    enum class AuthenticatedSv2State : int8_t {
+        Disabled,
+        Unavailable,
+        Ready,
+    };
+    static constexpr int64_t kUnknownCertificateExpiry = -1;
+
+    struct ConnectedClient {
+        std::shared_ptr<mining::Connection> connection;
+        std::shared_ptr<mining::Client> session;
+        bool publish_asynchronously = false;
+    };
+    struct PendingPublication {
+        std::shared_ptr<ConnectedClient> recipient;
+        std::shared_ptr<const stratum::Job> job;
+        bool clean = false;
     };
 
     struct PendingBlock {
@@ -135,6 +159,10 @@ private:
     enum class PublishOutcome { Published, Duplicate, StaleHeight, StalePrevhash };
     PublishOutcome broadcast_job(const std::shared_ptr<const stratum::Job>& job, bool clean,
                                  bool require_new_prevhash = false);
+    void enqueue_publication(
+        const std::shared_ptr<ConnectedClient>& recipient,
+        const std::shared_ptr<const stratum::Job>& job, bool clean);
+    void publication_loop(const std::stop_token& stop);
     Bytes next_extranonce1();
     void write_stats();
     void spool_block(const PendingBlock& block);
@@ -149,7 +177,7 @@ private:
     // below (has_template_/last_template_time_/last_version_/fastblock_pending_). blocks_by_address_
     // and last_prevhash_ are under mutex_, NOT jobs_mutex_, despite sitting next to its fields.
     mutable std::mutex mutex_;
-    std::vector<std::shared_ptr<Client>> clients_;
+    std::vector<std::shared_ptr<ConnectedClient>> clients_;
     // jobs_mutex_ (shared) guards ONLY the job cache: current_job_, recent_jobs_, recent_order_,
     // publish_counter_.
     mutable std::shared_mutex jobs_mutex_;
@@ -172,6 +200,10 @@ private:
 
     std::atomic<bool> generator_ready_{false};
     std::atomic<bool> connector_ready_{false};
+    std::atomic<AuthenticatedSv2State> sv2_authenticated_state_{
+        AuthenticatedSv2State::Disabled};
+    std::atomic<int64_t> sv2_certificate_expiry_timestamp_{
+        kUnknownCertificateExpiry};
     std::atomic<int64_t> chain_blocks_{-1};
     int64_t started_ = 0;
     double started_steady_ = 0.0;
@@ -215,6 +247,11 @@ private:
     std::condition_variable_any submit_cv_;
     std::deque<PendingSubmission> submit_queue_;
     std::jthread submit_thread_;
+
+    std::mutex publication_mutex_;
+    std::condition_variable_any publication_cv_;
+    std::deque<PendingPublication> publication_queue_;
+    std::jthread publication_thread_;
 };
 
 // Whether one-block-ahead empty work is sound for the notified tip. confirmations == 1 (from

@@ -10,6 +10,7 @@
 #include "stratum/job.hpp"
 #include "util/difficulty.hpp"
 #include "util/hex.hpp"
+#include "util/merkle.hpp"
 #include "util/uint256.hpp"
 
 using namespace erikslund;
@@ -115,6 +116,7 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
     const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
     const Bytes coinbase2 = job.build_coinbase2(payout);
     const Bytes extranonce1 = from_hex("abbaabba");
+    const Bytes extranonce2 = from_hex("01020304");
 
     CHECK(job.coinbase1_hex() == "01000000010000000000000000000000000000000000000000000000000000"
                                  "000000000000ffffffff1602aa00");
@@ -147,6 +149,54 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
         job.coinbase1_hex() + to_hex(extranonce1) + "01020304" + to_hex(coinbase2);
     CHECK(to_hex(result->legacy_coinbase) == expected_legacy);
 
+    Bytes standard_prefix = extranonce1;
+    append(standard_prefix, extranonce2);
+    const StandardWork standard_work =
+        job.build_standard_work(payout, standard_prefix);
+    CHECK(to_hex(standard_work.legacy_coinbase) == expected_legacy);
+
+    StandardShareInput standard_input;
+    standard_input.legacy_coinbase = standard_work.legacy_coinbase;
+    standard_input.merkle_root = standard_work.merkle_root;
+    standard_input.ntime = 1700000000;
+    standard_input.nonce = 0x2a2a2a2a;
+    standard_input.version = 0x20000000;
+    standard_input.share_target = max_target;
+    standard_input.now_unix = 1700000000;
+    const auto standard_result = job.validate_standard_share(standard_input);
+    REQUIRE(standard_result);
+    CHECK(standard_result->header == result->header);
+    CHECK(standard_result->legacy_coinbase == result->legacy_coinbase);
+
+    const ExtendedWork extended_work = job.build_extended_work(payout);
+    CHECK(extended_work.coinbase_tx_prefix == from_hex(job.coinbase1_hex()));
+    CHECK(extended_work.coinbase_tx_suffix == coinbase2);
+    REQUIRE(extended_work.merkle_path.size() == job.merkle_branch_hex().size());
+    for (size_t i = 0; i < extended_work.merkle_path.size(); ++i)
+        CHECK(to_hex(extended_work.merkle_path[i]) == job.merkle_branch_hex()[i]);
+
+    Bytes extended_legacy = extended_work.coinbase_tx_prefix;
+    append(extended_legacy, extranonce1);
+    append(extended_legacy, extranonce2);
+    append(extended_legacy, extended_work.coinbase_tx_suffix);
+    CHECK(to_hex(extended_legacy) == expected_legacy);
+    CHECK(merkle_root_from_branch(sha256d(extended_legacy), extended_work.merkle_path) ==
+          standard_work.merkle_root);
+
+    ExtendedShareInput extended_input;
+    extended_input.extranonce_prefix = extranonce1;
+    extended_input.extranonce = extranonce2;
+    extended_input.extranonce_size = extranonce2.size();
+    extended_input.ntime = 1700000000;
+    extended_input.nonce = 0x2a2a2a2a;
+    extended_input.version = 0x20000000;
+    extended_input.share_target = max_target;
+    extended_input.now_unix = 1700000000;
+    const auto extended_result = job.validate_extended_share(extended_work, extended_input);
+    REQUIRE(extended_result);
+    CHECK(extended_result->header == result->header);
+    CHECK(extended_result->legacy_coinbase == result->legacy_coinbase);
+
     // Full block = header || varint(txn_count+1) || segwit-coinbase || txn_data.
     // Segwit serialization inserts marker/flag after nVersion and the 32-byte
     // reserved-value witness (01 20 <32 zero>) before nLockTime.
@@ -158,6 +208,58 @@ TEST_CASE("Job reproduces the Python pool golden vectors byte for byte") {
     const std::string expected_block = to_hex(result->header) + "03" + segwit_coinbase +
                                        "0123456789abcdef" + "fedcba9876543210";
     CHECK(job.build_block_hex(result->legacy_coinbase, result->header) == expected_block);
+    CHECK(job.build_block_hex(extended_result->legacy_coinbase, extended_result->header) ==
+          expected_block);
+}
+
+TEST_CASE("SV2 Standard work requires the full template extranonce") {
+    const Job job = make_job();
+    const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
+    CHECK_THROWS_AS(job.build_standard_work(payout, Bytes(7, 0)), std::invalid_argument);
+    CHECK_NOTHROW(job.build_standard_work(payout, Bytes(8, 0)));
+}
+
+TEST_CASE("SV2 Extended shares require the negotiated extranonce partition") {
+    const Job job = make_job();
+    const Bytes payout = from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6");
+    const ExtendedWork work = job.build_extended_work(payout);
+    const Bytes prefix = from_hex("abbaabba");
+    const Bytes extranonce = from_hex("01020304");
+    const uint256 max_target = uint256::from_display_hex(std::string(64, 'f'));
+
+    ExtendedShareInput input;
+    input.extranonce_prefix = prefix;
+    input.extranonce = extranonce;
+    input.extranonce_size = extranonce.size();
+    input.ntime = 1700000000;
+    input.version = 0x20000000;
+    input.share_target = max_target;
+    input.now_unix = 1700000000;
+    REQUIRE(job.validate_extended_share(work, input));
+
+    SUBCASE("submitted extranonce is shorter than negotiated") {
+        const Bytes short_extranonce(extranonce.size() - 1, 0);
+        input.extranonce = short_extranonce;
+        CHECK(job.validate_extended_share(work, input).error().reason ==
+              ShareReject::InvalidExtranonce2Size);
+    }
+    SUBCASE("submitted extranonce is longer than negotiated") {
+        const Bytes long_extranonce(extranonce.size() + 1, 0);
+        input.extranonce = long_extranonce;
+        CHECK(job.validate_extended_share(work, input).error().reason ==
+              ShareReject::InvalidExtranonce2Size);
+    }
+    SUBCASE("negotiated partition must fill the template extranonce") {
+        input.extranonce_size -= 1;
+        CHECK(job.validate_extended_share(work, input).error().reason ==
+              ShareReject::InvalidExtranonce2Size);
+    }
+    SUBCASE("prefix cannot exceed the template extranonce") {
+        const Bytes oversized_prefix(9, 0);
+        input.extranonce_prefix = oversized_prefix;
+        CHECK(job.validate_extended_share(work, input).error().reason ==
+              ShareReject::InvalidExtranonce2Size);
+    }
 }
 
 TEST_CASE("a solved share is detected as a block on an easy target") {

@@ -13,6 +13,12 @@ from erikslund_pool.config import Settings
 from erikslund_pool.exceptions import ConfigError
 from erikslund_pool.tests.base import SoloPoolTestCase
 
+_SV2_CREDENTIALS = {
+    "sv2_static_secret_key_file": "static.key",
+    "sv2_authority_public_key_file": "authority.pub",
+    "sv2_certificate_file": "certificate.bin",
+}
+
 
 class TestSettings(SoloPoolTestCase):
     def _write(self, obj) -> str:
@@ -95,6 +101,137 @@ class TestConfigSchema(SoloPoolTestCase):
         self.assertEqual(config.bind_host, "0.0.0.0")
         self.assertEqual(config.bind_ports, [3333])
         self.assertEqual(config.bind_port, 3333)
+
+    def test_sv2_plaintext_listeners_are_opt_in_and_default_to_loopback(self):
+        self.assertEqual(Settings.from_dict({}).sv2_plaintext_ports, [])
+        config = Settings.from_dict({"sv2_plaintext_listen": [":3334", ":3335"]})
+        self.assertEqual(config.sv2_plaintext_host, "127.0.0.1")
+        self.assertEqual(config.sv2_plaintext_ports, [3334, 3335])
+
+    def test_sv2_plaintext_listeners_reject_mixed_hosts(self):
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({
+                "sv2_plaintext_listen": ["127.0.0.1:3334", "0.0.0.0:3335"],
+            })
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({"sv2_plaintext_listen": "0.0.0.0:3334"})
+
+    def test_sv2_noise_listeners_require_complete_credentials(self):
+        self.assertEqual(Settings.from_dict({}).sv2_ports, [])
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({"sv2_listen": ":3334"})
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({"sv2_static_secret_key_file": "static.key"})
+
+        config = Settings.from_dict({
+            "sv2_listen": [":3334", ":3335"],
+            "sv2_static_secret_key_file": "/run/secrets/sv2-static",
+            "sv2_authority_public_key_file": "/run/secrets/sv2-authority",
+            "sv2_certificate_file": "/run/secrets/sv2-certificate",
+        })
+        self.assertEqual(config.sv2_host, "0.0.0.0")
+        self.assertEqual(config.sv2_ports, [3334, 3335])
+        self.assertEqual(
+            config.sv2_static_secret_key_file, "/run/secrets/sv2-static")
+
+    def test_sv2_noise_listeners_reject_mixed_hosts(self):
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({
+                "sv2_listen": ["127.0.0.1:3334", "0.0.0.0:3335"],
+                **_SV2_CREDENTIALS,
+            })
+
+    def test_sv2_listeners_reject_exact_authenticated_plaintext_overlap(self):
+        with self.assertRaisesRegex(ConfigError, "cannot both bind port 3334"):
+            Settings.from_dict({
+                "sv2_listen": "127.0.0.1:3334",
+                "sv2_plaintext_listen": "127.0.0.1:3334",
+                **_SV2_CREDENTIALS,
+            })
+
+    def test_sv2_listeners_reject_overlap_after_default_host_normalization(self):
+        overlapping_addresses = (
+            (":3334", ":3334"),
+            ("0.0.0.0:3334", ":3334"),
+            ("127.0.0.1:3334", ":3334"),
+        )
+        for noise_address, plaintext_address in overlapping_addresses:
+            with self.subTest(
+                noise_address=noise_address,
+                plaintext_address=plaintext_address,
+            ), self.assertRaisesRegex(ConfigError, "cannot both bind port 3334"):
+                Settings.from_dict({
+                    "sv2_listen": noise_address,
+                    "sv2_plaintext_listen": plaintext_address,
+                    **_SV2_CREDENTIALS,
+                })
+
+    def test_sv2_listeners_reject_one_overlap_among_multiple_ports(self):
+        with self.assertRaisesRegex(ConfigError, "cannot both bind port 3335"):
+            Settings.from_dict({
+                "sv2_listen": [":3334", ":3335"],
+                "sv2_plaintext_listen": [":13334", ":3335"],
+                **_SV2_CREDENTIALS,
+            })
+
+    def test_sv2_listeners_reject_same_port_on_disjoint_or_aliased_hosts(self):
+        secure_hosts = ("192.0.2.1", "localhost", "127.1")
+        for secure_host in secure_hosts:
+            with self.subTest(secure_host=secure_host), self.assertRaisesRegex(
+                ConfigError,
+                "cannot both bind port 3334",
+            ):
+                Settings.from_dict({
+                    "sv2_listen": f"{secure_host}:3334",
+                    "sv2_plaintext_listen": "127.0.0.1:3334",
+                    **_SV2_CREDENTIALS,
+                })
+
+    def test_sv2_listeners_allow_distinct_ports(self):
+        config = Settings.from_dict({
+            "sv2_listen": "127.0.0.1:3334",
+            "sv2_plaintext_listen": "127.0.0.1:13334",
+            **_SV2_CREDENTIALS,
+        })
+        self.assertEqual(config.sv2_ports, [3334])
+        self.assertEqual(config.sv2_plaintext_ports, [13334])
+
+    def test_cross_protocol_listeners_reject_conflicting_socket_binds(self):
+        conflicts = (
+            {
+                "stratum_listen": "0.0.0.0:4000",
+                "sv2_listen": "127.0.0.1:4000",
+                **_SV2_CREDENTIALS,
+            },
+            {
+                "stratum_listen": "0.0.0.0:4000",
+                "sv2_plaintext_listen": "127.0.0.1:4000",
+            },
+            {
+                "stratum_listen": "0.0.0.0:4000",
+                "api_listen": "127.0.0.1:4000",
+            },
+            {
+                "sv2_listen": "0.0.0.0:4000",
+                "sv2_plaintext_listen": "127.0.0.1:4000",
+                **_SV2_CREDENTIALS,
+            },
+            {
+                "sv2_listen": "0.0.0.0:4000",
+                "api_listen": "127.0.0.1:4000",
+                **_SV2_CREDENTIALS,
+            },
+            {
+                "sv2_plaintext_listen": "127.0.0.1:4000",
+                "api_listen": "127.0.0.1:4000",
+            },
+        )
+        for config in conflicts:
+            with self.subTest(config=config), self.assertRaisesRegex(
+                ConfigError,
+                "cannot both bind port 4000",
+            ):
+                Settings.from_dict(config)
 
     def test_flat_schema_is_rejected(self):
         # A flat (non-nested) schema is not accepted.
@@ -220,6 +357,12 @@ class TestConfigSchema(SoloPoolTestCase):
         self.assertEqual(config.extranonce1_size, 6)
         self.assertEqual(config.extranonce2_size, 4)
         self.assertEqual(config.coinbase_version, 2)
+
+    def test_max_line_bytes_must_be_positive(self):
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({"max_line_bytes": 0})
+        with self.assertRaises(ConfigError):
+            Settings.from_dict({"max_line_bytes": 0x100_0000})
 
     def test_schema_hint_key_is_ignored(self):
         # The "$schema" editor hint produces no field.

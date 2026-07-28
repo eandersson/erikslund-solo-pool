@@ -5,7 +5,6 @@ metadata:
   name: {{ include "erikslund-pool.fullname" . }}
   labels: {{- include "erikslund-pool.labels" . | nindent 4 }}
 spec:
-  # Replicas kept serving through voluntary disruptions (drains, upgrades).
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels: {{- include "erikslund-pool.selectorLabels" . | nindent 6 }}

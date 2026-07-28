@@ -75,6 +75,40 @@ struct ShareInput {
     int64_t now_unix = 0;
 };
 
+struct StandardWork {
+    Bytes legacy_coinbase;
+    util::Hash256 merkle_root{};
+};
+
+struct ExtendedWork {
+    Bytes coinbase_tx_prefix;
+    Bytes coinbase_tx_suffix;
+    std::vector<util::Hash256> merkle_path;
+};
+
+struct StandardShareInput {
+    ByteView legacy_coinbase;
+    util::Hash256 merkle_root{};
+    uint32_t ntime = 0;
+    uint32_t nonce = 0;
+    uint32_t version = 0;
+    uint32_t version_mask = 0x1fffe000;
+    util::uint256 share_target;
+    int64_t now_unix = 0;
+};
+
+struct ExtendedShareInput {
+    ByteView extranonce_prefix;
+    ByteView extranonce;
+    size_t extranonce_size = 0;
+    uint32_t ntime = 0;
+    uint32_t nonce = 0;
+    uint32_t version = 0;
+    uint32_t version_mask = 0x1fffe000;
+    util::uint256 share_target;
+    int64_t now_unix = 0;
+};
+
 class Job {
 public:
     // Takes the template BY VALUE: its multi-MB tx blob is moved out, so callers pass an rvalue.
@@ -90,6 +124,10 @@ public:
     const std::string& version_hex() const { return version_hex_; }
     const std::string& nbits_hex() const { return nbits_hex_; }
     const std::string& ntime_hex() const { return ntime_hex_; }
+    uint32_t version() const { return version_; }
+    uint32_t curtime() const { return curtime_; }
+    uint32_t bits() const { return bits_; }
+    const Bytes& prevhash_internal() const { return prevhash_internal_; }
     bool clean() const { return clean_; }
     int64_t height() const { return height_; }
     int txn_count() const { return static_cast<int>(txn_count_); }
@@ -103,18 +141,31 @@ public:
     const std::string& work_signature() const { return work_signature_; }
 
     Bytes build_coinbase2(ByteView payout_script) const;
+    StandardWork build_standard_work(ByteView payout_script, ByteView extranonce_prefix) const;
+    ExtendedWork build_extended_work(ByteView payout_script) const;
 
-    uint64_t publish_seq() const { return publish_seq_.load(std::memory_order_relaxed); }
-    void set_publish_seq(uint64_t seq) const { publish_seq_.store(seq, std::memory_order_relaxed); }
+    uint64_t publication_sequence() const {
+        return publication_sequence_.load(std::memory_order_relaxed);
+    }
+    void set_publication_sequence(uint64_t sequence) const {
+        publication_sequence_.store(sequence, std::memory_order_relaxed);
+    }
 
     // Pure; every field is treated as untrusted.
     [[nodiscard]] std::expected<ShareResult, ShareRejection> validate_share(const ShareInput& input) const;
+    [[nodiscard]] std::expected<ShareResult, ShareRejection>
+    validate_standard_share(const StandardShareInput& input) const;
+    [[nodiscard]] std::expected<ShareResult, ShareRejection>
+    validate_extended_share(const ExtendedWork& work, const ExtendedShareInput& input) const;
 
     std::string build_block_hex(ByteView legacy_coinbase, ByteView header) const;
 
 private:
     std::array<uint8_t, util::kHeaderSize> build_header(const util::Hash256& merkle_root, uint32_t ntime,
                                          uint32_t nonce, uint32_t version) const;
+    std::expected<ShareResult, ShareRejection>
+    validate_header(Bytes legacy_coinbase, const util::Hash256& merkle_root, uint32_t ntime,
+                    uint32_t nonce, uint32_t version, const util::uint256& share_target) const;
 
     std::string job_id_;
     bool clean_;
@@ -133,6 +184,7 @@ private:
     std::vector<bitcoin::CoinbaseOutput> coinbase_required_outputs_;
 
     Bytes tag_;
+    size_t extranonce_size_;
     size_t extranonce2_size_;
     Bytes donation_script_;
     double donation_percent_ = 0.0;
@@ -149,7 +201,7 @@ private:
     std::string ntime_hex_;
     std::string work_signature_;
 
-    mutable std::atomic<uint64_t> publish_seq_{0}; // see publish_seq()
+    mutable std::atomic<uint64_t> publication_sequence_{0};
 };
 
 } // namespace erikslund::stratum

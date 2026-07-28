@@ -32,6 +32,7 @@
 #include "core/logging.hpp"
 #include "core/version.hpp"
 #include "stats/poolstatus.hpp"
+#include "sv2/session.hpp"
 #include "util/endian.hpp"
 #include "util/hex.hpp"
 #include "util/sha256.hpp"
@@ -96,6 +97,9 @@ Pool::Pool(Config config, bitcoin::WorkSource& source)
     // commitment = sha256d(64 zero bytes).
     empty_commitment_ = "6a24aa21a9ed" + util::to_hex(util::sha256d(Bytes(64, 0)));
     submit_thread_ = std::jthread([this](const std::stop_token& stop) { submit_loop(stop); });
+    if (!config_.sv2_ports.empty() || !config_.sv2_plaintext_ports.empty())
+        publication_thread_ =
+            std::jthread([this](const std::stop_token& stop) { publication_loop(stop); });
 }
 
 void Pool::detect_network() {
@@ -125,6 +129,21 @@ void Pool::detect_network() {
 
 void Pool::set_connector_ready(bool ready) {
     connector_ready_.store(ready);
+}
+
+void Pool::set_sv2_authenticated_state(
+    std::optional<bool> ready,
+    std::optional<int64_t> certificate_expiry_timestamp) {
+    sv2_certificate_expiry_timestamp_.store(
+        certificate_expiry_timestamp.value_or(kUnknownCertificateExpiry),
+        std::memory_order_relaxed);
+    const AuthenticatedSv2State state =
+        !ready
+            ? AuthenticatedSv2State::Disabled
+            : (*ready ? AuthenticatedSv2State::Ready
+                      : AuthenticatedSv2State::Unavailable);
+    sv2_authenticated_state_.store(
+        state, std::memory_order_release);
 }
 
 std::string Pool::next_job_id() {
@@ -163,7 +182,7 @@ Pool::PublishOutcome Pool::broadcast_job(const std::shared_ptr<const stratum::Jo
             return PublishOutcome::StalePrevhash;
         // Stamp publication order (atomic with the publish decision); sessions use it to drop a
         // notify already superseded by a newer publication.
-        job->set_publish_seq(++publish_counter_);
+        job->set_publication_sequence(++publish_counter_);
         current_job_ = job;
         recent_jobs_[job->job_id()] = job;
         recent_order_.push_back(job->job_id());
@@ -172,7 +191,7 @@ Pool::PublishOutcome Pool::broadcast_job(const std::shared_ptr<const stratum::Jo
             recent_order_.pop_front();
         }
     }
-    std::vector<std::shared_ptr<Client>> recipients;
+    std::vector<std::shared_ptr<ConnectedClient>> recipients;
     {
         const std::scoped_lock lock(mutex_);
         recipients = clients_;
@@ -181,9 +200,63 @@ Pool::PublishOutcome Pool::broadcast_job(const std::shared_ptr<const stratum::Jo
         const size_t count = recipients.size();
         const size_t begin = broadcast_cursor_.fetch_add(1, std::memory_order_relaxed) % count;
         for (size_t offset = 0; offset < count; ++offset)
-            recipients[(begin + offset) % count]->session->send_notify(*job, clean);
+            if (const auto& client = recipients[(begin + offset) % count];
+                !client->publish_asynchronously)
+                client->session->publish_job(*job, clean);
+        // Publish SV1 work before optional SV2 work enters its queue.
+        for (size_t offset = 0; offset < count; ++offset)
+            if (const auto& client = recipients[(begin + offset) % count];
+                client->publish_asynchronously)
+                enqueue_publication(client, job, clean);
     }
     return PublishOutcome::Published;
+}
+
+void Pool::enqueue_publication(
+    const std::shared_ptr<ConnectedClient>& recipient,
+    const std::shared_ptr<const stratum::Job>& job, bool clean) {
+    {
+        const std::scoped_lock lock(mutex_, publication_mutex_);
+        if (!std::ranges::contains(clients_, recipient))
+            return;
+        const auto pending = std::ranges::find_if(
+            publication_queue_, [&](const PendingPublication& publication) {
+                return publication.recipient->session ==
+                       recipient->session;
+            });
+        if (pending == publication_queue_.end()) {
+            publication_queue_.push_back({recipient, job, clean});
+        } else {
+            pending->clean = pending->clean || clean;
+            if (job->publication_sequence() >=
+                pending->job->publication_sequence())
+                pending->job = job;
+        }
+    }
+    publication_cv_.notify_one();
+}
+
+void Pool::publication_loop(const std::stop_token& stop) {
+    std::unique_lock<std::mutex> lock(publication_mutex_);
+    while (true) {
+        publication_cv_.wait(lock, stop,
+                             [this] { return !publication_queue_.empty(); });
+        if (stop.stop_requested())
+            return;
+
+        PendingPublication publication = std::move(publication_queue_.front());
+        publication_queue_.pop_front();
+        lock.unlock();
+        try {
+            publication.recipient->session->publish_job(
+                *publication.job, publication.clean);
+        } catch (const std::exception& error) {
+            log::warning("Deferred work publication failed for {}: {}",
+                         publication.recipient->connection->peer(),
+                         error.what());
+        }
+        lock.lock();
+    }
 }
 
 std::shared_ptr<stratum::Job> Pool::make_job(bitcoin::BlockTemplate block_template, bool clean) {
@@ -407,15 +480,38 @@ Pool::add_client(std::shared_ptr<stratum::Connection> connection) {
         std::make_shared<stratum::Session>(*this, *connection, next_extranonce1());
     {
         const std::scoped_lock lock(mutex_);
-        clients_.push_back(std::make_shared<Client>(Client{std::move(connection), session}));
+        clients_.push_back(
+            std::make_shared<ConnectedClient>(
+                ConnectedClient{std::move(connection), session, false}));
     }
     log::info("Client connected: {} (extranonce1={})", peer, session->extranonce1_hex());
     return session;
 }
 
-void Pool::remove_client(const std::shared_ptr<stratum::Session>& session) {
-    const std::scoped_lock lock(mutex_);
+std::shared_ptr<sv2::Session>
+Pool::add_sv2_client(std::shared_ptr<sv2::Connection> connection) {
+    const std::string peer = connection->peer();
+    const auto maximum_payload_size = static_cast<uint32_t>(
+        std::min(config_.max_line_bytes, static_cast<size_t>(sv2::kMaximumFramePayloadSize)));
+    auto session = std::make_shared<sv2::Session>(
+        *this, *connection, next_extranonce1(), maximum_payload_size);
+    {
+        const std::scoped_lock lock(mutex_);
+        clients_.push_back(
+            std::make_shared<ConnectedClient>(
+                ConnectedClient{std::move(connection), session, true}));
+    }
+    log::debug("SV2 client connected: {}", peer);
+    return session;
+}
+
+void Pool::remove_client(const std::shared_ptr<mining::Client>& session) {
+    const std::scoped_lock lock(mutex_, publication_mutex_);
     std::erase_if(clients_, [&](const auto& client) { return client->session == session; });
+    std::erase_if(publication_queue_,
+                  [&](const PendingPublication& publication) {
+                      return publication.recipient->session == session;
+                  });
 }
 
 size_t Pool::client_count() const {
@@ -593,7 +689,7 @@ void Pool::vardiff_loop(const std::stop_token& stop) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         if (stop.stop_requested())
             break;
-        std::vector<std::shared_ptr<Client>> clients;
+        std::vector<std::shared_ptr<ConnectedClient>> clients;
         {
             const std::scoped_lock lock(mutex_);
             clients = clients_;
@@ -813,6 +909,23 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     snapshot.uptime = static_cast<int64_t>(now_steady - started_steady_);
     snapshot.generator_ready = generator_ready_.load();
     snapshot.connector_ready = connector_ready_.load();
+    const AuthenticatedSv2State authenticated_sv2_state =
+        sv2_authenticated_state_.load(std::memory_order_acquire);
+    if (authenticated_sv2_state != AuthenticatedSv2State::Disabled)
+        snapshot.sv2_authenticated_ready =
+            authenticated_sv2_state == AuthenticatedSv2State::Ready;
+    const int64_t certificate_expiry_timestamp =
+        sv2_certificate_expiry_timestamp_.load(std::memory_order_relaxed);
+    if (certificate_expiry_timestamp != kUnknownCertificateExpiry)
+        snapshot.sv2_certificate_expiry_timestamp =
+            certificate_expiry_timestamp;
+    const std::time_t snapshot_time = std::time(nullptr);
+    if (snapshot.sv2_authenticated_ready.value_or(false) &&
+        certificate_expiry_timestamp != kUnknownCertificateExpiry &&
+        snapshot_time >= 0 &&
+        static_cast<uint64_t>(snapshot_time) >
+            static_cast<uint64_t>(certificate_expiry_timestamp))
+        snapshot.sv2_authenticated_ready = false;
     snapshot.bitcoind_reachable = snapshot.generator_ready;
     snapshot.blocks_found = blocks_found_.load();
     snapshot.last_block_found = last_block_found_.load();
@@ -820,7 +933,7 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     snapshot.jobs_created = job_counter_.load();
 
     std::shared_ptr<const stratum::Job> job;
-    std::vector<std::shared_ptr<Client>> clients;
+    std::vector<std::shared_ptr<ConnectedClient>> clients;
     double last_template = 0.0;
     {
         const std::shared_lock<std::shared_mutex> jobs_lock(jobs_mutex_);
@@ -861,30 +974,59 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     std::set<stats::WorkerAccountingHandle,
              std::owner_less<stats::WorkerAccountingHandle>>
         connected_accounting;
+    size_t active_workers = 0;
     snapshot.clients.reserve(clients.size());
     for (const auto& client : clients) {
         const auto session_stats = client->session->stats(include_workers);
-        api::ClientSnapshot client_snapshot;
-        client_snapshot.address = session_stats.address;
-        client_snapshot.worker = session_stats.worker;
-        client_snapshot.peer = session_stats.peer;
-        client_snapshot.user_agent = session_stats.user_agent;
-        client_snapshot.difficulty = session_stats.difficulty;
-        client_snapshot.best_difficulty = session_stats.best_difficulty;
-        client_snapshot.total_share_diff = session_stats.total_share_difficulty;
-        client_snapshot.shares_accepted = session_stats.shares_accepted;
-        client_snapshot.shares_rejected = session_stats.shares_rejected;
-        client_snapshot.last_share_ts = session_stats.last_share_timestamp;
-        client_snapshot.connected_for = session_stats.connected_for; // monotonic duration
-        client_snapshot.subscribed = session_stats.subscribed;
-        client_snapshot.authorized = session_stats.authorized;
-        client_snapshot.hashrate_windows = session_stats.hashrate_windows;
-        if (include_workers && session_stats.worker_accounting)
-            connected_accounting.insert(session_stats.worker_accounting);
+        const auto append_client_snapshot =
+            [&](const mining::ClientChannelStats* channel) {
+                api::ClientSnapshot client_snapshot;
+                client_snapshot.address =
+                    channel ? channel->address : session_stats.address;
+                client_snapshot.worker =
+                    channel ? channel->worker : session_stats.worker;
+                client_snapshot.peer = session_stats.peer;
+                client_snapshot.user_agent = session_stats.user_agent;
+                client_snapshot.difficulty =
+                    channel ? channel->difficulty : session_stats.difficulty;
+                client_snapshot.best_difficulty =
+                    channel ? channel->best_difficulty
+                            : session_stats.best_difficulty;
+                client_snapshot.total_share_diff =
+                    channel ? channel->total_share_difficulty
+                            : session_stats.total_share_difficulty;
+                client_snapshot.shares_accepted =
+                    channel ? channel->shares_accepted
+                            : session_stats.shares_accepted;
+                client_snapshot.shares_rejected =
+                    channel ? channel->shares_rejected
+                            : session_stats.shares_rejected;
+                client_snapshot.last_share_ts =
+                    channel ? channel->last_share_timestamp
+                            : session_stats.last_share_timestamp;
+                client_snapshot.connected_for =
+                    channel ? channel->connected_seconds
+                            : session_stats.connected_seconds;
+                client_snapshot.subscribed = session_stats.subscribed;
+                client_snapshot.authorized = session_stats.authorized;
+                client_snapshot.hashrate_windows =
+                    channel ? channel->hashrate_windows
+                            : session_stats.hashrate_windows;
+                snapshot.clients.push_back(std::move(client_snapshot));
+            };
+
+        if (session_stats.channels.empty()) {
+            append_client_snapshot(nullptr);
+        } else {
+            active_workers += session_stats.channels.size();
+            for (const auto& channel : session_stats.channels) {
+                addresses.insert(channel.address);
+                if (include_workers && channel.worker_accounting)
+                    connected_accounting.insert(channel.worker_accounting);
+                append_client_snapshot(&channel);
+            }
+        }
         best_difficulty = std::max(best_difficulty, session_stats.best_difficulty);
-        if (!session_stats.address.empty())
-            addresses.insert(session_stats.address);
-        snapshot.clients.push_back(std::move(client_snapshot));
     }
     // Sample the persistent registry into snapshot.workers ONLY for the stats-file writer; the HTTP
     // path skips this O(registry) walk and its per-worker rate locks.
@@ -906,7 +1048,7 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
             }
     }
 
-    snapshot.connected = clients.size();
+    snapshot.connected = active_workers;
     snapshot.users = addresses.size();
     for (size_t cls = 0; cls < rejected_by_class_.size(); ++cls) {
         snapshot.shares_rejected_by_class[cls] =
@@ -932,6 +1074,8 @@ bool Pool::ready() const {
 
 void Pool::on_block_found(const std::string& address, const std::string& worker,
                           const stratum::Job& job, const stratum::ShareResult& result) {
+    // PendingBlock outlives the ShareResult via submit_queue_, so materialize the hash view.
+    // submitblock runs on the submit thread; blocking this reactor thread would stall its clients.
     std::shared_ptr<const PendingBlock> block = std::make_shared<PendingBlock>(PendingBlock{
         job.height(), std::string(result.block_hash_hex()),
         job.build_block_hex(result.legacy_coinbase, result.header), address, worker});

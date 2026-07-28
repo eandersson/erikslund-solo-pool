@@ -34,9 +34,10 @@ case "$IMPL" in
 cpp)
     docker build -q -t erikslund-pool-cpp cpp/docker >/dev/null
     docker run --rm -e BUILD_TYPE=Release -e RUN_TESTS=0 \
-        -v "$(pwd)/cpp:/src:ro" -v erikslund-cpp-build:/build erikslund-pool-cpp >/dev/null 2>&1 ;;
+        -v "$(pwd)/cpp:/src:ro" \
+        -v erikslund-cpp-build:/build erikslund-pool-cpp >/dev/null 2>&1 ;;
 python)
-    docker build -q -t erikslund-pool-py-ft python >/dev/null ;;
+    docker build -q -t erikslund-pool-py-ft -f python/Dockerfile . >/dev/null ;;
 *)
     echo "IMPL must be 'cpp' or 'python' (got '$IMPL')"; exit 1 ;;
 esac

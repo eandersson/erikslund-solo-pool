@@ -449,7 +449,7 @@ TEST_CASE("build_user_stats renders the persistent registry rows; address = thei
     s.workers = {make_worker("addr1", "w1", 3, 1, 9.0, 100, 5e6),
                  make_worker("addr1", "w2", 2, 0, 4.0, 200, 5e6),
                  make_worker("addr2", "w9", 1, 0, 1.0, 50, 1e6)};
-    // Two live connections for addr1 drive the "workers" count (rows persist past disconnect).
+    // Two live mining channels for addr1 drive the "workers" count (rows persist after close).
     s.clients = {make_conn("addr1", "w1"), make_conn("addr1", "w2")};
 
     auto user = build_user_stats("addr1", s);

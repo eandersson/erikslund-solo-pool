@@ -97,7 +97,8 @@ def target_to_difficulty(target: int) -> float:
 
 def difficulty_to_target(difficulty: float) -> int:
     """Share target for a pool difficulty; a hash meets it when hash <= target."""
-    return DIFF1_TARGET if difficulty <= 0 else int(DIFF1_TARGET / difficulty)
+    target = DIFF1_TARGET if difficulty <= 0 else int(DIFF1_TARGET / difficulty)
+    return min(target, (1 << 256) - 1)
 
 
 def format_difficulty(difficulty: float) -> str:

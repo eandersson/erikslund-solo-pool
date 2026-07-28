@@ -18,11 +18,15 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <deque>
+#include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -31,24 +35,45 @@
 #include "core/logging.hpp"
 #include "net/proxy_protocol.hpp"
 #include "net/socket_connection.hpp"
+#include "sv2/noise_connection.hpp"
+#include "sv2/session.hpp"
+#include "util/endian.hpp"
+#include "util/unique_fd.hpp"
 
 namespace erikslund::net {
 
+struct IncomingConnection {
+    int fd;
+    std::string peer;
+    WireProtocol protocol;
+};
+
 struct ClientConnection {
     int fd;
+    WireProtocol protocol;
     std::shared_ptr<SocketConnection> socket;
-    std::shared_ptr<stratum::Session> session;
+    std::shared_ptr<mining::Client> session;
+    std::shared_ptr<stratum::Session> sv1_session;
+    std::shared_ptr<sv2::Session> sv2_session;
+    std::shared_ptr<sv2::NoiseConnection> noise_connection;
     std::string buffer;
     std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point created_at;
+    bool holds_noise_handshake_slot = false;
+
+    bool should_close() const {
+        return socket->dead() ||
+               (protocol == WireProtocol::Sv2Noise && noise_connection->terminal()) ||
+               session->should_close();
+    }
 };
 
 struct ServerWorker {
     int epoll_fd = -1;
     int event_fd = -1; // acceptor pokes it to deliver new connections
     std::mutex queue_mutex;
-    std::vector<std::pair<int, std::string>> incoming; // accepted (fd, peer) awaiting adoption
-    std::atomic<size_t> pending{0};                    // incoming.size() visible to the accept gate
+    std::vector<IncomingConnection> incoming; // accepted connections awaiting adoption
+    std::atomic<size_t> pending{0};            // incoming.size() visible to the accept gate
     std::unordered_map<int, std::unique_ptr<ClientConnection>> connections;
     std::jthread thread;
 };
@@ -56,7 +81,7 @@ struct ServerWorker {
 namespace {
 
 constexpr int kMaxEventsPerWait = 64;        // epoll_event batch size
-constexpr int kEpollWaitTimeoutMs = 500;     // wakes the loop to honor stop + run the idle sweep
+constexpr int kEpollWaitTimeoutMs = 500;
 constexpr size_t kReadChunkBytes = 4096;     // per-recv() read buffer
 constexpr size_t kMaxReadBytesPerEvent = size_t{32} * 1024;
 constexpr int kListenBacklog = 1024;
@@ -65,12 +90,148 @@ constexpr int kProxyHeaderTimeoutMs = 2000;  // PROXY header read deadline
 // can't block accept(). Excess past the queue cap is shed. Both bounds count toward max_clients.
 constexpr unsigned kProxyReaderThreads = 4;
 constexpr size_t kMaxProxyQueue = 256;
+constexpr size_t kMaxIncompleteNoiseHandshakes = 32;
+constexpr size_t kSv2AdmissionLimitNumerator = 3;
+constexpr size_t kSv2AdmissionLimitDenominator = 4;
 constexpr std::chrono::seconds kEvictionSweepInterval{1};
+constexpr std::chrono::seconds kNoiseHandshakeTimeout{10};
+constexpr std::size_t kNoiseCertificateVersionOffset = 0;
+constexpr std::size_t kNoiseCertificateExpiryOffset = 6;
+constexpr uint16_t kSupportedNoiseCertificateVersion = 0;
+
+constexpr size_t sv2_admission_limit(int max_clients) {
+    if (max_clients <= 0)
+        return 0;
+    return static_cast<size_t>(max_clients) * kSv2AdmissionLimitNumerator /
+           kSv2AdmissionLimitDenominator;
+}
+
+class SecretBytes {
+public:
+    explicit SecretBytes(std::size_t expected_size)
+        : bytes_(expected_size + 1), expected_size_(expected_size) {}
+
+    ~SecretBytes() {
+        volatile uint8_t* output = bytes_.data();
+        for (std::size_t index = 0; index < bytes_.size(); ++index)
+            output[index] = 0;
+    }
+
+    SecretBytes(const SecretBytes&) = delete;
+    SecretBytes& operator=(const SecretBytes&) = delete;
+
+    [[nodiscard]] uint8_t* data() noexcept { return bytes_.data(); }
+    [[nodiscard]] std::size_t read_capacity() const noexcept {
+        return bytes_.size();
+    }
+    [[nodiscard]] std::size_t expected_size() const noexcept {
+        return expected_size_;
+    }
+    [[nodiscard]] ByteView view() const {
+        return ByteView(bytes_.data(), expected_size_);
+    }
+
+private:
+    Bytes bytes_;
+    std::size_t expected_size_;
+};
+
+// Raw read(), not ifstream: a stream buffer would hold a copy of the secret we cannot wipe.
+void read_exact_secret_file(const std::string& path, SecretBytes& output,
+                            std::string_view description) {
+    int file_descriptor;
+    do {
+        file_descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    } while (file_descriptor < 0 && errno == EINTR);
+    util::UniqueFd input(file_descriptor);
+    if (!input)
+        throw std::runtime_error("cannot open SV2 " +
+                                 std::string(description) + " file: " + path);
+
+    std::size_t total_bytes_read = 0;
+    while (total_bytes_read < output.read_capacity()) {
+        const ssize_t bytes_read =
+            ::read(input.get(), output.data() + total_bytes_read,
+                   output.read_capacity() - total_bytes_read);
+        if (bytes_read > 0) {
+            total_bytes_read += static_cast<std::size_t>(bytes_read);
+            continue;
+        }
+        if (bytes_read == 0)
+            break;
+        if (errno == EINTR)
+            continue;
+        const int error_number = errno;
+        throw std::runtime_error(
+            "cannot read SV2 " + std::string(description) + " file: " +
+            path + ": " + std::strerror(error_number));
+    }
+    if (total_bytes_read != output.expected_size())
+        throw std::runtime_error(
+            "SV2 " + std::string(description) + " file " + path +
+            " must contain exactly " +
+            std::to_string(output.expected_size()) + " raw bytes");
+}
+
+Bytes read_exact_binary_file(const std::string& path, std::size_t expected_size,
+                             std::string_view description) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        throw std::runtime_error("cannot open SV2 " + std::string(description) +
+                                 " file: " + path);
+
+    Bytes bytes(expected_size + 1);
+    input.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    const std::size_t actual_size = static_cast<std::size_t>(input.gcount());
+    if (input.bad())
+        throw std::runtime_error("cannot read SV2 " + std::string(description) +
+                                 " file: " + path);
+    if (actual_size != expected_size)
+        throw std::runtime_error("SV2 " + std::string(description) + " file " + path +
+                                 " must contain exactly " + std::to_string(expected_size) +
+                                 " raw bytes");
+    bytes.resize(expected_size);
+    return bytes;
+}
+
+std::optional<int64_t> noise_certificate_expiry(ByteView certificate) {
+    if (util::read_le16(certificate.data() +
+                        kNoiseCertificateVersionOffset) !=
+        kSupportedNoiseCertificateVersion)
+        return std::nullopt;
+    return static_cast<int64_t>(util::read_le32(
+        certificate.data() + kNoiseCertificateExpiryOffset));
+}
+
+uint32_t current_unix_time() {
+    const std::time_t now = std::time(nullptr);
+    if (now < 0 ||
+        static_cast<uint64_t>(now) > std::numeric_limits<uint32_t>::max())
+        throw std::runtime_error("current Unix time is outside the SV2 certificate range");
+    return static_cast<uint32_t>(now);
+}
 
 void set_nonblocking(int fd) {
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags >= 0)
-        ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    int flags;
+    do {
+        flags = ::fcntl(fd, F_GETFL, 0);
+    } while (flags < 0 && errno == EINTR);
+    if (flags < 0) {
+        const int error = errno;
+        throw std::runtime_error(std::string("fcntl(F_GETFL) failed: ") +
+                                 std::strerror(error));
+    }
+
+    int result;
+    do {
+        result = ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) {
+        const int error = errno;
+        throw std::runtime_error(std::string("fcntl(F_SETFL) failed: ") +
+                                 std::strerror(error));
+    }
 }
 
 int bind_listener(const std::string& host, uint16_t port) {
@@ -90,15 +251,31 @@ int bind_listener(const std::string& host, uint16_t port) {
     bind_address.sin_port = htons(port);
     if (host.empty() || host == "0.0.0.0")
         bind_address.sin_addr.s_addr = INADDR_ANY;
-    else if (inet_pton(AF_INET, host.c_str(), &bind_address.sin_addr) != 1)
+    else if (inet_pton(AF_INET, host.c_str(), &bind_address.sin_addr) != 1) {
+        ::close(fd);
         throw std::runtime_error("invalid bind host: " + host);
+    }
 
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_address), sizeof(bind_address)) < 0)
-        throw std::runtime_error("bind " + host + ":" + std::to_string(port) +
-                                 " failed: " + std::strerror(errno));
-    if (::listen(fd, kListenBacklog) < 0)
-        throw std::runtime_error(std::string("listen() failed: ") + std::strerror(errno));
-    set_nonblocking(fd);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_address), sizeof(bind_address)) < 0) {
+        const int code = errno;
+        const std::string error = "bind " + host + ":" + std::to_string(port) +
+                                  " failed: " + std::strerror(code);
+        ::close(fd);
+        throw std::runtime_error(error);
+    }
+    if (::listen(fd, kListenBacklog) < 0) {
+        const int code = errno;
+        const std::string error =
+            std::string("listen() failed: ") + std::strerror(code);
+        ::close(fd);
+        throw std::runtime_error(error);
+    }
+    try {
+        set_nonblocking(fd);
+    } catch (...) {
+        ::close(fd);
+        throw;
+    }
     return fd;
 }
 
@@ -129,6 +306,13 @@ Server::Server(Pool& pool, const Config& config)
     : pool_(pool),
       host_(config.bind_host),
       ports_(config.stratum_ports()),
+      sv2_host_(config.sv2_host),
+      sv2_ports_(config.sv2_ports),
+      sv2_static_secret_key_file_(config.sv2_static_secret_key_file),
+      sv2_authority_public_key_file_(config.sv2_authority_public_key_file),
+      sv2_certificate_file_(config.sv2_certificate_file),
+      sv2_plaintext_host_(config.sv2_plaintext_host),
+      sv2_plaintext_ports_(config.sv2_plaintext_ports),
       max_clients_(config.max_clients),
       max_line_bytes_(config.max_line_bytes),
       drop_idle_seconds_(config.drop_idle_seconds),
@@ -141,12 +325,103 @@ Server::Server(Pool& pool, const Config& config)
 // Out-of-line so ServerWorker is complete at the point unique_ptr is destroyed.
 Server::~Server() = default;
 
-void Server::start() {
-    for (uint16_t port : ports_) {
-        const int fd = bind_listener(host_, port);
-        listeners_.push_back({fd, port});
-        log::info("Stratum listening on {}:{}", host_, port);
+void Server::bind_listener_group(const std::string& host,
+                                 const std::vector<uint16_t>& ports,
+                                 WireProtocol protocol) {
+    std::vector<Listener> pending;
+    pending.reserve(ports.size());
+    for (uint16_t port : ports)
+        pending.push_back(
+            {util::UniqueFd(bind_listener(host, port)), port, protocol});
+
+    listeners_.reserve(listeners_.size() + pending.size());
+    for (Listener& listener : pending)
+        listeners_.push_back(std::move(listener));
+}
+
+void Server::start_authenticated_sv2() {
+    if (sv2_ports_.empty())
+        return;
+
+    try {
+        {
+            SecretBytes static_secret(SV2_NOISE_SECRET_KEY_SIZE);
+            read_exact_secret_file(sv2_static_secret_key_file_, static_secret,
+                                   "static secret key");
+            const Bytes authority_public_key = read_exact_binary_file(
+                sv2_authority_public_key_file_, SV2_NOISE_PUBLIC_KEY_SIZE,
+                "authority public key");
+            const Bytes certificate = read_exact_binary_file(
+                sv2_certificate_file_, SV2_NOISE_CERTIFICATE_SIZE,
+                "certificate");
+
+            sv2_certificate_expiry_timestamp_ =
+                noise_certificate_expiry(certificate);
+            pool_.set_sv2_authenticated_state(
+                false, sv2_certificate_expiry_timestamp_);
+
+            auto credentials = sv2::NoiseCredentials::load(
+                static_secret.view(), authority_public_key, certificate,
+                current_unix_time());
+            if (!credentials)
+                throw std::runtime_error(
+                    std::string("invalid SV2 Noise credentials: ") +
+                    sv2_noise_status_string(credentials.error()));
+            sv2_noise_credentials_ = std::move(*credentials);
+        }
+
+        bind_listener_group(sv2_host_, sv2_ports_, WireProtocol::Sv2Noise);
+    } catch (const std::exception& error) {
+        sv2_noise_credentials_.reset();
+        pool_.set_sv2_authenticated_state(
+            false, sv2_certificate_expiry_timestamp_);
+        log::warning("Authenticated SV2 disabled; SV1 remains available: {}",
+                     error.what());
+        return;
     }
+
+    pool_.set_sv2_authenticated_state(true,
+                                      sv2_certificate_expiry_timestamp_);
+    if (sv2_certificate_expiry_timestamp_)
+        log::info("SV2 Noise certificate expires at Unix timestamp {}",
+                  *sv2_certificate_expiry_timestamp_);
+    for (uint16_t port : sv2_ports_)
+        log::info("Authenticated SV2 listening on {}:{}", sv2_host_, port);
+}
+
+void Server::start_plaintext_sv2() {
+    if (sv2_plaintext_ports_.empty())
+        return;
+
+    try {
+        bind_listener_group(sv2_plaintext_host_, sv2_plaintext_ports_,
+                            WireProtocol::Sv2Plaintext);
+    } catch (const std::exception& error) {
+        log::warning(
+            "SV2 plaintext development listeners disabled; SV1 remains "
+            "available: {}",
+            error.what());
+        return;
+    }
+
+    for (uint16_t port : sv2_plaintext_ports_)
+        log::warning(
+            "SV2 plaintext development listener on {}:{}; Noise transport is "
+            "required before production use",
+            sv2_plaintext_host_, port);
+}
+
+void Server::start() {
+    bind_listener_group(host_, ports_, WireProtocol::Sv1);
+    for (uint16_t port : ports_)
+        log::info("Stratum listening on {}:{}", host_, port);
+
+    pool_.set_sv2_authenticated_state(
+        sv2_ports_.empty() ? std::nullopt : std::optional<bool>{false},
+        std::nullopt);
+    start_authenticated_sv2();
+    start_plaintext_sv2();
+
     if (proxy_protocol_from_.empty()) {
         log::info("PROXY protocol: disabled (all connections direct)");
     } else {
@@ -163,18 +438,93 @@ void Server::start() {
     }
 }
 
+uint16_t Server::bound_port(WireProtocol protocol) const {
+    const auto listener =
+        std::ranges::find_if(listeners_, [protocol](const Listener& value) {
+            return value.protocol == protocol;
+        });
+    if (listener == listeners_.end())
+        throw std::logic_error("listener is not started");
+
+    sockaddr_in address{};
+    socklen_t address_size = sizeof(address);
+    if (::getsockname(listener->socket.get(),
+                      reinterpret_cast<sockaddr*>(&address),
+                      &address_size) < 0)
+        throw std::runtime_error(std::string("getsockname() failed: ") + std::strerror(errno));
+    return ntohs(address.sin_port);
+}
+
 void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
+    const auto release_noise_handshake_slot = [this](ClientConnection* connection) {
+        if (!connection->holds_noise_handshake_slot)
+            return;
+        connection->holds_noise_handshake_slot = false;
+        release_noise_handshake();
+    };
+
+    const auto report_noise_failure = [this](ClientConnection* connection) {
+        if (connection->protocol != WireProtocol::Sv2Noise ||
+            !connection->noise_connection->terminal())
+            return;
+
+        const sv2_noise_status status =
+            connection->noise_connection->failure_status();
+        if (status == SV2_NOISE_ERROR_CERTIFICATE_EXPIRED ||
+            status == SV2_NOISE_ERROR_CERTIFICATE_NOT_YET_VALID) {
+            pool_.set_sv2_authenticated_state(
+                false, sv2_certificate_expiry_timestamp_);
+            if (!certificate_validity_warning_logged_.exchange(
+                    true, std::memory_order_relaxed)) {
+                log::warning(
+                    "SV2 Noise handshake failed for {}: {}; new authenticated "
+                    "SV2 sessions are unavailable until valid credentials are "
+                    "loaded",
+                    connection->socket->peer(),
+                    sv2_noise_status_string(status));
+            }
+            return;
+        }
+
+        const std::string_view phase =
+            connection->noise_connection->handshake_complete()
+                ? "transport"
+                : "handshake";
+        const std::string_view reason =
+            status == SV2_NOISE_OK
+                ? "invalid encrypted stream"
+                : sv2_noise_status_string(status);
+        log::debug("SV2 Noise {} failed for {}: {}", phase,
+                   connection->socket->peer(), reason);
+    };
+
+    const auto finish_noise_transport = [](ClientConnection* connection) {
+        if (connection->protocol == WireProtocol::Sv2Noise &&
+            connection->noise_connection)
+            static_cast<void>(connection->noise_connection->finish());
+    };
+
     // `connection` dangles after this; callers must not touch it again.
     const auto remove_connection = [&](ClientConnection* connection) {
         const int fd = connection->fd;
+        release_noise_handshake_slot(connection);
+        finish_noise_transport(connection);
         connection->socket->detach_reactor();
         ::epoll_ctl(worker.epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
         pool_.remove_client(connection->session);
-        log::info("Client disconnected: {}", connection->socket->peer());
+        if (connection->protocol != WireProtocol::Sv2Noise ||
+            connection->noise_connection->handshake_complete()) {
+            if (connection->protocol == WireProtocol::Sv1 ||
+                connection->session->ever_authorized())
+                log::info("Client disconnected: {}",
+                          connection->socket->peer());
+            else
+                log::debug("Client disconnected before authorization: {}",
+                           connection->socket->peer());
+        }
         worker.connections.erase(fd); // dtor closes the fd
     };
 
-    // Feeds complete lines to the session. Returns false if the connection was removed.
     const auto handle_readable = [&](ClientConnection* connection) -> bool {
         char chunk[kReadChunkBytes];
         size_t consumed_this_event = 0;
@@ -184,35 +534,60 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
             if (n > 0) {
                 consumed_this_event += static_cast<size_t>(n);
                 connection->last_activity = event_time;
-                connection->buffer.append(chunk, static_cast<size_t>(n));
-                // Scan with a moving offset and erase the consumed prefix once at the end, not
-                // per line (which would be quadratic on a pipelined burst). handle_line copies out
-                // what it keeps, so a view is safe.
                 connection->socket->cork();
-                size_t start = 0;
-                size_t newline;
-                while ((newline = connection->buffer.find('\n', start)) != std::string::npos) {
-                    std::string_view line(connection->buffer.data() + start, newline - start);
-                    start = newline + 1;
-                    if (!line.empty() && line.back() == '\r')
-                        line.remove_suffix(1);
-                    if (!line.empty()) {
-                        connection->session->handle_line(line);
-                        if (max_protocol_errors_ > 0 &&
-                            connection->session->protocol_errors() >= max_protocol_errors_) {
-                            log::info("Client {} exceeded the protocol-error budget ({}); "
-                                      "disconnecting",
-                                      connection->socket->peer(), max_protocol_errors_);
-                            connection->socket->uncork(); // flush the error reply before dropping
-                            remove_connection(connection);
-                            return false;
-                        }
+                if (connection->protocol == WireProtocol::Sv1) {
+                    connection->buffer.append(chunk, static_cast<size_t>(n));
+                    // Scan with a moving offset and erase the consumed prefix once at the end, not
+                    // per line (which would be quadratic on a pipelined burst).
+                    size_t start = 0;
+                    size_t newline;
+                    while ((newline = connection->buffer.find('\n', start)) != std::string::npos) {
+                        std::string_view line(connection->buffer.data() + start, newline - start);
+                        start = newline + 1;
+                        if (!line.empty() && line.back() == '\r')
+                            line.remove_suffix(1);
+                        if (!line.empty())
+                            connection->sv1_session->handle_line(line);
                     }
+                    if (start > 0)
+                        connection->buffer.erase(0, start);
+                } else if (connection->protocol == WireProtocol::Sv2Noise) {
+                    const auto* data = reinterpret_cast<const uint8_t*>(chunk);
+                    const bool handshake_was_complete =
+                        connection->noise_connection->handshake_complete();
+                    Bytes plaintext = connection->noise_connection->receive(
+                        ByteView(data, static_cast<size_t>(n)));
+                    if (!handshake_was_complete &&
+                        connection->noise_connection->handshake_complete()) {
+                        release_noise_handshake_slot(connection);
+                        pool_.set_sv2_authenticated_state(
+                            true, sv2_certificate_expiry_timestamp_);
+                        certificate_validity_warning_logged_.store(
+                            false, std::memory_order_relaxed);
+                    }
+                    if (!plaintext.empty())
+                        connection->sv2_session->handle_bytes(plaintext);
+                } else {
+                    const auto* data = reinterpret_cast<const uint8_t*>(chunk);
+                    connection->sv2_session->handle_bytes(
+                        ByteView(data, static_cast<size_t>(n)));
                 }
-                connection->socket->uncork(); // one send() for every ack produced by this chunk
-                if (start > 0)
-                    connection->buffer.erase(0, start);
-                if (connection->buffer.size() > max_line_bytes_) {
+                connection->socket->uncork();
+
+                if (max_protocol_errors_ > 0 &&
+                    connection->session->protocol_errors() >= max_protocol_errors_) {
+                    log::info("Client {} exceeded the protocol-error budget ({}); disconnecting",
+                              connection->socket->peer(), max_protocol_errors_);
+                    remove_connection(connection);
+                    return false;
+                }
+                if (connection->should_close()) {
+                    report_noise_failure(connection);
+                    remove_connection(connection);
+                    return false;
+                }
+                if (connection->protocol == WireProtocol::Sv1 &&
+                    connection->buffer.size() > max_line_bytes_) {
                     log::info("Client {} sent an over-long line; disconnecting",
                               connection->socket->peer());
                     remove_connection(connection);
@@ -225,6 +600,10 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
                 continue;
             }
             if (n == 0) { // orderly EOF
+                if (connection->protocol == WireProtocol::Sv2Noise &&
+                    !connection->noise_connection->finish())
+                    log::debug("Incomplete SV2 Noise stream from {}",
+                               connection->socket->peer());
                 remove_connection(connection);
                 return false;
             }
@@ -239,53 +618,103 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
 
     // Adopt accepted fds: create the session and register with epoll.
     const auto drain_incoming = [&]() {
-        std::vector<std::pair<int, std::string>> batch;
+        std::vector<IncomingConnection> batch;
         {
             const std::scoped_lock lock(worker.queue_mutex);
             batch.swap(worker.incoming);
         }
-        if (!batch.empty())
-            worker.pending.fetch_sub(batch.size(), std::memory_order_relaxed);
-        for (auto& [fd, peer] : batch) {
-            set_nonblocking(fd);
-            auto socket = std::make_shared<SocketConnection>(fd, work_rebroadcast_seconds_, std::move(peer));
-            auto session = pool_.add_client(socket);
-            auto connection = std::make_unique<ClientConnection>();
-            connection->fd = fd;
-            connection->socket = std::move(socket);
-            connection->session = std::move(session);
-            const auto created = std::chrono::steady_clock::now();
-            connection->last_activity = created;
-            connection->created_at = created;
-            // Must be set before the fd is registered, with the same data ptr epoll uses below, so
-            // the socket can (dis)arm EPOLLOUT as its outbox fills/drains.
-            connection->socket->attach_reactor(worker.epoll_fd, connection.get());
-            epoll_event event{};
-            event.events = EPOLLIN;
-            event.data.ptr = connection.get();
-            if (::epoll_ctl(worker.epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
-                pool_.remove_client(connection->session); // dropping it closes the fd
-                continue;
+        for (auto& incoming : batch) {
+            const int fd = incoming.fd;
+            std::shared_ptr<SocketConnection> socket;
+            std::shared_ptr<mining::Client> registered_session;
+            std::unique_ptr<ClientConnection> connection;
+            try {
+                set_nonblocking(fd);
+                socket = std::make_shared<SocketConnection>(
+                    fd, work_rebroadcast_seconds_, std::move(incoming.peer));
+                connection = std::make_unique<ClientConnection>();
+                connection->fd = fd;
+                connection->protocol = incoming.protocol;
+                connection->holds_noise_handshake_slot =
+                    incoming.protocol == WireProtocol::Sv2Noise;
+                connection->socket = socket;
+                if (incoming.protocol == WireProtocol::Sv1) {
+                    connection->sv1_session = pool_.add_client(connection->socket);
+                    connection->session = connection->sv1_session;
+                } else if (incoming.protocol == WireProtocol::Sv2Noise) {
+                    if (!sv2_noise_credentials_)
+                        throw std::logic_error("SV2 Noise credentials are not loaded");
+                    connection->noise_connection =
+                        std::make_shared<sv2::NoiseConnection>(
+                            connection->socket, sv2_noise_credentials_,
+                            static_cast<uint32_t>(max_line_bytes_));
+                    connection->sv2_session =
+                        pool_.add_sv2_client(connection->noise_connection);
+                    connection->session = connection->sv2_session;
+                } else {
+                    connection->sv2_session = pool_.add_sv2_client(connection->socket);
+                    connection->session = connection->sv2_session;
+                }
+                registered_session = connection->session;
+                const auto created = std::chrono::steady_clock::now();
+                connection->last_activity = created;
+                connection->created_at = created;
+                // Set before registering the fd, with the same data ptr epoll uses below, so the
+                // socket can (dis)arm EPOLLOUT as its outbox fills/drains.
+                connection->socket->attach_reactor(worker.epoll_fd, connection.get());
+                epoll_event event{};
+                event.events = EPOLLIN;
+                event.data.ptr = connection.get();
+                if (::epoll_ctl(worker.epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+                    release_noise_handshake_slot(connection.get());
+                    finish_noise_transport(connection.get());
+                    socket->detach_reactor();
+                    pool_.remove_client(connection->session);
+                    worker.pending.fetch_sub(1, std::memory_order_relaxed);
+                    continue; // dropping the connection closes the fd
+                }
+                worker.connections.emplace(fd, std::move(connection));
+            } catch (const std::exception& error) {
+                // One failed adoption must not kill the reactor and strand its other clients.
+                ::epoll_ctl(worker.epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
+                if (socket)
+                    socket->detach_reactor();
+                if (registered_session)
+                    pool_.remove_client(registered_session);
+                if (connection)
+                    release_noise_handshake_slot(connection.get());
+                else if (incoming.protocol == WireProtocol::Sv2Noise)
+                    release_noise_handshake();
+                if (!socket)
+                    ::close(fd);
+                log::warning("Could not adopt a mining client: {}", error.what());
             }
-            worker.connections.emplace(fd, std::move(connection));
+            worker.pending.fetch_sub(1, std::memory_order_relaxed);
         }
     };
 
     // Evict silent (idle) and never-authorized connections.
     const auto sweep_expired = [&]() {
-        if (drop_idle_seconds_ <= 0 && auth_timeout_seconds_ <= 0)
-            return;
         const auto now = std::chrono::steady_clock::now();
         std::vector<ClientConnection*> expired;
         for (auto& [fd, connection] : worker.connections) {
-            if (drop_idle_seconds_ > 0 &&
+            if (connection->should_close()) {
+                report_noise_failure(connection.get());
+                expired.push_back(connection.get());
+            } else if (connection->protocol == WireProtocol::Sv2Noise &&
+                !connection->noise_connection->handshake_complete() &&
+                now - connection->created_at > kNoiseHandshakeTimeout) {
+                log::debug("SV2 Noise handshake timed out for {}",
+                           connection->socket->peer());
+                expired.push_back(connection.get());
+            } else if (drop_idle_seconds_ > 0 &&
                 now - connection->last_activity > std::chrono::seconds(drop_idle_seconds_)) {
                 log::info("Client {} idle for over {}s; disconnecting", connection->socket->peer(),
                           drop_idle_seconds_);
                 expired.push_back(connection.get());
             } else if (auth_timeout_seconds_ > 0 &&
                        now - connection->created_at > std::chrono::seconds(auth_timeout_seconds_) &&
-                       !connection->session->authorized()) {
+                       !connection->session->ever_authorized()) {
                 log::info("Client {} did not authorize within {}s; disconnecting",
                           connection->socket->peer(), auth_timeout_seconds_);
                 expired.push_back(connection.get());
@@ -296,9 +725,28 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     };
 
     epoll_event events[kMaxEventsPerWait];
+    const bool has_sv2_listeners =
+        std::ranges::any_of(listeners_, [](const Listener& listener) {
+            return listener.protocol != WireProtocol::Sv1;
+        });
     auto last_sweep = std::chrono::steady_clock::now();
+    auto last_sv2_maintenance = last_sweep;
     while (!stop.stop_requested()) {
-        const int ready = ::epoll_wait(worker.epoll_fd, events, kMaxEventsPerWait, kEpollWaitTimeoutMs);
+        int wait_timeout_ms = kEpollWaitTimeoutMs;
+        if (has_sv2_listeners) {
+            const auto maintenance_deadline =
+                last_sv2_maintenance + sv2::kStandardJobRefreshInterval;
+            const auto before_wait = std::chrono::steady_clock::now();
+            wait_timeout_ms =
+                maintenance_deadline <= before_wait
+                    ? 0
+                    : static_cast<int>(
+                          std::chrono::ceil<std::chrono::milliseconds>(
+                              maintenance_deadline - before_wait)
+                              .count());
+        }
+        const int ready =
+            ::epoll_wait(worker.epoll_fd, events, kMaxEventsPerWait, wait_timeout_ms);
         if (ready < 0) {
             if (errno == EINTR)
                 continue;
@@ -314,6 +762,9 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
             }
             ClientConnection* connection = static_cast<ClientConnection*>(events[i].data.ptr);
             try {
+                // EPOLLHUP/EPOLLERR can arrive with readable final bytes. Consume them first so a
+                // miner's last share (including a block candidate) is not discarded on close;
+                // handle_readable reaps the connection itself once the read hits EOF or errors.
                 const uint32_t event = events[i].events;
                 if ((event & (EPOLLIN | EPOLLHUP | EPOLLERR)) && !handle_readable(connection))
                     continue;
@@ -334,6 +785,17 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
         // Time-based eviction sweep, independent of event volume (gating on ready == 0 would
         // starve it on a busy reactor).
         const auto now = std::chrono::steady_clock::now();
+        if (has_sv2_listeners &&
+            now - last_sv2_maintenance >= sv2::kStandardJobRefreshInterval) {
+            for (auto& entry : worker.connections) {
+                auto& connection = entry.second;
+                if (connection->protocol != WireProtocol::Sv1 &&
+                    (connection->protocol != WireProtocol::Sv2Noise ||
+                     connection->noise_connection->handshake_complete()))
+                    connection->sv2_session->maybe_refresh_job();
+            }
+            last_sv2_maintenance = now;
+        }
         if (now - last_sweep >= kEvictionSweepInterval) {
             sweep_expired();
             last_sweep = now;
@@ -343,6 +805,8 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     // Shutdown: detach every connection from epoll first (so still-running work/vardiff threads
     // can't epoll_ctl against records we free or the epoll fd we close below), then drop them.
     for (auto& [fd, connection] : worker.connections) {
+        release_noise_handshake_slot(connection.get());
+        finish_noise_transport(connection.get());
         connection->socket->detach_reactor();
         pool_.remove_client(connection->session);
     }
@@ -350,8 +814,11 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     // Close any fds accepted but never adopted -- nothing else owns them.
     {
         const std::scoped_lock lock(worker.queue_mutex);
-        for (auto& [fd, peer] : worker.incoming)
-            ::close(fd);
+        for (auto& incoming : worker.incoming) {
+            if (incoming.protocol == WireProtocol::Sv2Noise)
+                release_noise_handshake();
+            ::close(incoming.fd);
+        }
         worker.incoming.clear();
         worker.pending.store(0, std::memory_order_relaxed);
     }
@@ -361,16 +828,31 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
         ::close(worker.event_fd);
 }
 
-void Server::deliver_to_worker(size_t worker_index, int fd, std::string peer) {
+void Server::deliver_to_worker(size_t worker_index, int fd, std::string peer,
+                               WireProtocol protocol) {
     ServerWorker& worker = *workers_[worker_index];
     {
         const std::scoped_lock lock(worker.queue_mutex);
-        worker.incoming.push_back({fd, std::move(peer)});
+        worker.incoming.push_back({fd, std::move(peer), protocol});
         worker.pending.fetch_add(1, std::memory_order_relaxed);
     }
     const uint64_t one = 1;
     const ssize_t written = ::write(worker.event_fd, &one, sizeof(one));
     (void)written;
+}
+
+bool Server::reserve_noise_handshake() {
+    size_t count = incomplete_noise_handshakes_.load(std::memory_order_relaxed);
+    while (count < kMaxIncompleteNoiseHandshakes) {
+        if (incomplete_noise_handshakes_.compare_exchange_weak(
+                count, count + 1, std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
+
+void Server::release_noise_handshake() {
+    incomplete_noise_handshakes_.fetch_sub(1, std::memory_order_relaxed);
 }
 
 bool Server::enqueue_proxy_read(int fd, std::string peer, size_t worker_index) {
@@ -408,7 +890,7 @@ void Server::proxy_reader_loop(const std::stop_token& stop) {
                 peer = header.address;   // header carried the real client addr
             else
                 peer = std::move(job.peer); // Direct: keep the TCP peer
-            deliver_to_worker(job.worker_index, job.fd, std::move(peer));
+            deliver_to_worker(job.worker_index, job.fd, std::move(peer), WireProtocol::Sv1);
         }
         proxy_pending_.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -430,7 +912,7 @@ void Server::run(const std::stop_token& stop) {
             std::jthread([this, worker_ptr](const std::stop_token& st) { worker_loop(*worker_ptr, st); });
         workers_.push_back(std::move(worker));
     }
-    log::info("Stratum reactor: {} threads", worker_count_);
+    log::info("Mining reactor: {} threads", worker_count_);
 
     // Only spin up the reader pool when PROXY protocol is enabled.
     if (!proxy_protocol_from_.empty()) {
@@ -443,7 +925,7 @@ void Server::run(const std::stop_token& stop) {
     std::vector<pollfd> poll_fds;
     poll_fds.reserve(listeners_.size());
     for (const auto& listener : listeners_)
-        poll_fds.push_back({listener.fd, POLLIN, 0});
+        poll_fds.push_back({listener.socket.get(), POLLIN, 0});
 
     size_t next_worker = 0;
     while (!stop.stop_requested()) {
@@ -459,7 +941,9 @@ void Server::run(const std::stop_token& stop) {
             while (true) {
                 sockaddr_storage addr{};
                 socklen_t addr_len = sizeof(addr);
-                const int fd = ::accept(listeners_[i].fd, reinterpret_cast<sockaddr*>(&addr), &addr_len);
+                const int fd =
+                    ::accept(listeners_[i].socket.get(),
+                             reinterpret_cast<sockaddr*>(&addr), &addr_len);
                 if (fd < 0)
                     break;
                 // Capture the peer now -- a client that closes immediately would otherwise read
@@ -471,12 +955,29 @@ void Server::run(const std::stop_token& stop) {
                 size_t pending_total = proxy_pending_.load(std::memory_order_relaxed);
                 for (const auto& worker : workers_)
                     pending_total += worker->pending.load(std::memory_order_relaxed);
-                if (pool_.client_count() + pending_total >= static_cast<size_t>(max_clients_)) {
+                const size_t occupied_slots = pool_.client_count() + pending_total;
+                if (occupied_slots >= static_cast<size_t>(max_clients_)) {
                     log::warning("Max clients ({}) reached; dropping connection", max_clients_);
                     ::close(fd);
                     continue;
                 }
-                if (!proxy_protocol_from_.empty()) {
+                const WireProtocol protocol = listeners_[i].protocol;
+                if (protocol != WireProtocol::Sv1 &&
+                    occupied_slots >= sv2_admission_limit(max_clients_)) {
+                    log::debug(
+                        "SV2 client limit reached; reserving capacity for SV1");
+                    ::close(fd);
+                    continue;
+                }
+                if (protocol == WireProtocol::Sv2Noise &&
+                    !reserve_noise_handshake()) {
+                    log::debug(
+                        "SV2 Noise handshake limit reached; dropping connection");
+                    ::close(fd);
+                    continue;
+                }
+                if (protocol == WireProtocol::Sv1 &&
+                    !proxy_protocol_from_.empty()) {
                     const std::string src_ip = peer.substr(0, peer.rfind(':'));
                     if (source_trusted(src_ip, proxy_protocol_from_)) {
                         // Defer the (up to ~2s) header read to the reader pool: doing it here would
@@ -491,7 +992,8 @@ void Server::run(const std::stop_token& stop) {
                     }
                 }
                 // Direct connection (PROXY disabled or untrusted source): hand straight to a reactor.
-                deliver_to_worker(next_worker++ % worker_count_, fd, std::move(peer));
+                deliver_to_worker(next_worker++ % worker_count_, fd, std::move(peer),
+                                  protocol);
             }
         }
     }
@@ -519,9 +1021,6 @@ void Server::run(const std::stop_token& stop) {
     }
     workers_.clear();
 
-    for (auto& listener : listeners_)
-        if (listener.fd >= 0)
-            ::close(listener.fd);
     listeners_.clear();
 }
 

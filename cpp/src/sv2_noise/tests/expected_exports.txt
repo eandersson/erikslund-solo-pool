@@ -1,0 +1,11 @@
+sv2_noise_credentials_free
+sv2_noise_credentials_load
+sv2_noise_decrypt_header
+sv2_noise_decrypt_payload
+sv2_noise_encrypt_header
+sv2_noise_encrypt_payload
+sv2_noise_payload_ciphertext_size
+sv2_noise_responder_handshake
+sv2_noise_session_free
+sv2_noise_session_is_terminal
+sv2_noise_status_string

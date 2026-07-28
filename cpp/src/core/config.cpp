@@ -1,5 +1,6 @@
 #include "core/config.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -36,6 +38,11 @@ using ScalarOrList = std::variant<std::string, std::vector<std::string>>;
 struct ConfigFile {
     std::optional<std::vector<NodeEntry>> bitcoin_nodes;
     std::optional<ScalarOrList> stratum_listen;
+    std::optional<ScalarOrList> sv2_listen;
+    std::optional<std::string> sv2_static_secret_key_file;
+    std::optional<std::string> sv2_authority_public_key_file;
+    std::optional<std::string> sv2_certificate_file;
+    std::optional<ScalarOrList> sv2_plaintext_listen;
     std::optional<ScalarOrList> api_listen;
     std::optional<ScalarOrList> proxy_protocol_from;
     std::optional<std::string> coinbase_signature;
@@ -103,6 +110,29 @@ void finalize_and_validate(Config& config) {
         config.version_rolling_mask = rollable;
     }
 
+    const int noise_credential_file_count =
+        static_cast<int>(!config.sv2_static_secret_key_file.empty()) +
+        static_cast<int>(!config.sv2_authority_public_key_file.empty()) +
+        static_cast<int>(!config.sv2_certificate_file.empty());
+    if (noise_credential_file_count != 0 &&
+        noise_credential_file_count != 3)
+        throw ConfigError("SV2 Noise credentials require all three of "
+                          "sv2_static_secret_key_file, sv2_authority_public_key_file, and "
+                          "sv2_certificate_file");
+    if (!config.sv2_ports.empty() && noise_credential_file_count != 3)
+        throw ConfigError("sv2_listen requires all three SV2 Noise credential files");
+    if (!config.sv2_plaintext_ports.empty() &&
+        config.sv2_plaintext_host != "127.0.0.1")
+        throw ConfigError("sv2_plaintext_listen is development-only and must bind 127.0.0.1");
+    if (std::ranges::any_of(
+            config.sv2_ports, [&](uint16_t port) {
+                return std::ranges::contains(config.sv2_plaintext_ports,
+                                             port);
+            }))
+        throw ConfigError(
+            "sv2_listen and sv2_plaintext_listen must not overlap; "
+            "use distinct ports");
+
     if (config.donation_percent < 0.0 || config.donation_percent > 100.0)
         throw ConfigError("donation_percent must be in [0.0, 100.0]");
     if (config.donation_percent > 0.0 && config.donation_address.empty())
@@ -143,6 +173,8 @@ void finalize_and_validate(Config& config) {
         throw ConfigError("max_clients must be >= 0");
     if (config.max_workers_per_address < 0)
         throw ConfigError("max_workers_per_address must be >= 0 (0 = unlimited)");
+    if (config.max_line_bytes < 1 || config.max_line_bytes > 0x00ffffffu)
+        throw ConfigError("max_line_bytes must be in [1, 16777215]");
     if (config.drop_idle_seconds < 0)
         throw ConfigError("drop_idle_seconds must be >= 0");
     if (config.auth_timeout_seconds < 0)
@@ -163,6 +195,29 @@ std::vector<std::string> to_list(const ScalarOrList& value) {
     if (const auto* one = std::get_if<std::string>(&value))
         return {*one};
     return std::get<std::vector<std::string>>(value);
+}
+
+void parse_listen(const std::optional<ScalarOrList>& entry, std::string_view option,
+                  std::string_view default_host, std::string& host,
+                  std::vector<uint16_t>& ports) {
+    if (!entry)
+        return;
+    const auto urls = to_list(*entry);
+    if (urls.empty())
+        return;
+    host = split_host_port(urls[0]).first;
+    if (host.empty())
+        host = default_host;
+    ports.clear();
+    for (const auto& url : urls) {
+        auto [url_host, port] = split_host_port(url);
+        if (url_host.empty())
+            url_host = default_host;
+        if (url_host != host)
+            throw ConfigError(std::string(option) + " entries must all use the same host "
+                              "(per-port hosts are not supported): " + url);
+        ports.push_back(port);
+    }
 }
 
 Config config_from(const ConfigFile& file) {
@@ -200,6 +255,10 @@ Config config_from(const ConfigFile& file) {
         }
     }
 
+    parse_listen(file.sv2_listen, "sv2_listen", "0.0.0.0", config.sv2_host, config.sv2_ports);
+    parse_listen(file.sv2_plaintext_listen, "sv2_plaintext_listen", "127.0.0.1",
+                 config.sv2_plaintext_host, config.sv2_plaintext_ports);
+
     if (file.api_listen) {
         const auto entries = to_list(*file.api_listen);
         if (!entries.empty()) {
@@ -231,6 +290,9 @@ Config config_from(const ConfigFile& file) {
     apply(config.fast_block_notify, file.fast_block_notify);
     apply(config.work_source, file.work_source);
     apply(config.ipc_socket_path, file.ipc_socket_path);
+    apply(config.sv2_static_secret_key_file, file.sv2_static_secret_key_file);
+    apply(config.sv2_authority_public_key_file, file.sv2_authority_public_key_file);
+    apply(config.sv2_certificate_file, file.sv2_certificate_file);
     apply(config.work_rebroadcast_seconds, file.work_rebroadcast_seconds);
     apply(config.donation_percent, file.donation_percent);
     apply(config.donation_address, file.donation_address);

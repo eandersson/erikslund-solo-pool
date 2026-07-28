@@ -12,6 +12,58 @@
 #      lets a *base* image share libpython with downstream images; this is a leaf
 #      app image, so a self-contained static libpython is simpler and the
 #      optimizations are independent of it.)
+#
+# Build from the repository root -- the native Noise core is shared with C++:
+#   docker build -f python/Dockerfile -t erikslund-pool-python .
+
+FROM gcc:16.1.0-trixie AS noise-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		cmake \
+		git \
+		libssl-dev \
+	&& rm -rf /var/lib/apt/lists/*
+
+ARG SECP256K1_COMMIT=1a53f4961f337b4d166c25fce72ef0dc88806618
+RUN git init -q /tmp/secp256k1 \
+	&& git -C /tmp/secp256k1 fetch -q --depth 1 \
+		https://github.com/bitcoin-core/secp256k1.git "${SECP256K1_COMMIT}" \
+	&& git -C /tmp/secp256k1 checkout -q --detach FETCH_HEAD \
+	&& test "$(git -C /tmp/secp256k1 rev-parse HEAD)" = "${SECP256K1_COMMIT}" \
+	&& cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr/local \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+		-DCMAKE_C_VISIBILITY_PRESET=hidden \
+		-DSECP256K1_INSTALL=ON \
+		-DSECP256K1_ENABLE_API_VISIBILITY_ATTRIBUTES=OFF \
+		-DSECP256K1_ENABLE_MODULE_EXTRAKEYS=ON \
+		-DSECP256K1_ENABLE_MODULE_SCHNORRSIG=ON \
+		-DSECP256K1_ENABLE_MODULE_ELLSWIFT=ON \
+		-DSECP256K1_ENABLE_MODULE_ECDH=OFF \
+		-DSECP256K1_ENABLE_MODULE_RECOVERY=OFF \
+		-DSECP256K1_ENABLE_MODULE_MUSIG=OFF \
+		-DSECP256K1_BUILD_TESTS=OFF \
+		-DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF \
+		-DSECP256K1_BUILD_CTIME_TESTS=OFF \
+		-DSECP256K1_BUILD_BENCHMARK=OFF \
+		-DSECP256K1_BUILD_EXAMPLES=OFF \
+		-DSECP256K1_VALGRIND=OFF \
+	&& cmake --build /tmp/secp256k1/build -j"$(nproc)" \
+	&& cmake --install /tmp/secp256k1/build \
+	&& install -D /tmp/secp256k1/COPYING /usr/share/doc/libsecp256k1/COPYING \
+	&& rm -rf /tmp/secp256k1
+
+COPY cpp/src/sv2_noise /src/sv2-noise
+RUN cmake -S /src/sv2-noise -B /build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSV2_NOISE_BUILD_STATIC=OFF \
+		-DSV2_NOISE_BUILD_SHARED=ON \
+		-DSV2_NOISE_BUILD_CREDENTIAL_TOOL=OFF \
+		-DSV2_NOISE_BUILD_TESTS=OFF \
+	&& cmake --build /build --target sv2_noise_shared -j"$(nproc)" \
+	&& test -f /build/libsv2_noise.so
 
 FROM debian:trixie-slim AS runtime
 
@@ -23,6 +75,7 @@ RUN set -eux; \
 	apt-get install -y --no-install-recommends \
 		ca-certificates \
 		libmimalloc3 \
+		libssl3t64 \
 		netbase \
 		tzdata \
 	; \
@@ -150,8 +203,11 @@ RUN set -eux; \
 	python -c "import sys; assert not sys._is_gil_enabled(), 'FAIL: GIL re-enabled'; \
 print('PASS: mimalloc preloaded and GIL OFF')"
 
-COPY pyproject.toml /app/pyproject.toml
-COPY erikslund_pool /app/erikslund_pool
+COPY --from=noise-builder /build/libsv2_noise.so /usr/local/lib/libsv2_noise.so
+COPY cpp/src/sv2_noise/LICENSE-secp256k1 /usr/share/doc/erikslund-pool/LICENSE-secp256k1
+RUN ldconfig
+COPY python/pyproject.toml /app/pyproject.toml
+COPY python/erikslund_pool /app/erikslund_pool
 RUN chmod -R a+rX /app
 ENV PYTHONPATH=/app
 RUN mkdir -p /var/lib/erikslund-pool && chown 1000:1000 /var/lib/erikslund-pool

@@ -40,6 +40,31 @@
       "items": { "type": "string" },
       "description": "Stratum bind address(es), host:port. Default binds all interfaces on :3333. Multiple entries bind multiple ports."
     },
+    "sv2_listen": {
+      "type": ["array", "string"],
+      "items": { "type": "string" },
+      "description": "Authenticated Stratum V2 bind address(es), host:port. Empty disables SV2; an omitted host binds all interfaces. Requires all three SV2 credential paths."
+    },
+    "sv2_static_secret_key_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the raw 32-byte responder secret. Mount it as a runtime secret and keep the authority private key offline."
+    },
+    "sv2_authority_public_key_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the raw 32-byte x-only signing authority public key."
+    },
+    "sv2_certificate_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the raw 74-byte signed responder certificate."
+    },
+    "sv2_plaintext_listen": {
+      "type": ["array", "string"],
+      "items": { "type": "string" },
+      "description": "Development-only plaintext SV2 bind address(es), restricted to loopback. Empty disables it; an omitted host selects loopback. Ports must not overlap sv2_listen."
+    },
     "api_listen": {
       "type": ["array", "string"],
       "items": { "type": "string" },
@@ -121,7 +146,7 @@
       "type": "integer",
       "minimum": 2,
       "maximum": 8,
-      "description": "extranonce2 byte length. Default 8."
+      "description": "extranonce2 byte length. Default 8; SV2 Extended Channels reserve two bytes for channel work."
     },
     "version_rolling_mask": {
       "type": ["string", "integer"],
@@ -174,8 +199,9 @@
     },
     "max_line_bytes": {
       "type": "integer",
-      "minimum": 0,
-      "description": "Maximum length of one Stratum protocol line, in bytes (anti-OOM). Default 16384."
+      "minimum": 1,
+      "maximum": 16777215,
+      "description": "Maximum SV1 line or SV2 payload length in bytes. Default 16384."
     },
     "stats_directory": {
       "type": "string",

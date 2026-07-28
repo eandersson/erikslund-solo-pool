@@ -8,7 +8,16 @@ from erikslund_pool.metrics import render_prometheus
 
 
 class _FakePool:
-    def __init__(self, *, ready=True, network_diff=1.5, height=101, nodes=None):
+    def __init__(
+        self,
+        *,
+        ready=True,
+        network_diff=1.5,
+        height=101,
+        nodes=None,
+        sv2_ready=None,
+        sv2_expiry=None,
+    ):
         self._data = {
             "uptime_seconds": 5, "ready": ready,
             "bitcoind_connected": ready, "work_ready": ready, "accepting_connections": True,
@@ -18,6 +27,10 @@ class _FakePool:
         }
         if nodes is not None:
             self._data["generator"] = {"bitcoind_nodes": nodes}
+        if sv2_ready is not None:
+            self._data["sv2_authenticated_ready"] = sv2_ready
+        if sv2_expiry is not None:
+            self._data["sv2_certificate_expiry_timestamp"] = sv2_expiry
 
     def metrics(self):
         return self._data
@@ -77,6 +90,21 @@ class TestRenderPrometheus(unittest.TestCase):
 
     def test_no_node_gauge_without_nodes(self):
         self.assertNotIn("erikslundpool_bitcoind_node_active", render_prometheus(_FakePool()))
+
+    def test_sv2_readiness_and_certificate_expiry_gauges(self):
+        out = render_prometheus(_FakePool(sv2_ready=False, sv2_expiry=1_900_000_000))
+
+        self.assertIn("erikslundpool_sv2_authenticated_ready 0", out)
+        self.assertIn(
+            "erikslundpool_sv2_certificate_expiry_timestamp_seconds 1900000000",
+            out,
+        )
+
+    def test_sv2_gauges_are_omitted_when_disabled(self):
+        out = render_prometheus(_FakePool())
+
+        self.assertNotIn("erikslundpool_sv2_authenticated_ready", out)
+        self.assertNotIn("erikslundpool_sv2_certificate_expiry_timestamp_seconds", out)
 
     def test_reject_by_reason_series_sums_to_total(self):
         out = render_prometheus(_FakePool())

@@ -720,28 +720,26 @@ TEST_CASE("an unknown method is answered with ERR_OTHER but does NOT count towar
     CHECK(f.session.protocol_errors() == 0);
 }
 
-TEST_CASE("a notify whose publication seq is older than the last delivered one is skipped") {
-    // Two concurrent broadcasters can interleave their send loops: without the seq guard a
-    // session could receive the OLDER job after the newer one and grind superseded work.
+TEST_CASE("duplicate and older pool publications are skipped") {
     Fixture f;
     f.subscribe();
     f.authorize("validaddr.w");
     f.conn.sent.clear();
 
     const auto newer = make_fake_job(f.curtime);
-    newer->set_publish_seq(6);
+    newer->set_publication_sequence(6);
     const auto older = make_fake_job(f.curtime);
-    older->set_publish_seq(5);
+    older->set_publication_sequence(5);
 
-    f.session.send_notify(*newer, /*clean=*/true);  // delivered, records seq 6
-    f.session.send_notify(*older, /*clean=*/true);  // seq 5 < 6 -> dropped
+    f.session.send_notify(*newer, /*clean=*/true);
+    f.session.send_notify(*newer, /*clean=*/true);
+    f.session.send_notify(*older, /*clean=*/true);
     const auto notifies = std::count_if(f.conn.sent.begin(), f.conn.sent.end(), [](const json& m) {
         return m.contains("method") && m["method"].is_string() &&
                m["method"].get<std::string>() == "mining.notify";
     });
     CHECK(notifies == 1);
 
-    // A seq-0 job (never pool-published: tests / direct sends) always delivers.
     const auto unstamped = make_fake_job(f.curtime);
     f.session.send_notify(*unstamped, /*clean=*/false);
     const auto after = std::count_if(f.conn.sent.begin(), f.conn.sent.end(), [](const json& m) {

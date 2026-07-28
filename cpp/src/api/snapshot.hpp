@@ -9,6 +9,7 @@
 
 namespace erikslund::api {
 
+// One active channel; unauthorised connections may contribute an empty diagnostic row.
 struct ClientSnapshot {
     std::string address;
     std::string worker;
@@ -52,6 +53,9 @@ struct PoolSnapshot {
     bool stratifier_ready = false;
     bool connector_ready = false;
     bool ready = false;
+    // Absent when authenticated SV2 is disabled; never gates pool readiness.
+    std::optional<bool> sv2_authenticated_ready;
+    std::optional<int64_t> sv2_certificate_expiry_timestamp;
 
     // pool-wide stats
     std::optional<int64_t> height;

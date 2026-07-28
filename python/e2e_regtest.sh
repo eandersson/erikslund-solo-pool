@@ -67,7 +67,7 @@ if [ "$POOL_ON_HOST" = "1" ]; then
         sleep 1
     done
 else
-    docker build -q -t erikslund_pool-py python >/dev/null
+    docker build -q -f python/Dockerfile -t erikslund_pool-py . >/dev/null
     docker rm -f erikslund_pool-py >/dev/null 2>&1 || true
     docker run -d --name erikslund_pool-py --network "$NET" -p 3333:3333 -p 7777:7777 erikslund_pool-py \
       --rpc-url http://bitcoind:18443 --rpc-user erikslund --rpc-password erikslundpass \

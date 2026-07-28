@@ -115,6 +115,7 @@ class ClientSession:
         self.last_share_ts = 0
 
         self._coinbase2: tuple[str, bytes, str] | None = None   # (job_id, coinbase2, coinbase2_hex)
+        self._last_publication_sequence = 0
         # Two-generation dedup: on a clean job (and at MAX_SEEN_SHARES) current rotates into previous
         # instead of clearing, so a duplicate just after a clean notify is still caught. Bounded 2x.
         self._seen_shares: set[tuple] = set()
@@ -122,6 +123,21 @@ class ClientSession:
         self.shares_since_retarget = 0
         self.last_retarget = time.monotonic()
         self._write_lock = asyncio.Lock()
+
+    @property
+    def channel_count(self) -> int:
+        """SV1 has one logical mining channel per TCP connection."""
+        return 1
+
+    @property
+    def best_difficulty(self) -> float:
+        return self.best_diff
+
+    def connected_workers(self) -> tuple[tuple[str, str], ...]:
+        """Return the authorized payout identity carried by this connection."""
+        if not self.authorized or not self.address:
+            return ()
+        return ((self.address, self.worker or ""),)
 
     def _coinbase2_for(self, job) -> bytes:
         """This miner's coinbase2 for `job` (and its hex), cached once per job."""
@@ -167,6 +183,10 @@ class ClientSession:
     def _notify_message(self, job, clean: bool) -> dict | None:
         if not (self.subscribed and self.authorized and self.payout_script is not None):
             return None
+        self._last_publication_sequence = max(
+            self._last_publication_sequence,
+            job.publication_sequence,
+        )
         self._coinbase2_for(job)             # populate the cache for this job
         coinbase2_hex = self._coinbase2[2]
         # Keep one generation of lookback on a clean job; skip when empty so a cap rotation's
@@ -184,6 +204,12 @@ class ClientSession:
         }
 
     async def send_notify(self, job, clean: bool):
+        publication_sequence = job.publication_sequence
+        if (
+            publication_sequence
+            and publication_sequence <= self._last_publication_sequence
+        ):
+            return
         message = self._notify_message(job, clean)
         if message is not None:
             await self._send(message)
@@ -488,6 +514,9 @@ class ClientSession:
                 "best_diff": self.best_diff, "last_share_ts": self.last_share_ts,
                 "connected_for": int(time.monotonic() - self.connected_at),
             }
+
+    def stats_for_address(self, address: str) -> list[dict]:
+        return [self.stats()] if self.address == address else []
 
     async def run(self):
         self.loop = asyncio.get_running_loop()

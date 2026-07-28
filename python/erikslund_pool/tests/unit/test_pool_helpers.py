@@ -9,6 +9,7 @@ from unittest.mock import patch
 from erikslund_pool.config import Settings
 from erikslund_pool.constants import MAX_RECENT_JOBS
 from erikslund_pool.pool import LISTEN_BACKLOG
+from erikslund_pool.pool import MAX_PENDING_SV2_NOISE_HANDSHAKES
 from erikslund_pool.pool import Pool
 from erikslund_pool.util import redact_url
 
@@ -61,6 +62,56 @@ class TestAdmitInFlight(unittest.TestCase):
         pool._release_inflight()
         self.assertEqual(pool._inflight, 1)
 
+    def test_registration_atomically_consumes_the_reserved_slot(self):
+        pool = Pool(Settings(max_clients=1))
+        session = object()
+        self.assertTrue(pool._admit())
+
+        pool._register_admitted(session)
+
+        self.assertEqual(pool._inflight, 0)
+        self.assertEqual(pool._client_count(), 1)
+        self.assertFalse(pool._admit())
+
+    def test_sv2_reserves_one_quarter_of_capacity_for_sv1(self):
+        pool = Pool(Settings(max_clients=8))
+
+        for _ in range(6):
+            self.assertTrue(pool._admit_sv2(False))
+        self.assertFalse(pool._admit_sv2(False))
+        self.assertTrue(pool._admit())
+        self.assertTrue(pool._admit())
+        self.assertFalse(pool._admit())
+
+        mixed_pool = Pool(Settings(max_clients=8))
+        self.assertTrue(mixed_pool._admit())
+        self.assertTrue(mixed_pool._admit())
+        for _ in range(4):
+            self.assertTrue(mixed_pool._admit_sv2(False))
+        self.assertFalse(mixed_pool._admit_sv2(False))
+
+    def test_sv2_capacity_rounds_down_for_small_limits(self):
+        for max_clients, sv2_limit in ((0, 0), (1, 0), (2, 1), (3, 2), (4, 3)):
+            with self.subTest(max_clients=max_clients):
+                pool = Pool(Settings(max_clients=max_clients))
+                for _ in range(sv2_limit):
+                    self.assertTrue(pool._admit_sv2(False))
+                self.assertFalse(pool._admit_sv2(False))
+
+    def test_pending_noise_handshakes_have_a_separate_cap(self):
+        pool = Pool(Settings(max_clients=128))
+
+        for _ in range(MAX_PENDING_SV2_NOISE_HANDSHAKES):
+            self.assertTrue(pool._admit_sv2(True))
+        self.assertFalse(pool._admit_sv2(True))
+        self.assertTrue(pool._admit())
+
+        for _ in range(MAX_PENDING_SV2_NOISE_HANDSHAKES):
+            pool._release_sv2_noise_handshake()
+            pool._release_inflight()
+
+        self.assertEqual(pool._pending_sv2_noise_handshakes, 0)
+
 
 class TestRedactUrl(unittest.TestCase):
     def test_strips_userinfo(self):
@@ -103,12 +154,60 @@ class _StatsSession:
         self.shares_accepted = accepted
         self.shares_rejected = rejected
         self.best_diff = best
+        self.best_difficulty = best
         self.last_share_ts = ts
         self.subscribed = subscribed
         self.authorized = authorized
 
+    @property
+    def channel_count(self):
+        return 1
+
+    def connected_workers(self):
+        if not self.authorized or self.address is None:
+            return ()
+        return ((self.address, ""),)
+
     def stats(self):
-        return {"shares_rejected": self.shares_rejected, "last_share_ts": self.last_share_ts}
+        return {
+            "shares_accepted": self.shares_accepted,
+            "shares_rejected": self.shares_rejected,
+            "best_diff": self.best_diff,
+            "last_share_ts": self.last_share_ts,
+        }
+
+    def stats_for_address(self, address):
+        return [self.stats()] if self.address == address else []
+
+
+class _MultiChannelStatsSession:
+    """Minimal multi-channel session surface for pool stats aggregation."""
+
+    channel_count = 2
+    subscribed = True
+    authorized = True
+    best_diff = 9.0
+    best_difficulty = 9.0
+
+    def connected_workers(self):
+        return (("bc1qfirst", "one"), ("bc1qsecond", "two"))
+
+    def stats_for_address(self, address):
+        rows = {
+            "bc1qfirst": {
+                "shares_accepted": 1,
+                "shares_rejected": 2,
+                "best_diff": 3.0,
+                "last_share_ts": 10,
+            },
+            "bc1qsecond": {
+                "shares_accepted": 4,
+                "shares_rejected": 5,
+                "best_diff": 9.0,
+                "last_share_ts": 20,
+            },
+        }
+        return [rows[address]] if address in rows else []
 
 
 class TestConnectorAndClientStats(unittest.TestCase):
@@ -118,6 +217,21 @@ class TestConnectorAndClientStats(unittest.TestCase):
         pool = Pool(Settings())
         self.assertEqual(set(pool.connector_stats([])), {"workers", "subscribed", "authorized"})
 
+    def test_unauthorized_legacy_connection_is_not_counted_as_a_worker(self):
+        pool = Pool(Settings())
+        session = _StatsSession(
+            None,
+            subscribed=True,
+            authorized=False,
+        )
+        pool.register(session)
+
+        self.assertEqual(pool.pool_stats()["workers"], 0)
+        self.assertEqual(
+            pool.connector_stats(),
+            {"workers": 0, "subscribed": 1, "authorized": 0},
+        )
+
     def test_client_stats_has_top_level_shares_rejected_and_int_ts(self):
         pool = Pool(Settings())
         pool.register(_StatsSession("bc1qexample", accepted=5, rejected=2, best=9.0, ts=1700000000))
@@ -126,6 +240,22 @@ class TestConnectorAndClientStats(unittest.TestCase):
         self.assertEqual(stats["shares_rejected"], 2)   # top-level rollup present (matches C++)
         self.assertIsInstance(stats["last_share_ts"], int)
         self.assertEqual(stats["last_share_ts"], 1700000000)
+
+    def test_multi_channel_session_counts_every_worker_and_address(self):
+        pool = Pool(Settings())
+        session = _MultiChannelStatsSession()
+        pool.register(session)
+
+        self.assertEqual(pool.pool_stats()["workers"], 2)
+        self.assertEqual(pool.pool_stats()["users"], 2)
+        self.assertEqual(
+            pool.connector_stats(),
+            {"workers": 2, "subscribed": 2, "authorized": 2},
+        )
+        second = pool.client_stats("bc1qsecond")
+        self.assertEqual(second["workers"], 1)
+        self.assertEqual(second["shares_accepted"], 4)
+        self.assertEqual(second["shares_rejected"], 5)
 
 
 class TestAssignExtranonce1(unittest.TestCase):
@@ -195,7 +325,7 @@ class TestStartServersBacklog(unittest.TestCase):
     def test_start_servers_passes_explicit_backlog(self):
         pool = Pool(Settings())
         with patch("erikslund_pool.pool.asyncio.start_server", new=AsyncMock()) as start_server:
-            asyncio.run(pool._start_servers(reuse_port=False, log=False))
+            asyncio.run(pool._start_servers(reuse_port=False, report_startup=False))
         self.assertGreaterEqual(start_server.await_count, 1)
         for call in start_server.await_args_list:
             self.assertEqual(call.kwargs["backlog"], LISTEN_BACKLOG)

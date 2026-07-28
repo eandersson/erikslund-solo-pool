@@ -6,7 +6,8 @@
 #
 # Usage (from repo root):
 #   docker build -t erikslund-pool-cpp cpp/docker
-#   docker run --rm -v "$PWD/cpp:/src:ro" -v erikslund-cpp-build:/build erikslund-pool-cpp
+#   docker run --rm -v "$PWD/cpp:/src:ro" \
+#       -v erikslund-cpp-build:/build erikslund-pool-cpp
 #
 FROM gcc:16.1.0-trixie
 
@@ -20,6 +21,7 @@ RUN apt-get update && apt-get dist-upgrade -y && apt-get install -y --no-install
         clang-tidy \
         cppcheck \
         libcurl4-openssl-dev \
+        libssl-dev \
         libzmq3-dev \
         libyaml-cpp-dev \
         doctest-dev \
@@ -43,6 +45,48 @@ RUN git clone --depth 1 --branch "${MIMALLOC_VERSION}" https://github.com/micros
     && cmake --build /tmp/mimalloc/build -j"$(nproc)" \
     && cmake --install /tmp/mimalloc/build \
     && rm -rf /tmp/mimalloc \
+    && ldconfig
+
+# libsecp256k1 (Bitcoin Core): BIP340 Schnorr + ElligatorSwift, the curve arithmetic behind the SV2
+# Noise handshake and the authority-certificate check in cpp/src/sv2_noise. Installed here like Glaze
+# and mimalloc rather than vendored into the repo.
+#
+# Pinned by COMMIT, not tag: Git tags are mutable and this library verifies the certificate that
+# authenticates the pool to miners. The commit below is upstream release v0.7.1; `git fetch <sha>`
+# resolves nothing but that object, so no tag is trusted anywhere in this stanza.
+#
+# PIC static + hidden visibility + no API visibility attributes keep the library entirely behind
+# sv2_noise's own C interface, and only extrakeys/schnorrsig/ellswift are compiled in.
+ARG SECP256K1_COMMIT=1a53f4961f337b4d166c25fce72ef0dc88806618
+RUN git init -q /tmp/secp256k1 \
+    && git -C /tmp/secp256k1 fetch -q --depth 1 \
+        https://github.com/bitcoin-core/secp256k1.git "${SECP256K1_COMMIT}" \
+    && git -C /tmp/secp256k1 checkout -q --detach FETCH_HEAD \
+    && test "$(git -C /tmp/secp256k1 rev-parse HEAD)" = "${SECP256K1_COMMIT}" \
+    && cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_C_VISIBILITY_PRESET=hidden \
+        -DSECP256K1_INSTALL=ON \
+        -DSECP256K1_ENABLE_API_VISIBILITY_ATTRIBUTES=OFF \
+        -DSECP256K1_ENABLE_MODULE_EXTRAKEYS=ON \
+        -DSECP256K1_ENABLE_MODULE_SCHNORRSIG=ON \
+        -DSECP256K1_ENABLE_MODULE_ELLSWIFT=ON \
+        -DSECP256K1_ENABLE_MODULE_ECDH=OFF \
+        -DSECP256K1_ENABLE_MODULE_RECOVERY=OFF \
+        -DSECP256K1_ENABLE_MODULE_MUSIG=OFF \
+        -DSECP256K1_BUILD_TESTS=OFF \
+        -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF \
+        -DSECP256K1_BUILD_CTIME_TESTS=OFF \
+        -DSECP256K1_BUILD_BENCHMARK=OFF \
+        -DSECP256K1_BUILD_EXAMPLES=OFF \
+        -DSECP256K1_VALGRIND=OFF \
+    && cmake --build /tmp/secp256k1/build -j"$(nproc)" \
+    && cmake --install /tmp/secp256k1/build \
+    && install -D /tmp/secp256k1/COPYING /usr/share/doc/libsecp256k1/COPYING \
+    && rm -rf /tmp/secp256k1 \
     && ldconfig
 
 # Cap'n Proto + the Bitcoin Core Mining IPC schema graph for the CapnpMiningClient backend. apt ships

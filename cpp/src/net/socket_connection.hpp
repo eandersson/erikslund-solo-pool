@@ -10,10 +10,11 @@
 #include <string_view>
 
 #include "stratum/session.hpp"
+#include "sv2/connection.hpp"
 
 namespace erikslund::net {
 
-class SocketConnection : public stratum::Connection {
+class SocketConnection : public stratum::Connection, public sv2::Connection {
 public:
     SocketConnection(int fd, double work_rebroadcast_seconds, std::string peer);
     ~SocketConnection() override;
@@ -23,6 +24,7 @@ public:
 
     void send_line(std::string_view line) override; // never blocks
     void send_lines(std::span<const std::string_view> lines) override; // coalesced; never blocks
+    void send_bytes(ByteView bytes) override; // framed bytes, no delimiter; never blocks
     std::string peer() const override { return peer_; }
 
     void cork();
@@ -39,6 +41,7 @@ public:
 
 private:
     bool drain_locked();                       // send queued bytes; false on a hard write error
+    void flush_after_enqueue_locked();
     void arm_write_interest_locked(bool want_write); // (un)register EPOLLOUT
     void fail_locked();                        // mark dead + shutdown so the reactor reaps
 

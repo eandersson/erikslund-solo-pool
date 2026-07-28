@@ -1,24 +1,23 @@
+{{- include "erikslund-pool.validateValues" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "erikslund-pool.fullname" . }}
   labels: {{- include "erikslund-pool.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
-  {{- end }}
+  replicas: 1
   selector:
     matchLabels: {{- include "erikslund-pool.selectorLabels" . | nindent 6 }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: {{ .Values.updateStrategy.maxUnavailable }}
-      maxSurge: {{ .Values.updateStrategy.maxSurge }}
+    # Do not overlap old and new pods that share one work domain.
+    type: Recreate
   template:
     metadata:
       annotations:
-        # Roll pods on config change.
         checksum/config: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if .Values.sv2.enabled }}
+        checksum/sv2-credentials: {{ .Values.sv2.credentialsVersion | quote }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -33,19 +32,9 @@ spec:
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      affinity:
-        {{- if .Values.affinity }}
-        {{- toYaml .Values.affinity | nindent 8 }}
-        {{- else }}
-        # Spread replicas across nodes.
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels: {{- include "erikslund-pool.selectorLabels" . | nindent 20 }}
-                topologyKey: kubernetes.io/hostname
-        {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints: {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -64,6 +53,11 @@ spec:
             - name: stratum
               containerPort: 3333
               protocol: TCP
+            {{- if .Values.sv2.enabled }}
+            - name: sv2
+              containerPort: {{ .Values.sv2.port }}
+              protocol: TCP
+            {{- end }}
             - name: api
               containerPort: 7777
               protocol: TCP
@@ -76,8 +70,7 @@ spec:
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           livenessProbe:
-            # TCP, not /health: a bitcoind outage 503s /health but the process is
-            # fine -- pull it from routing (readiness), don't restart it.
+            # A bitcoind outage should fail readiness without restarting the pool.
             tcpSocket:
               port: stratum
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
@@ -93,6 +86,11 @@ spec:
             - name: config
               mountPath: /etc/erikslund-pool
               readOnly: true
+            {{- if .Values.sv2.enabled }}
+            - name: sv2-credentials
+              mountPath: /etc/erikslund-pool/sv2
+              readOnly: true
+            {{- end }}
             - name: data
               mountPath: /var/lib/erikslund-pool
             - name: tmp
@@ -101,8 +99,13 @@ spec:
         - name: config
           secret:
             secretName: {{ include "erikslund-pool.secretName" . }}
-        # Stats + block spool (rootfs is read-only). Ephemeral is fine: blocks are
-        # submitted immediately, the spool is only a crash safety net.
+        {{- if .Values.sv2.enabled }}
+        - name: sv2-credentials
+          secret:
+            secretName: {{ .Values.sv2.existingSecret }}
+            defaultMode: 0440
+        {{- end }}
+        # The spool is only a crash safety net.
         - name: data
           emptyDir: {}
         - name: tmp

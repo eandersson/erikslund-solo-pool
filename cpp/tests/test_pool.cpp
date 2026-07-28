@@ -8,16 +8,22 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <semaphore>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "api/snapshot.hpp"
@@ -110,6 +116,52 @@ public:
     std::string peer() const override { return "test"; }
 };
 
+class RecordingPublicationClient final : public mining::Client {
+public:
+    void publish_job(const stratum::Job&, bool) override {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        called.release();
+    }
+    void maybe_retarget() override {}
+    mining::ClientStats stats(bool) const override { return {}; }
+    bool ever_authorized() const override { return false; }
+    int protocol_errors() const override { return 0; }
+    bool should_close() const override { return false; }
+
+    std::atomic<int> calls{0};
+    std::binary_semaphore called{0};
+};
+
+class BlockingPublicationClient final : public mining::Client {
+public:
+    void publish_job(const stratum::Job& job, bool clean) override {
+        const int call = calls.fetch_add(1, std::memory_order_relaxed);
+        {
+            const std::scoped_lock lock(records_mutex);
+            job_ids.push_back(job.job_id());
+            clean_flags.push_back(clean);
+        }
+        if (call == 0) {
+            entered.release();
+            proceed.acquire();
+        }
+        completed.release();
+    }
+    void maybe_retarget() override {}
+    mining::ClientStats stats(bool) const override { return {}; }
+    bool ever_authorized() const override { return false; }
+    int protocol_errors() const override { return 0; }
+    bool should_close() const override { return false; }
+
+    std::atomic<int> calls{0};
+    std::binary_semaphore entered{0};
+    std::binary_semaphore proceed{0};
+    std::counting_semaphore<16> completed{0};
+    std::mutex records_mutex;
+    std::vector<std::string> job_ids;
+    std::vector<bool> clean_flags;
+};
+
 bitcoin::BlockTemplate refresh_template() {
     test::gbt_json data = test::gbt_json::object_t{};
     data["height"] = 170;
@@ -120,6 +172,20 @@ bitcoin::BlockTemplate refresh_template() {
     data["previousblockhash"] = std::string(64, 'a');
     data["transactions"] = test::gbt_json::array_t{};
     return test::from_template(data);
+}
+
+std::shared_ptr<stratum::Job> publication_job(std::string id, uint64_t sequence) {
+    const Bytes tag{'/', 'e', 'p', '/'};
+    auto job = std::make_shared<stratum::Job>(
+        std::move(id), refresh_template(), tag, 4, 8, 1);
+    job->set_publication_sequence(sequence);
+    return job;
+}
+
+Config sv2_publication_config() {
+    Config config;
+    config.sv2_plaintext_ports = {13334};
+    return config;
 }
 
 class FlappingWorkSource final : public bitcoin::WorkSource {
@@ -193,6 +259,25 @@ TEST_CASE("validate_address resolves locally, without any bitcoind RPC") {
     CHECK_FALSE(pool.validate_address("notanaddress").has_value());
     CHECK_FALSE(pool.validate_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").has_value());
     CHECK_FALSE(pool.validate_address("").has_value());
+}
+
+TEST_CASE("SV2 readiness expires without waiting for another handshake") {
+    Config config;
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    pool.set_sv2_authenticated_state(true, 1);
+    const api::PoolSnapshot expired = pool.snapshot();
+    REQUIRE(expired.sv2_authenticated_ready.has_value());
+    CHECK_FALSE(*expired.sv2_authenticated_ready);
+    CHECK(expired.sv2_certificate_expiry_timestamp == 1);
+
+    pool.set_sv2_authenticated_state(true,
+                                     std::numeric_limits<uint32_t>::max());
+    const api::PoolSnapshot valid = pool.snapshot();
+    REQUIRE(valid.sv2_authenticated_ready.has_value());
+    CHECK(*valid.sv2_authenticated_ready);
 }
 
 TEST_CASE("next_job_id is 16 hex: a stable per-process prefix + a monotonic counter") {
@@ -445,6 +530,38 @@ struct PoolTestPeek {
         const Pool::PendingBlock block{1, hash, "00", address, "w"};
         return pool.submit_block(block);
     }
+    static void add_client(Pool& pool,
+                           const std::shared_ptr<mining::Client>& session,
+                           bool publish_asynchronously) {
+        const std::scoped_lock lock(pool.mutex_);
+        pool.clients_.push_back(
+            std::make_shared<Pool::ConnectedClient>(
+                Pool::ConnectedClient{std::make_shared<TestConnection>(),
+                                      session, publish_asynchronously}));
+    }
+    static void publish(Pool& pool, const std::shared_ptr<const stratum::Job>& job) {
+        (void)pool.broadcast_job(job, true);
+    }
+    static void enqueue(Pool& pool,
+                        const std::shared_ptr<mining::Client>& session,
+                        const std::shared_ptr<const stratum::Job>& job,
+                        bool clean) {
+        std::shared_ptr<Pool::ConnectedClient> client;
+        {
+            const std::scoped_lock lock(pool.mutex_);
+            const auto found =
+                std::ranges::find_if(pool.clients_, [&](const auto& candidate) {
+                    return candidate->session == session;
+                });
+            if (found != pool.clients_.end())
+                client = *found;
+        }
+        if (client)
+            pool.enqueue_publication(client, job, clean);
+    }
+    static bool publication_worker_started(const Pool& pool) {
+        return pool.publication_thread_.joinable();
+    }
 };
 } // namespace erikslund
 
@@ -490,6 +607,122 @@ TEST_CASE("block submission starts before durable spooling completes") {
 
     CHECK(callback_finished.load(std::memory_order_acquire));
     fs::remove_all(stats);
+}
+
+TEST_CASE("SV2 publication worker is opt-in") {
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+
+    Pool sv1_pool(Config{}, rpc_source);
+    CHECK_FALSE(PoolTestPeek::publication_worker_started(sv1_pool));
+
+    Pool sv2_pool(sv2_publication_config(), rpc_source);
+    CHECK(PoolTestPeek::publication_worker_started(sv2_pool));
+}
+
+TEST_CASE("SV2 publication cannot delay SV1 work delivery") {
+    Config config = sv2_publication_config();
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    auto delayed = std::make_shared<BlockingPublicationClient>();
+    auto immediate = std::make_shared<RecordingPublicationClient>();
+    PoolTestPeek::add_client(pool, delayed, true);
+    PoolTestPeek::add_client(pool, immediate, false);
+
+    const auto job = publication_job("broadcast-order", 1);
+    auto broadcast = std::async(std::launch::async,
+                                [&] { PoolTestPeek::publish(pool, job); });
+
+    CHECK(delayed->entered.try_acquire_for(std::chrono::seconds(1)));
+    const bool broadcast_finished =
+        broadcast.wait_for(std::chrono::milliseconds(100)) ==
+        std::future_status::ready;
+    delayed->proceed.release();
+
+    broadcast.get();
+    CHECK(delayed->completed.try_acquire_for(std::chrono::seconds(1)));
+    CHECK(broadcast_finished);
+    CHECK(immediate->calls.load(std::memory_order_relaxed) == 1);
+    CHECK(delayed->calls.load(std::memory_order_relaxed) == 1);
+}
+
+TEST_CASE("deferred SV2 publication coalesces to the newest clean work") {
+    Config config = sv2_publication_config();
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    auto delayed = std::make_shared<BlockingPublicationClient>();
+    PoolTestPeek::add_client(pool, delayed, true);
+    const auto first = publication_job("first", 1);
+    const auto clean = publication_job("clean", 2);
+    const auto newest = publication_job("newest", 3);
+
+    PoolTestPeek::enqueue(pool, delayed, first, false);
+    CHECK(delayed->entered.try_acquire_for(std::chrono::seconds(1)));
+    PoolTestPeek::enqueue(pool, delayed, clean, true);
+    PoolTestPeek::enqueue(pool, delayed, newest, false);
+    delayed->proceed.release();
+
+    CHECK(delayed->completed.try_acquire_for(std::chrono::seconds(1)));
+    CHECK(delayed->completed.try_acquire_for(std::chrono::seconds(1)));
+    REQUIRE(delayed->job_ids.size() == 2);
+    REQUIRE(delayed->clean_flags.size() == 2);
+    CHECK(delayed->job_ids[0] == "first");
+    CHECK(delayed->job_ids[1] == "newest");
+    CHECK_FALSE(delayed->clean_flags[0]);
+    CHECK(delayed->clean_flags[1]);
+}
+
+TEST_CASE("deferred SV2 publication preserves clean from late older work") {
+    Config config = sv2_publication_config();
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    auto delayed = std::make_shared<BlockingPublicationClient>();
+    PoolTestPeek::add_client(pool, delayed, true);
+
+    PoolTestPeek::enqueue(
+        pool, delayed, publication_job("blocking", 1), false);
+    CHECK(delayed->entered.try_acquire_for(std::chrono::seconds(1)));
+    PoolTestPeek::enqueue(
+        pool, delayed, publication_job("newest", 3), false);
+    PoolTestPeek::enqueue(
+        pool, delayed, publication_job("late-clean", 2), true);
+    delayed->proceed.release();
+
+    CHECK(delayed->completed.try_acquire_for(std::chrono::seconds(1)));
+    CHECK(delayed->completed.try_acquire_for(std::chrono::seconds(1)));
+    REQUIRE(delayed->job_ids.size() == 2);
+    REQUIRE(delayed->clean_flags.size() == 2);
+    CHECK(delayed->job_ids[1] == "newest");
+    CHECK(delayed->clean_flags[1]);
+}
+
+TEST_CASE("disconnect removes queued SV2 publication") {
+    Config config = sv2_publication_config();
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    auto delayed = std::make_shared<BlockingPublicationClient>();
+    auto disconnected = std::make_shared<RecordingPublicationClient>();
+    PoolTestPeek::add_client(pool, delayed, true);
+    PoolTestPeek::add_client(pool, disconnected, true);
+
+    PoolTestPeek::enqueue(pool, delayed, publication_job("blocking", 1), false);
+    CHECK(delayed->entered.try_acquire_for(std::chrono::seconds(1)));
+    PoolTestPeek::enqueue(pool, disconnected, publication_job("removed", 2), true);
+    pool.remove_client(disconnected);
+    delayed->proceed.release();
+
+    CHECK(delayed->completed.try_acquire_for(std::chrono::seconds(1)));
+    CHECK_FALSE(disconnected->called.try_acquire_for(
+        std::chrono::milliseconds(100)));
+    CHECK(disconnected->calls.load(std::memory_order_relaxed) == 0);
 }
 
 // A block the pool genuinely won must be credited even when the ACCEPTING reply never arrives.

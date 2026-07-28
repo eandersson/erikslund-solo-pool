@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(erikslund_pool_cpp LANGUAGES CXX)
+project(erikslund_pool_cpp LANGUAGES C CXX)
 
 # ---- language / warnings -----------------------------------------------------
 set(CMAKE_CXX_STANDARD 26)
@@ -103,7 +103,24 @@ set_source_files_properties(${IPC_GENERATED} PROPERTIES COMPILE_OPTIONS "-w")
 # -dev packages, so they need no find_package(). libcurl + zmq need link targets.
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
 find_library(ZMQ_LIBRARY zmq REQUIRED)
+# libsecp256k1 (pinned by commit, installed to /usr/local by the Docker images like Glaze and
+# mimalloc). Found here as well as inside src/sv2_noise/ so the imported target is visible in this
+# directory scope -- sv2_noise::static propagates it as a link dependency, and the tests' initiator
+# oracle uses it directly.
+find_package(libsecp256k1 CONFIG REQUIRED)
+
+# The responder core links statically into the C++ pool; Python builds the shared target from the
+# same source. Its test suite and credential tool are built here so `ctest` covers the core too.
+set(SV2_NOISE_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(SV2_NOISE_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(SV2_NOISE_BUILD_CREDENTIAL_TOOL ON CACHE BOOL "" FORCE)
+set(SV2_NOISE_BUILD_TESTS ON CACHE BOOL "" FORCE)
+# enable_testing() must run before add_subdirectory() so the subproject's add_test() calls land in
+# the generated top-level CTestTestfile.cmake.
+enable_testing()
+add_subdirectory(src/sv2_noise "${CMAKE_BINARY_DIR}/sv2_noise")
 # yaml-cpp: config files + on-disk stats (pool.status / users/) are YAML. The
 # HTTP API stays JSON. Prefer the package's CMake config; fall back to a plain
 # library search if the -dev package ships no config (older distros).
@@ -139,16 +156,19 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|armv8")
 endif()
 
 # ---- core library ------------------------------------------------------------
-# Every .cpp under src/ except main.cpp becomes the testable core library. capnp_mining_client.cpp
-# is excluded too: it needs the generated capnp bindings, so it links only into the executable
-# (the core lib and tests stay capnp-free).
+# Every pool .cpp under src/ except main.cpp becomes the testable core library. The Noise C core is
+# a separate subproject. capnp_mining_client.cpp links only into the executable because it needs the
+# generated Cap'n Proto bindings.
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
 list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/capnp_mining_client\\.cpp$")
+list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/sv2_noise/.*")
 
 add_library(erikslund_core STATIC ${CORE_SOURCES} ${BTC_CRYPTO_SOURCES})
 target_include_directories(erikslund_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${BTC_DIR})
-target_link_libraries(erikslund_core PUBLIC Threads::Threads CURL::libcurl ${ZMQ_LIBRARY})
+target_link_libraries(
+    erikslund_core
+    PUBLIC Threads::Threads CURL::libcurl ${ZMQ_LIBRARY} sv2_noise::static)
 # yaml-cpp: prefer the imported target from find_package; else the raw library.
 if(yaml-cpp_FOUND)
     target_link_libraries(erikslund_core PUBLIC yaml-cpp)
@@ -179,10 +199,13 @@ else()
 endif()
 
 # ---- tests -------------------------------------------------------------------
-enable_testing()
+# enable_testing() is called above, before add_subdirectory(src/sv2_noise).
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cpp)
 add_executable(erikslund_tests ${TEST_SOURCES})
 target_link_libraries(erikslund_tests PRIVATE erikslund_core)
+# The production adapter exposes only the stable C ABI. Its test-only initiator oracle independently
+# verifies the wire protocol with the same primitive implementations used by the official spec.
+target_link_libraries(erikslund_tests PRIVATE OpenSSL::Crypto libsecp256k1::secp256k1)
 # doctest's SUBCASE/CHECK macros legitimately shadow, so quiet that on tests.
 target_compile_options(erikslund_tests PRIVATE -Wno-shadow)
 add_test(NAME unit COMMAND erikslund_tests)

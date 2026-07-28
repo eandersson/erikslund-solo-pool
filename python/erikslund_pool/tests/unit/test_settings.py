@@ -16,6 +16,8 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(s.max_line_bytes, 16384)
         self.assertEqual(s.auth_timeout_seconds, 30)
         self.assertEqual(s.max_protocol_errors, 100)
+        self.assertEqual(s.sv2_plaintext_host, "127.0.0.1")
+        self.assertEqual(s.sv2_plaintext_ports, [])
         self.assertTrue(s.variable_difficulty)
         self.assertEqual(s.worker_threads, 0)
 

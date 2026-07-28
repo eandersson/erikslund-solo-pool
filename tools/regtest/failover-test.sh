@@ -63,12 +63,14 @@ build_pool() {
     if [ "$POOL" = cpp ]; then
         # toolchain image -> compile + ctest into the cpp-build volume (start_pool mounts it).
         docker build -q -t erikslund-pool-cpp "$REPO_ROOT/cpp/docker" >/dev/null \
-            && docker run --rm -v "$REPO_ROOT/cpp:/src:ro" -v erikslund-cpp-build:/build \
+            && docker run --rm -v "$REPO_ROOT/cpp:/src:ro" \
+                -v erikslund-cpp-build:/build \
                 erikslund-pool-cpp >/tmp/fo-build.log 2>&1
     elif [ "$MODE" = host ]; then
         python -c "import erikslund_pool" >/tmp/fo-build.log 2>&1 # CI pip-installs the pool
     else
-        docker build -q -t erikslund_pool-py "$REPO_ROOT/python" >/tmp/fo-build.log 2>&1
+        docker build -q -t erikslund_pool-py -f "$REPO_ROOT/python/Dockerfile" \
+            "$REPO_ROOT" >/tmp/fo-build.log 2>&1
     fi
 }
 start_pool() {

@@ -45,8 +45,9 @@ trap 'cleanup_pool; rm -f "$ROOT/tools/bench/.bench-cores.yml"; $REG --profile m
 echo "==> Building images"
 docker build -q -t erikslund-pool-cpp cpp/docker >/dev/null
 docker run --rm -e BUILD_TYPE=Release -e RUN_TESTS=0 \
-    -v "$ROOT/cpp:/src:ro" -v erikslund-cpp-build:/build erikslund-pool-cpp >/dev/null 2>&1
-docker build -q -t erikslund-pool-py-ft python >/dev/null
+    -v "$ROOT/cpp:/src:ro" \
+    -v erikslund-cpp-build:/build erikslund-pool-cpp >/dev/null 2>&1
+docker build -q -t erikslund-pool-py-ft -f "$ROOT/python/Dockerfile" "$ROOT" >/dev/null
 
 echo "==> Starting regtest bitcoind"
 $REG up -d bitcoind >/dev/null 2>&1
