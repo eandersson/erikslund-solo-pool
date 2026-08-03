@@ -20,6 +20,7 @@
 namespace erikslund::net {
 
 struct ServerWorker; // per-reactor epoll state; defined in server.cpp
+struct ServerTestPeek;
 
 class Server {
 public:
@@ -78,6 +79,8 @@ private:
     std::atomic<size_t> proxy_pending_{0};
     // Declared last so reader jthreads join before the queue/mutex/cv they use.
     std::vector<std::jthread> proxy_readers_;
+
+    friend struct ServerTestPeek;
 };
 
 // 0 = auto (one per core, clamped so a cgroup CPU quota can't over-thread). Exposed for testing.

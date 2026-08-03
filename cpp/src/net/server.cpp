@@ -314,18 +314,15 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
             }
             ClientConnection* connection = static_cast<ClientConnection*>(events[i].data.ptr);
             try {
-                if (events[i].events & (EPOLLHUP | EPOLLERR)) {
-                    remove_connection(connection);
+                const uint32_t event = events[i].events;
+                if ((event & (EPOLLIN | EPOLLHUP | EPOLLERR)) && !handle_readable(connection))
                     continue;
-                }
-                if (events[i].events & EPOLLOUT) {
+                if (event & EPOLLOUT) {
                     if (!connection->socket->flush_outbox()) {
                         remove_connection(connection);
                         continue;
                     }
                 }
-                if (events[i].events & EPOLLIN)
-                    handle_readable(connection);
             } catch (const std::exception& e) {
                 // Isolate: one bad message drops only this client, not the reactor.
                 log::warning("Client {} handler error ({}); disconnecting",
