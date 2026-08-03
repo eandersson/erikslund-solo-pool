@@ -39,6 +39,20 @@ TEST_CASE("parse_request rejects bare / garbage / control-character text") {
     CHECK_FALSE(parse_request("<?xml version=\"1.0\"?>").has_value()); // not JSON at all
 }
 
+TEST_CASE("parse_request rejects invalid UTF-8 inside an otherwise well-formed string") {
+    CHECK_FALSE(
+        parse_request("{\"id\":1,\"method\":\"mining.submit\",\"params\":[\"rig\xE9\"]}").has_value());
+    CHECK_FALSE(parse_request("{\"id\":1,\"method\":\"a\",\"params\":[\"\x80\"]}").has_value());
+    CHECK_FALSE(parse_request("{\"id\":1,\"method\":\"a\",\"params\":[\"\xE2\x82\"]}").has_value());
+    CHECK_FALSE(parse_request("{\"id\":1,\"method\":\"mining.\xFF\",\"params\":[]}").has_value());
+    CHECK_FALSE(parse_request("{\"id\":1,\"method\":\"a\",\"par\xE9m\":[]}").has_value());
+
+    const auto valid = parse_request(
+        "{\"id\":1,\"method\":\"mining.submit\",\"params\":[\"rig\xC3\xA9\"]}");
+    REQUIRE(valid.has_value());
+    CHECK(valid->params.at(0) == "rig\xC3\xA9");
+}
+
 TEST_CASE("parse_request rejects empty and whitespace-only lines") {
     CHECK_FALSE(parse_request("").has_value());
     CHECK_FALSE(parse_request(" ").has_value());
