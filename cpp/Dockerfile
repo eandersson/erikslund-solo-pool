@@ -38,7 +38,7 @@ RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenbe
 # mimalloc (Microsoft): the allocator interposed for the share path's many small concurrent
 # allocations. Built from a pinned release (like Glaze) instead of the distro package -- installs
 # libmimalloc.so + mimalloc.h to /usr/local (MI_INSTALL_TOPLEVEL) for find_library/<mimalloc.h>.
-ARG MIMALLOC_VERSION=v3.4.3
+ARG MIMALLOC_VERSION=v3.4.4
 RUN git clone --depth 1 --branch "${MIMALLOC_VERSION}" https://github.com/microsoft/mimalloc.git /tmp/mimalloc \
     && cmake -S /tmp/mimalloc -B /tmp/mimalloc/build -DCMAKE_BUILD_TYPE=Release \
         -DMI_INSTALL_TOPLEVEL=ON -DMI_BUILD_TESTS=OFF \
