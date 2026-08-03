@@ -1,3 +1,7 @@
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -124,6 +128,7 @@ public:
     std::atomic<size_t> failures{0};
     std::atomic<size_t> template_successes{0};
     std::atomic<size_t> tip_successes{0};
+    std::atomic<size_t> submissions{0};
 
     bitcoin::ChainInfo detect_chain() override { return {.chain = "regtest", .blocks = 169}; }
 
@@ -145,6 +150,7 @@ public:
     bitcoin::HeaderFacts fetch_header(const std::string&) override { return {}; }
 
     std::optional<std::string> submit_block_hex(const std::string&) override {
+        submissions.fetch_add(1, std::memory_order_relaxed);
         return std::nullopt;
     }
 
@@ -441,6 +447,50 @@ struct PoolTestPeek {
     }
 };
 } // namespace erikslund
+
+TEST_CASE("block submission starts before durable spooling completes") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() /
+                           std::format("ep_block_dispatch_{}", static_cast<long>(::getpid()));
+    const std::string hash(64, 'f');
+    const fs::path blocks = stats / "blocks";
+    const fs::path final_path = blocks / std::format("{}_{}.hex", 170, hash);
+    const fs::path temporary_path =
+        final_path.string() + ".tmp." + std::to_string(static_cast<long>(::getpid()));
+    fs::remove_all(stats);
+    fs::create_directories(blocks);
+    REQUIRE(::mkfifo(temporary_path.c_str(), 0600) == 0);
+
+    Config config;
+    config.stats_directory = stats.string();
+    FlappingWorkSource source;
+    Pool pool(config, source);
+    const Bytes tag{'/', 't', '/'};
+    stratum::Job job("job", refresh_template(), tag, 4, 4, 1);
+    stratum::ShareResult result;
+    result.difficulty = 1.0;
+    result.is_block = true;
+    result.legacy_coinbase = {0};
+    result.block_hash_chars.fill('f');
+
+    std::atomic<bool> callback_finished{false};
+    std::jthread callback([&] {
+        pool.on_block_found(kAddr, "w", job, result);
+        callback_finished.store(true, std::memory_order_release);
+    });
+
+    CHECK(wait_until([&] { return source.submissions.load(std::memory_order_acquire) == 1; }));
+    CHECK_FALSE(callback_finished.load(std::memory_order_acquire));
+
+    // Opening both ends releases the writer while keeping the FIFO readable through fsync.
+    const int fifo = ::open(temporary_path.c_str(), O_RDWR | O_NONBLOCK);
+    REQUIRE(fifo >= 0);
+    callback.join();
+    ::close(fifo);
+
+    CHECK(callback_finished.load(std::memory_order_acquire));
+    fs::remove_all(stats);
+}
 
 // A block the pool genuinely won must be credited even when the ACCEPTING reply never arrives.
 // On a flaky node link bitcoind accepts the submit but its response is lost; the pool retries and

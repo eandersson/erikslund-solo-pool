@@ -22,7 +22,6 @@ namespace erikslund::stratum {
 
 inline constexpr size_t kMaxSeenShares = 16384;
 
-class Session;
 struct SessionTestPeek; // test-only access to private dedup internals
 
 // Outbound side of a connection (socket in prod, recorder in tests).
@@ -74,7 +73,8 @@ public:
         (void)worker;
         return {};
     }
-    virtual void on_block_found(Session& session, const Job& job, const ShareResult& result) = 0;
+    virtual void on_block_found(const std::string& address, const std::string& worker, const Job& job,
+                                const ShareResult& result) = 0;
 
     // Vardiff + protocol parameters (sourced from Config).
     virtual bool vardiff_enabled() const = 0;

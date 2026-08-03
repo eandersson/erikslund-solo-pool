@@ -93,8 +93,8 @@ public:
     // Seed the per-worker registry from a prior run's users/ files, decaying each worker's hashrate
     // windows by the file's age. Call once at startup before serving.
     void recover_user_stats();
-    void on_block_found(stratum::Session& session, const stratum::Job& job,
-                        const stratum::ShareResult& result) override;
+    void on_block_found(const std::string& address, const std::string& worker,
+                        const stratum::Job& job, const stratum::ShareResult& result) override;
     bool vardiff_enabled() const override { return config_.variable_difficulty; }
     double min_difficulty() const override { return config_.minimum_difficulty; }
     double max_difficulty() const override { return config_.maximum_difficulty; }
@@ -116,13 +116,16 @@ private:
         std::shared_ptr<stratum::Session> session;
     };
 
-    // A solved block awaiting (or being re-tried for) submission.
     struct PendingBlock {
         int64_t height;
         std::string hash;
         std::string hex;
-        std::string address; // payout address (block attribution)
-        std::string worker;  // full username, pre-sanitized for logging
+        std::string address;
+        std::string worker;
+    };
+
+    struct PendingSubmission {
+        std::shared_ptr<const PendingBlock> block;
         std::chrono::steady_clock::time_point retry_after{};
     };
 
@@ -210,7 +213,7 @@ private:
     void submit_loop(const std::stop_token& stop);
     std::mutex submit_mutex_;
     std::condition_variable_any submit_cv_;
-    std::deque<PendingBlock> submit_queue_;
+    std::deque<PendingSubmission> submit_queue_;
     std::jthread submit_thread_;
 };
 

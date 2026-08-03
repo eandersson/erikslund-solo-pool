@@ -725,8 +725,7 @@ void Pool::spool_block(const PendingBlock& block) {
         const std::filesystem::path dir = std::filesystem::path(config_.stats_directory) / "blocks";
         std::filesystem::create_directories(dir);
         const std::filesystem::path path = dir / std::format("{}_{}.hex", block.height, block.hash);
-        // Write to a temp file then rename: a crash or disk-full mid-write must never leave a
-        // truncated .hex that looks like a recoverable block.
+        // Rename only complete files so recovery never reads a partial block.
         const std::filesystem::path temp_path =
             path.string() + ".tmp." + std::to_string(static_cast<long>(::getpid()));
         {
@@ -750,8 +749,8 @@ void Pool::spool_block(const PendingBlock& block) {
                     "submitblock <contents>)",
                     path.string(), block.address, block.worker);
     } catch (const std::exception& e) {
-        log::error("CRITICAL: could not spool block hex ({}); HEX FOLLOWS: {}", e.what(),
-                   block.hex);
+        log::error("Could not spool block height={} hash={}: {}; HEX FOLLOWS: {}", block.height,
+                   block.hash, e.what(), block.hex);
     }
 }
 
@@ -931,27 +930,19 @@ bool Pool::ready() const {
     return generator_ready_.load() && connector_ready_.load() && current_job() != nullptr;
 }
 
-void Pool::on_block_found(stratum::Session& session, const stratum::Job& job,
-                          const stratum::ShareResult& result) {
-    // An authorized session always has a payout address (handle_submit gates on auth); value_or is
-    // a defensive fallback.
-    const std::string address = session.address().value_or("?");
-    const std::string worker = session.worker().value_or(""); // empty if the miner sent no worker
-    log::info("BLOCK CANDIDATE height={} hash={} diff={:.3f} address={} worker={}", job.height(),
-                result.block_hash_hex(), result.difficulty, address, worker);
-    // PendingBlock outlives the ShareResult via submit_queue_, so materialize the hash view.
-    PendingBlock block{job.height(), std::string(result.block_hash_hex()),
-                       job.build_block_hex(result.legacy_coinbase, result.header),
-                       address, worker};
-    // Spool before submit so a solved block is never lost if submitblock fails.
-    spool_block(block);
-    // Hand the slow submitblock RPC to the submit thread: this runs on the caller's reactor
-    // thread, and blocking it on an RPC would stall every connection that reactor serves.
+void Pool::on_block_found(const std::string& address, const std::string& worker,
+                          const stratum::Job& job, const stratum::ShareResult& result) {
+    std::shared_ptr<const PendingBlock> block = std::make_shared<PendingBlock>(PendingBlock{
+        job.height(), std::string(result.block_hash_hex()),
+        job.build_block_hex(result.legacy_coinbase, result.header), address, worker});
     {
         const std::scoped_lock lock(submit_mutex_);
-        submit_queue_.push_back(std::move(block));
+        submit_queue_.push_back(PendingSubmission{block});
     }
-    submit_cv_.notify_one();
+    submit_cv_.notify_one(); // Queue submission before potentially blocking log and disk work.
+    spool_block(*block);
+    log::info("BLOCK CANDIDATE height={} hash={} diff={:.3f} address={} worker={}", job.height(),
+              result.block_hash_hex(), result.difficulty, address, worker);
 }
 
 bool Pool::credit_block(const PendingBlock& block) {
@@ -1011,38 +1002,39 @@ void Pool::submit_loop(const std::stop_token& stop) {
     while (true) {
         submit_cv_.wait(lock, stop, [this] { return !submit_queue_.empty(); });
         if (stop.stop_requested())
-            return; // every candidate is already durable in the spool
+            return;
 
         const auto now = std::chrono::steady_clock::now();
         const auto ready = std::find_if(submit_queue_.begin(), submit_queue_.end(),
-                                        [now](const PendingBlock& block) {
-                                            return block.retry_after <= now;
+                                        [now](const PendingSubmission& submission) {
+                                            return submission.retry_after <= now;
                                         });
         if (ready == submit_queue_.end()) {
             const auto next_retry = std::min_element(
                                         submit_queue_.begin(), submit_queue_.end(),
-                                        [](const PendingBlock& left, const PendingBlock& right) {
+                                        [](const PendingSubmission& left,
+                                           const PendingSubmission& right) {
                                             return left.retry_after < right.retry_after;
                                         })
                                         ->retry_after;
             submit_cv_.wait_until(lock, stop, next_retry, [this] {
                 const auto current = std::chrono::steady_clock::now();
                 return std::any_of(submit_queue_.begin(), submit_queue_.end(),
-                                   [current](const PendingBlock& block) {
-                                       return block.retry_after <= current;
+                                   [current](const PendingSubmission& submission) {
+                                       return submission.retry_after <= current;
                                    });
             });
             continue;
         }
 
-        PendingBlock block = std::move(*ready);
+        PendingSubmission submission = std::move(*ready);
         submit_queue_.erase(ready);
         lock.unlock();
-        const bool retry = submit_block(block); // RPC off the lock
+        const bool retry = submit_block(*submission.block);
         lock.lock();
         if (retry) {
-            block.retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
-            submit_queue_.push_back(std::move(block));
+            submission.retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
+            submit_queue_.push_back(std::move(submission));
         }
     }
 }

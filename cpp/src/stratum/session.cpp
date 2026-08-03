@@ -502,6 +502,9 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         return;
     }
 
+    if (result->is_block)
+        pool_.on_block_found(address, worker, *job, *result);
+
     double credited = snap_difficulty;
     if (snap_pending) {
         const double hi = std::max(snap_difficulty, snap_previous);
@@ -518,9 +521,6 @@ void Session::handle_submit(const json& id, const std::vector<std::string>& para
         log::debug("Accepted share from {} peer={} diff {}/{}", address, connection_.peer(),
                    util::format_difficulty(result->difficulty),
                    util::format_difficulty(credited));
-
-    if (result->is_block)
-        pool_.on_block_found(*this, *job, *result);
 }
 
 void Session::record_accepted_share_locked(double credited, double share_difficulty) {

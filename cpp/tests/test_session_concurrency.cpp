@@ -105,7 +105,8 @@ public:
     void note_rejected_share(const std::string&, const std::string&, RejectClass) override {
         rejected.fetch_add(1, std::memory_order_relaxed);
     }
-    void on_block_found(Session&, const Job&, const ShareResult&) override {
+    void on_block_found(const std::string&, const std::string&, const Job&,
+                        const ShareResult&) override {
         blocks.fetch_add(1, std::memory_order_relaxed);
     }
     bool vardiff_enabled() const override { return vardiff.load(std::memory_order_relaxed); }

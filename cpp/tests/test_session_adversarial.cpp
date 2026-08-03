@@ -88,7 +88,8 @@ public:
     void note_rejected_share(const std::string&, const std::string&, RejectClass) override {
         ++rejected;
     }
-    void on_block_found(Session&, const Job&, const ShareResult&) override {}
+    void on_block_found(const std::string&, const std::string&, const Job&,
+                        const ShareResult&) override {}
     bool vardiff_enabled() const override { return false; }
     double min_difficulty() const override { return 0.001; }
     double max_difficulty() const override { return 0.0; }

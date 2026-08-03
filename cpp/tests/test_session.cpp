@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <ctime>
 #include <format>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -84,6 +85,7 @@ public:
     std::string last_share_address;
     std::string last_share_worker;
     bool block_found = false;
+    std::function<void()> block_found_hook;
     bool vardiff = false;
 
     explicit FakePool(uint32_t curtime) : job(make_fake_job(curtime)) {}
@@ -117,7 +119,12 @@ public:
         ++rejected;
         last_reject_class = reason;
     }
-    void on_block_found(Session&, const Job&, const ShareResult&) override { block_found = true; }
+    void on_block_found(const std::string&, const std::string&, const Job&,
+                        const ShareResult&) override {
+        block_found = true;
+        if (block_found_hook)
+            block_found_hook();
+    }
     bool vardiff_enabled() const override { return vardiff; }
     double min_difficulty() const override { return 0.001; }
     double max_difficulty() const override { return 0.0; }
@@ -127,7 +134,8 @@ public:
 };
 
 // Find a nonce whose share is accepted (the regtest-easy target accepts ~half).
-std::string find_accepted_nonce(const Job& job, const Bytes& enonce1, double difficulty) {
+std::string find_accepted_nonce(const Job& job, const Bytes& enonce1, double difficulty,
+                                bool require_block = false) {
     const Bytes coinbase2 = job.build_coinbase2(kPayoutScript);
     for (uint32_t nonce = 0; nonce < 512; ++nonce) {
         ShareInput in;
@@ -139,7 +147,8 @@ std::string find_accepted_nonce(const Job& job, const Bytes& enonce1, double dif
         in.nonce_hex = nonce_hex;
         in.share_target = util::target_from_difficulty(difficulty);
         in.now_unix = static_cast<int64_t>(std::time(nullptr));
-        if (job.validate_share(in).has_value())
+        const auto result = job.validate_share(in);
+        if (result && (!require_block || result->is_block))
             return nonce_hex;
     }
     return "";
@@ -266,13 +275,20 @@ TEST_CASE("submit to an unknown job is stale") {
     CHECK((*reply)["error"][0].get<double>() == 21); // stale
 }
 
-TEST_CASE("a valid share is accepted and counted; a resubmit is a duplicate") {
+TEST_CASE("a valid block share is dispatched, counted, and deduplicated") {
     Fixture f;
     f.subscribe();
     f.authorize("validaddr.w");
 
-    const std::string nonce =
-        find_accepted_nonce(*f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty());
+    bool dispatched = false;
+    f.pool.block_found_hook = [&] {
+        dispatched = true;
+        CHECK(f.pool.accepted == 0);
+        CHECK(f.session.shares_accepted() == 0);
+        CHECK_FALSE(f.conn.by_id(6).has_value());
+    };
+    const std::string nonce = find_accepted_nonce(
+        *f.pool.job, util::from_hex("e06ae06a"), f.pool.start_difficulty(), true);
     REQUIRE_FALSE(nonce.empty());
 
     const std::string submit = std::format(
@@ -283,6 +299,7 @@ TEST_CASE("a valid share is accepted and counted; a resubmit is a duplicate") {
     const auto first = f.conn.by_id(6);
     REQUIRE(first.has_value());
     CHECK((*first)["result"].get<bool>() == true);
+    CHECK(dispatched);
     CHECK(f.pool.accepted == 1);
     CHECK(f.session.shares_accepted() == 1);
 
