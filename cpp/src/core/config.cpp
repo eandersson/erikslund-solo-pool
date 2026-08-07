@@ -94,10 +94,13 @@ std::pair<std::string, uint16_t> split_host_port(const std::string& host_port) {
 
 // Range checks + clamps applied after a Config is populated from the parsed file.
 void finalize_and_validate(Config& config) {
-    if (config.version_rolling_mask & ~0x1fffe000u) {
-        log::warning("version_rolling_mask {:08x} has bits outside the BIP320 range; clamping to "
-                     "1fffe000", config.version_rolling_mask);
-        config.version_rolling_mask &= 0x1fffe000u;
+    const std::uint32_t rollable = config.version_rolling_mask & 0x1fffe000u;
+    if (rollable == 0)
+        throw ConfigError("version_rolling_mask must set at least one BIP320 bit (1fffe000)");
+    if (rollable != config.version_rolling_mask) {
+        log::warning("version_rolling_mask {:08x} has bits outside the BIP320 range; using {:08x}",
+                     config.version_rolling_mask, rollable);
+        config.version_rolling_mask = rollable;
     }
 
     if (config.donation_percent < 0.0 || config.donation_percent > 100.0)

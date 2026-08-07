@@ -177,6 +177,16 @@ class TestConfigSchema(SoloPoolTestCase):
             Settings.from_dict({"version_rolling_mask": 0x00003000}).version_rolling_mask,
             0x00002000)
 
+    def test_version_rolling_mask_must_retain_a_bip320_bit(self):
+        for mask in (0, "00000000", 0x00001000):
+            with self.subTest(mask=mask), self.assertRaises(ConfigError):
+                Settings.from_dict({"version_rolling_mask": mask})
+
+    def test_version_rolling_mask_integer_must_fit_uint32(self):
+        for mask in (-1, 1 << 32):
+            with self.subTest(mask=mask), self.assertRaises(ConfigError):
+                Settings.from_dict({"version_rolling_mask": mask})
+
     def test_block_poll_milliseconds_converts_to_seconds(self):
         self.assertAlmostEqual(
             Settings.from_dict({"block_poll_milliseconds": 1500}).poll_interval, 1.5)

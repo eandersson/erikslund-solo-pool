@@ -202,10 +202,13 @@ class Settings:
             raise ConfigError("auth_timeout_seconds must be >= 0")
         if self.max_protocol_errors < 0:
             raise ConfigError("max_protocol_errors must be >= 0")
-        if self.version_rolling_mask & ~0x1FFFE000:
-            LOG.warning("version_rolling_mask %08x has bits outside the BIP320 range; clamping to "
-                        "1fffe000", self.version_rolling_mask)
-            self.version_rolling_mask &= 0x1FFFE000
+        rollable = self.version_rolling_mask & 0x1FFFE000
+        if rollable == 0:
+            raise ConfigError("version_rolling_mask must set at least one BIP320 bit (1fffe000)")
+        if rollable != self.version_rolling_mask:
+            LOG.warning("version_rolling_mask %08x has bits outside the BIP320 range; using %08x",
+                        self.version_rolling_mask, rollable)
+            self.version_rolling_mask = rollable
 
     @classmethod
     def _parse(cls, data: dict) -> Settings:
@@ -245,7 +248,13 @@ class Settings:
             fields["poll_interval"] = data["block_poll_milliseconds"] / 1000.0
         if "version_rolling_mask" in data:
             mask = data["version_rolling_mask"]
-            fields["version_rolling_mask"] = int(mask, 16) if isinstance(mask, str) else mask
+            if isinstance(mask, str):
+                fields["version_rolling_mask"] = int(mask, 16)
+            else:
+                if (isinstance(mask, bool) or not isinstance(mask, int) or
+                        not 0 <= mask <= 0xFFFFFFFF):
+                    raise ConfigError("version_rolling_mask must be an unsigned 32-bit integer")
+                fields["version_rolling_mask"] = mask
 
         if "extranonce1_prefix" in data:
             prefix_hex = data["extranonce1_prefix"]

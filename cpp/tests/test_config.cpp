@@ -273,6 +273,13 @@ TEST_CASE("version_rolling_mask is clamped to the BIP320 range") {
           0x00002000u);
 }
 
+TEST_CASE("version_rolling_mask must retain a BIP320 bit") {
+    CHECK_THROWS_AS(Config::from_string(R"({"version_rolling_mask": 0})"), ConfigError);
+    CHECK_THROWS_AS(Config::from_string(R"({"version_rolling_mask": "00000000"})"),
+                    ConfigError);
+    CHECK_THROWS_AS(Config::from_string(R"({"version_rolling_mask": 4096})"), ConfigError);
+}
+
 TEST_CASE("every remaining scalar key maps onto its config field") {
     const Config c = Config::from_string(R"({
         "coinbase_version": 2,

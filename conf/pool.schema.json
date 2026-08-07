@@ -125,7 +125,9 @@
     },
     "version_rolling_mask": {
       "type": ["string", "integer"],
-      "description": "BIP320 version bits a client may roll, as a hex string (e.g. \"1fffe000\") or an integer. Default 1fffe000."
+      "minimum": 8192,
+      "maximum": 4294967295,
+      "description": "BIP320 version bits a client may roll, as a hex string (e.g. \"1fffe000\") or an integer. Must include at least one bit from 1fffe000; a zero mask makes cgminer-derived firmware abort the Stratum handshake. Default 1fffe000."
     },
     "coinbase_signature": {
       "type": "string",
