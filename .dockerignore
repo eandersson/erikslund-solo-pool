@@ -1,0 +1,19 @@
+# The production image needs only the native build inputs and default configuration.
+**
+!Dockerfile
+!CMakeLists.txt
+!src/
+!src/**
+!tests/
+!tests/**
+!third_party/
+!third_party/**
+!tools/
+!tools/bench/
+!tools/bench/**
+!conf/
+!conf/**
+
+# Never copy host-generated build output.
+**/build/
+**/cmake-build*/

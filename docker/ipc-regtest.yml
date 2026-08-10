@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=../conf/pool.schema.json
+# Regtest fixture for ipc-smoketest.sh. RPC remains available for chain state and submission, but
+# the node denies this user getblocktemplate so work readiness proves that IPC supplied the job.
+bitcoin_nodes:
+  - address: bitcoind:18443
+    username: erikslund
+    password: erikslundpass
+work_source: ipc
+ipc_socket_path: /ipc/mining.sock
+stratum_listen:
+  - 0.0.0.0:3333
+api_listen:
+  - 0.0.0.0:7777
+fast_block_notify: false
+block_poll_milliseconds: 250
+work_rebroadcast_seconds: 300
+initial_difficulty: 0.001
+minimum_difficulty: 0.001
+stats_directory: /tmp/stats
+status_interval_seconds: 1

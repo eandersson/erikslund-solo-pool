@@ -1,8 +1,5 @@
-# Shared regtest harness for the C++ and Python pools: a regtest bitcoind
-# and a CPU stratum miner. Each pool's own smoketest brings these up, builds its
-# pool, runs it against bitcoind on this compose's network, and points the miner
-# at it -- so the smoketests share one bitcoind/miner definition instead of
-# each reaching into another pool's directory.
+# Regtest harness with a Bitcoin Core node and CPU Stratum miner. The smoke test
+# runs the pool against this network and points the miner at it.
 #
 #   docker compose -f tools/regtest/docker-compose.yml up -d bitcoind   # regtest node
 #   docker compose -f tools/regtest/docker-compose.yml build miner      # build the miner image

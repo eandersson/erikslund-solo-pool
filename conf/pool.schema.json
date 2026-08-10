@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "erikslund pool configuration",
-  "description": "Configuration for the erikslund solo Bitcoin mining pool (C++ and Python implementations). Unknown keys are rejected.",
+  "description": "Configuration for the erikslund solo Bitcoin mining pool. Unknown keys are rejected.",
   "type": "object",
   "additionalProperties": false,
   "required": ["bitcoin_nodes"],
@@ -86,7 +86,7 @@
     "work_source": {
       "type": "string",
       "enum": ["rpc", "ipc"],
-      "description": "Work-source backend. \"rpc\" (default) uses getblocktemplate. \"ipc\" replaces only template fetching; bitcoin_nodes remains authoritative for the tip and is required for chain detection, header lookup, full-block submission, spool replay, and work while IPC reconnects every 30 seconds. ZMQ remains the optional fast block-notification path. IPC is C++ only."
+      "description": "Work-source backend. \"rpc\" (default) uses getblocktemplate. \"ipc\" replaces only template fetching; bitcoin_nodes remains authoritative for the tip and is required for chain detection, header lookup, full-block submission, spool replay, and work while IPC reconnects every 30 seconds. ZMQ remains the optional fast block-notification path."
     },
     "ipc_socket_path": {
       "type": "string",
@@ -221,7 +221,7 @@
     "worker_threads": {
       "type": "integer",
       "minimum": 0,
-      "description": "Connection-serving worker threads (C++ epoll reactors; Python event loops on a free-threaded build). 0 = auto: one per usable CPU, clamped to a sane max. Set to your container's CPU limit to avoid over-threading. Ignored on a GIL Python build (always one loop)."
+      "description": "Connection-serving worker threads. 0 = auto: one per usable CPU, clamped to a sane maximum. Set this to the container's CPU limit to avoid over-threading."
     }
   }
 }

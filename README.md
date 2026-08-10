@@ -1,128 +1,92 @@
 # erikslund-solo-pool
 
-Two independent implementations of a **Bitcoin solo mining pool** -- one in modern
-**C++**, one in **free-threaded Python** -- sharing a config format, an
-HTTP/Prometheus API, and a Docker regtest harness. Both build work from `bitcoind`,
-validate shares, and submit solved blocks. SV1 is the default miner protocol;
-authenticated SV2 Standard and Extended Channels are optional.
+A modern C++ Bitcoin solo mining pool. It builds work from Bitcoin Core, validates
+shares, and submits solved blocks. Stratum V1 is the default miner protocol;
+authenticated Stratum V2 Standard and Extended Channels are optional.
 
-*Solo* means every block a miner finds pays **that miner's address in full**
-(minus an optional donation); the pool coordinates and distributes work, it does
-not split rewards across participants.
+Solo mining means every block pays the miner's address in full, minus an optional
+donation. The pool coordinates work but never divides rewards between miners.
 
-> WARNING: **This builds and submits real Bitcoin blocks.** Run it on regtest/signet/testnet with your actual hardware first.
-
-## Two implementations, one behavior
-
-| | [`cpp/`](cpp/) | [`python/`](python/) |
-| --- | --- | --- |
-| Language / runtime | C++26 (GCC 16.1) | Free-threaded CPython 3.14t (no-GIL) |
-| Concurrency | epoll reactor, one thread per core | N asyncio event loops (`SO_REUSEPORT`), one per core |
-| Share hashing | Vendored Bitcoin Core SHA-256 -- SSE4 / AVX2 / SHA-NI runtime dispatch | `hashlib` (OpenSSL) |
-| JSON | simdjson (parse) | msgspec |
-| Allocator | mimalloc | CPython default |
-| Leans toward | Throughput, memory, latency | Readability, hackability |
+> **Warning:** This software builds and submits real Bitcoin blocks. Test with your
+> hardware on regtest, signet, or testnet before using mainnet.
 
 ## Quick start
 
-**Real network** -- Docker Compose stacks in [`deploy/`](deploy/), with or without
-an embedded Bitcoin Core.
-
-**Bring your own Bitcoin node** -- these stacks run the pool only and bind-mount
-its config + data from the host. The pool runs as **UID/GID 1000**, so create the
-host dirs owned by `1000:1000` (Docker does not chown bind-mounts) or it can't
-persist stats or spool found blocks:
+Run against an existing node:
 
 ```sh
-sudo mkdir -p /opt/erikslund-pool/etc /opt/erikslund-pool/data /opt/erikslund-pool/logs
+sudo sh deploy/setup.sh --create-directories
 sudo cp conf/pool.yml /opt/erikslund-pool/etc/pool.yml
-sudo chown -R 1000:1000 /opt/erikslund-pool
 
-docker compose -f deploy/docker-compose.cpp.yml    up -d --build   # C++ pool
-docker compose -f deploy/docker-compose.python.yml up -d --build   # Python pool
+# Set the node address, RPC credentials, and ZMQ endpoint before starting.
+# Use 127.0.0.1 when Bitcoin Core runs on this host.
+sudoedit /opt/erikslund-pool/etc/pool.yml
+
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
+
+The container runs as UID/GID 1000. Host directories must be writable by that user
+so the pool can persist statistics and spool found blocks.
 
 ## Configuration
 
-One YAML file, [`conf/pool.yml`](conf/pool.yml), validated by
-[`conf/pool.schema.json`](conf/pool.schema.json) and read by **both** pools:
+[`conf/pool.yml`](conf/pool.yml) is the documented default configuration and
+[`conf/pool.schema.json`](conf/pool.schema.json) defines every accepted field.
 
 ```yaml
 bitcoin_nodes:
-  - address: bitcoind:8332      # extra entries are failover nodes
+  - address: bitcoind:8332
     username: erikslund
     password: CHANGE_ME_before_deploying
-stratum_listen:  [0.0.0.0:3333] # multiple entries bind multiple ports
-api_listen:      [127.0.0.1:7777] # status + /metrics -- loopback default; override to expose
-initial_difficulty: 10000       # vardiff adjusts from here
+stratum_listen: [0.0.0.0:3333]
+api_listen: [127.0.0.1:7777]
+initial_difficulty: 10000
 minimum_difficulty: 1
-zmq_block_endpoint: tcp://bitcoind:28332   # instant new-block work
+zmq_block_endpoint: tcp://bitcoind:28332
 ```
 
-| Port | Purpose                                                                       |
-| --- |--------------------------------------------------------------------------------|
-| `3333` | Stratum V1 -- miners connect here                                            |
-| `3334` | Optional authenticated Stratum V2 Standard/Extended endpoint                  |
-| `7777` | HTTP status JSON + Prometheus `/metrics` (`/health`, `/status`, `/stats/*`) |
+| Port | Purpose |
+| --- | --- |
+| `3333` | Stratum V1 |
+| `3334` | Optional authenticated Stratum V2 |
+| `7777` | Status API, health checks, and Prometheus metrics |
 
-## Benchmarks
+## Development
 
-[`tools/bench/`](tools/bench/) measures the **share-validation hot path** -- parse
-`mining.submit` -> rebuild coinbase/merkle/header -> double-SHA256 -> target
-compare -- on a private regtest chain. A synthetic Stratum client
-([`stratum_bench.py`](tools/bench/stratum_bench.py)) floods structurally-valid,
-always-above-target shares (no proof-of-work, so no blocks), exercising the
-pool's *full* validation path. Both pools run the identical
-[`tools/bench/bench.yml`](tools/bench/bench.yml) and the same generator.
+The toolchain image provides GCC, CMake, the dependencies, static analysis, and
+sanitizers. No host compiler is required.
 
-Measured on a **32-core x86-64** host, Docker, 30 s window after a 5 s warmup
-(`WORKERS=16 CONNECTIONS=160 PIPELINE=32 bash tools/bench/run_bench.sh`, Release build).
-The generator hashes each share too, so it's CPU-bound: even at 16 workers the C++ pool
-runs well under saturation (~6 of 32 cores), so throughput here is *generator-bound*,
-making the **per-core** and **memory** columns -- not raw shares/s -- the efficiency signal.
+```sh
+docker build -t erikslund-pool-build docker
+docker run --rm -v "$PWD:/src:ro" -v erikslund-build:/build erikslund-pool-build
+```
 
-| impl | shares/s | per core | p50 ms | p95 ms | p99 ms | CPU % | peak RSS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **C++** | 391,349 | **~65,000** | 10.3 | 14.5 | 16.1 | 602 | **326 MiB** |
-| **Python** | 275,692 | ~18,600 | 15.3 | 33.1 | 36.3 | 1480 | 939 MiB |
+End-to-end tests exercise a real regtest node and native CPU miner:
 
-C++ sustains **391k shares/s on ~6.0 cores**; Python **276k on ~14.8** -- about
-**3.5x the throughput per core**, with **~2.9x less memory** and a far tighter
-tail (**p99 16 ms vs 36 ms**).
+```sh
+bash docker/smoketest.sh
+bash tools/regtest/failover-test.sh
+```
 
-**Memory at connection scale** -- idle connections (each does a real
-`mining.subscribe` + `mining.authorize`, then holds), pool RSS via `docker stats`
-(`CONNS="50 20000" bash tools/bench/connscale.sh`, Debug build, 32-core host):
-
-| idle connections | C++ RSS | Python RSS |
-| --- | ---: | ---: |
-| 50 | 7 MiB | 75 MiB |
-| 20,000 | **109 MiB** (~5 KiB/conn) | **443 MiB** (~19 KiB/conn) |
-
-Both hold 20,000 idle connections without dropping any. The ceiling here is the
-benchmark, not the pool: a single load-generator container caps near ~28k
-connections (ephemeral source ports, 60999-32768), and `conn-bench.yml` caps
-`max_clients` at 20,000. To push higher, raise `max_clients`, the deploy's
-`nofile`, and drive load from multiple client IPs / listen ports.
+The in-process submit benchmark in `tools/bench/` is built as `erikslund-bench`.
 
 ## Layout
 
-| Path | What |
+| Path | Purpose |
 | --- | --- |
-| [`cpp/`](cpp/) | C++26 pool -- sources, tests (doctest), Docker build + smoke test |
-| [`python/`](python/) | Free-threaded Python pool -- package `erikslund_pool`, tests, Docker image |
-| [`cpp/src/sv2_noise/`](cpp/src/sv2_noise/) | Shared native SV2 Noise core and offline credential tool used by both pools |
-| [`conf/`](conf/) | Shared `pool.yml` + JSON-Schema |
-| [`tools/`](tools/) | Dev & test tooling -- `regtest/` harness (bitcoind + miner), `bench/` (share-validation benchmark), CPU miner, fake bitcoind, status page |
-| [`deploy/`](deploy/) | Production Compose stacks (embedded / external bitcoind) |
+| [`src/`](src/) | Pool sources, grouped by subsystem |
+| [`tests/`](tests/) | Unit, adversarial, and concurrency tests |
+| [`third_party/`](third_party/) | Unmodified vendored Bitcoin Core SHA-256 code |
+| [`conf/`](conf/) | Pool configuration and schema |
+| [`docker/`](docker/) | Reproducible build, analysis, and test tooling |
+| [`deploy/`](deploy/) | Compose deployments |
+| [`tools/regtest/`](tools/regtest/) | Bitcoin Core and CPU-miner regtest harness |
 
 ## License
 
-Licensed under the **[GNU General Public License v3.0 or later](LICENSE)**. The
-vendored Bitcoin Core SHA-256 in [`cpp/third_party/bitcoin/`](cpp/third_party/bitcoin/)
-is **MIT** (Bitcoin Core developers, GPL-compatible), used unmodified with its
-license/attribution preserved there.
+Licensed under the [GNU General Public License v3.0 or later](LICENSE). The
+vendored Bitcoin Core SHA-256 code is MIT-licensed and retains its attribution.
 
 ## Credits
 
-- Stratum V1; design lineage from [ckpool](https://bitbucket.org/ckolivas/ckpool).
+- Stratum V1 design lineage from [ckpool](https://bitbucket.org/ckolivas/ckpool).

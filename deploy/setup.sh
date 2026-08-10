@@ -1,13 +1,28 @@
 #!/bin/sh
-# Render the deploy configs with a generated RPC password into the shared
-# `config` volume. Run automatically by the compose `setup` service before
-# bitcoind and the pool start -- you don't invoke this by hand.
+# Prepare host directories with --create-directories, or render deploy configs
+# inside the Compose setup service when called without arguments.
 #
 # Idempotent: the password is generated once (stored in the volume) and reused
 # on every later start, so bitcoind and the pool always share matching
 # credentials. `docker compose down -v` wipes the volume and, on the next `up`,
 # a fresh password is generated.
 set -eu
+
+if [ "${1:-}" = "--create-directories" ]; then
+    root=${POOL_ROOT:-/opt/erikslund-pool}
+    uid=${POOL_UID:-1000}
+    gid=${POOL_GID:-1000}
+
+    mkdir -p "$root/etc" "$root/data" "$root/logs"
+    chown "$uid:$gid" "$root" "$root/etc" "$root/data" "$root/logs"
+    echo "setup: created $root/{etc,data,logs} for $uid:$gid"
+    exit 0
+fi
+
+if [ "$#" -ne 0 ]; then
+    echo "usage: $0 [--create-directories]" >&2
+    exit 2
+fi
 
 PW_FILE=/config/.rpcpassword
 

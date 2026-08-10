@@ -14,7 +14,7 @@
 #
 # IPC reconnects every 30 seconds after startup or runtime failures.
 work_source: ipc
-ipc_socket_path: /ipc/mining.sock   # shared named volume 'mining-ipc' mounted at /ipc in both containers
+ipc_socket_path: /tmp/ipc/mining.sock   # shared named volume 'mining-ipc' mounted at /ipc in both containers
 
 bitcoin_nodes:
   - address: bitcoind:8332          # required RPC side channel and work fallback

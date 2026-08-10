@@ -1,0 +1,38 @@
+name: Deployment
+
+on:
+  push:
+    paths:
+      - "deploy/**"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "conf/**"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "conf/**"
+      - ".github/workflows/deploy.yml"
+
+concurrency:
+  group: deployment-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build production image
+        run: docker build -t erikslund-pool:ci .
+
+      - name: Validate production Compose stacks
+        run: |
+          docker compose -f deploy/docker-compose.yml config --quiet

@@ -1,0 +1,119 @@
+name: C++
+
+on:
+  push:
+    paths:
+      - "CMakeLists.txt"
+      - "Dockerfile"
+      - ".clang-tidy"
+      - "src/**"
+      - "tests/**"
+      - "third_party/**"
+      - "docker/**"
+      - "tools/bench/**"
+      - "conf/pool.schema.json"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "Dockerfile"
+      - ".clang-tidy"
+      - "src/**"
+      - "tests/**"
+      - "third_party/**"
+      - "docker/**"
+      - "tools/bench/**"
+      - "conf/pool.schema.json"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate production Dockerfile
+        run: docker build --check .
+      - name: Build and test
+        run: |
+          docker build -t erikslund-pool-build docker
+          docker run --rm -v "$PWD:/src:ro" \
+            -v erikslund-build:/build erikslund-pool-build
+
+  noise-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Standalone Noise build and sanitizers
+        run: |
+          docker build -t erikslund-pool-build docker
+          docker run --rm -v "$PWD:/src:ro" \
+            -v erikslund-noise-build:/build \
+            --entrypoint /bin/bash erikslund-pool-build -lc '
+              set -euo pipefail
+              sanitizer_flags="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+              cmake -S /src/src/sv2_noise -B /build/noise \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_C_FLAGS="$sanitizer_flags" \
+                -DCMAKE_CXX_FLAGS="$sanitizer_flags" \
+                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+              cmake --build /build/noise --parallel "$(nproc)"
+              ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1 \
+                UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+                ctest --test-dir /build/noise --output-on-failure
+            '
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: clang-tidy
+        run: |
+          docker build -t erikslund-pool-build docker
+          docker run --rm -v "$PWD:/src:ro" \
+            -v erikslund-tidy-build:/build \
+            --entrypoint /usr/local/bin/clang-tidy.sh erikslund-pool-build
+
+  cppcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: cppcheck
+        run: |
+          docker build -t erikslund-pool-build docker
+          docker run --rm -v "$PWD:/src:ro" \
+            --entrypoint /usr/local/bin/cppcheck.sh erikslund-pool-build
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Address and undefined behavior sanitizers
+        run: |
+          docker build -t erikslund-pool-build docker
+          docker run --rm -v "$PWD:/src:ro" \
+            -v erikslund-asan-build:/build \
+            --entrypoint /usr/local/bin/sanitize.sh erikslund-pool-build
+
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Thread sanitizer
+        run: |
+          docker build -t erikslund-pool-build docker
+          docker run --rm -v "$PWD:/src:ro" \
+            -v erikslund-tsan-build:/build \
+            --entrypoint /usr/local/bin/tsan.sh erikslund-pool-build

@@ -12,44 +12,18 @@ permissions:
   contents: read
 
 jobs:
-  cpp-pool:
+  smoke-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - name: C++ pool mines a regtest block
-        run: KEEP=0 bash ./cpp/docker/smoketest.sh
+      - uses: actions/checkout@v7
+      - name: Mine a regtest block through the pool
+        run: KEEP=0 bash ./docker/smoketest.sh
 
-  python-pool:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.14t'
-      - name: Install the pool + deps
-        run: pip install -e ./python
-      - name: Python pool mines a regtest block
-        run: KEEP=0 POOL_ON_HOST=1 bash ./python/e2e_regtest.sh
-
-  cpp-failover:
+  failover:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v6
-      - name: C++ pool fails over to a backup bitcoind
-        run: POOL=cpp bash ./tools/regtest/failover-test.sh
-
-  python-failover:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.14t'
-      - name: Install the pool + deps
-        run: pip install -e ./python
-      - name: Python pool fails over to a backup bitcoind
-        run: POOL=python POOL_ON_HOST=1 bash ./tools/regtest/failover-test.sh
+      - uses: actions/checkout@v7
+      - name: Fail over to a backup Bitcoin Core node
+        run: bash ./tools/regtest/failover-test.sh

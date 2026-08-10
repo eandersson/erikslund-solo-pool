@@ -1,44 +1,13 @@
+# Out-of-source build output
+/build/
+/cmake-build*/
+compile_commands.json
 *.o
+*.a
+*.so
 *.bin
-*.la
-*.lo
 
-Makefile
-Makefile.in
-INSTALL
-configure
-depcomp
-missing
-install-sh
-stamp-h1
-compile
-config.log
-config.status
-config.guess
-config.sub
-
-*~
-stats/*
-
-# IDE / editor
+# Editor files
 .idea/
-
-# Python bytecode cache (status dashboard, test/miner tooling)
-__pycache__/
-*.pyc
-*.egg-info
-
-ext_deps
-config.h.in
-config.h
-
-mkinstalldirs
-
 *.swp
-ltmain.sh
-
-.libs/
-
-libtool
-
-test-driver
+*~
