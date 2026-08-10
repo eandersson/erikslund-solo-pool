@@ -6,7 +6,10 @@
 //   * all endpoints down -> RpcConnectionError after trying each once.
 #include <doctest/doctest.h>
 
+#include <chrono>
+#include <future>
 #include <map>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -276,6 +279,184 @@ TEST_CASE("from a backup, a fresh failure rotates and wraps to a recovered prima
     rpc.mode["http://primary"] = ScriptedRpc::Mode::Ok;
     CHECK(rpc.call("getblockcount")["served_by"].get<std::string>() =="http://primary");
     CHECK(rpc.hits["http://backup2"] == 1); // tried once on the wrap-around
+}
+
+namespace {
+
+class SubmitRpc : public RpcClient {
+public:
+    enum class Reply {
+        Accepted,
+        Duplicate,
+        Inconclusive,
+        Rejected,
+        BadPreviousBlock,
+        Down,
+        RpcError
+    };
+
+    explicit SubmitRpc(const std::vector<RpcEndpoint>& endpoints)
+        : RpcClient(endpoints, /*timeout_seconds=*/1) {}
+
+    std::map<std::string, Reply> replies;
+
+    int hit_count(const std::string& url) {
+        const std::scoped_lock lock(mutex_);
+        return hits_[url];
+    }
+
+    void reset_hits() {
+        const std::scoped_lock lock(mutex_);
+        hits_.clear();
+    }
+
+protected:
+    glz::generic call_one(const Resolved& endpoint, const std::string&, long) override {
+        Reply reply;
+        {
+            const std::scoped_lock lock(mutex_);
+            ++hits_[endpoint.url];
+            reply = replies.at(endpoint.url);
+        }
+        switch (reply) {
+        case Reply::Accepted: return glz::generic{};
+        case Reply::Duplicate: return glz::generic(std::string("duplicate"));
+        case Reply::Inconclusive: return glz::generic(std::string("inconclusive"));
+        case Reply::Rejected: return glz::generic(std::string("high-hash"));
+        case Reply::BadPreviousBlock: return glz::generic(std::string("bad-prevblk"));
+        case Reply::Down: throw RpcConnectionError("down: " + endpoint.url);
+        case Reply::RpcError: throw erikslund::RpcError("submitblock denied", -22);
+        }
+        throw std::logic_error("unhandled submitblock reply");
+    }
+
+private:
+    std::mutex mutex_;
+    std::map<std::string, int> hits_;
+};
+
+class BlockingSubmitRpc : public RpcClient {
+public:
+    explicit BlockingSubmitRpc(const std::vector<RpcEndpoint>& endpoints)
+        : RpcClient(endpoints, /*timeout_seconds=*/1),
+          release_signal_(release_primary.get_future().share()) {}
+
+    std::promise<void> primary_called;
+    std::promise<void> backup_called;
+    std::promise<void> release_primary;
+
+protected:
+    glz::generic call_one(const Resolved& endpoint, const std::string&, long) override {
+        if (endpoint.url == "http://primary") {
+            primary_called.set_value();
+            release_signal_.wait();
+            throw RpcConnectionError("primary timed out");
+        }
+        if (endpoint.url == "http://backup1") {
+            backup_called.set_value();
+            return glz::generic{};
+        }
+        return glz::generic(std::string("high-hash"));
+    }
+
+private:
+    std::shared_future<void> release_signal_;
+};
+
+} // namespace
+
+TEST_CASE("submitblock sends the block to every endpoint and any acceptance wins") {
+    SubmitRpc rpc(kEndpoints);
+    rpc.replies = {{"http://primary", SubmitRpc::Reply::Rejected},
+                   {"http://backup1", SubmitRpc::Reply::Accepted},
+                   {"http://backup2", SubmitRpc::Reply::Down}};
+
+    CHECK_FALSE(rpc.submitblock("00").has_value());
+    CHECK(rpc.hit_count("http://primary") == 1);
+    CHECK(rpc.hit_count("http://backup1") == 1);
+    CHECK(rpc.hit_count("http://backup2") == 1);
+    CHECK(rpc.active_index() == 0);
+}
+
+TEST_CASE("submitblock treats a valid duplicate from any endpoint as success") {
+    SubmitRpc rpc(kEndpoints);
+    rpc.replies = {{"http://primary", SubmitRpc::Reply::RpcError},
+                   {"http://backup1", SubmitRpc::Reply::Rejected},
+                   {"http://backup2", SubmitRpc::Reply::Duplicate}};
+
+    CHECK(rpc.submitblock("00") == "duplicate");
+    CHECK(rpc.hit_count("http://primary") == 1);
+    CHECK(rpc.hit_count("http://backup1") == 1);
+    CHECK(rpc.hit_count("http://backup2") == 1);
+}
+
+TEST_CASE("submitblock does not change the active work endpoint") {
+    SubmitRpc rpc(kEndpoints);
+    rpc.replies = {{"http://primary", SubmitRpc::Reply::Down},
+                   {"http://backup1", SubmitRpc::Reply::Rejected},
+                   {"http://backup2", SubmitRpc::Reply::Rejected}};
+    rpc.call("getblockcount");
+    REQUIRE(rpc.active_index() == 1);
+
+    rpc.reset_hits();
+    rpc.replies = {{"http://primary", SubmitRpc::Reply::Accepted},
+                   {"http://backup1", SubmitRpc::Reply::Rejected},
+                   {"http://backup2", SubmitRpc::Reply::Rejected}};
+    CHECK_FALSE(rpc.submitblock("00").has_value());
+    CHECK(rpc.hit_count("http://primary") == 1);
+    CHECK(rpc.hit_count("http://backup1") == 1);
+    CHECK(rpc.hit_count("http://backup2") == 1);
+    CHECK(rpc.active_index() == 1);
+}
+
+TEST_CASE("submitblock retries unless every endpoint definitively rejects") {
+    SubmitRpc rpc(kEndpoints);
+
+    SUBCASE("an inconclusive response keeps the block pending") {
+        rpc.replies = {{"http://primary", SubmitRpc::Reply::Rejected},
+                       {"http://backup1", SubmitRpc::Reply::Inconclusive},
+                       {"http://backup2", SubmitRpc::Reply::Down}};
+        CHECK(rpc.submitblock("00") == "inconclusive");
+    }
+    SUBCASE("a connection error keeps the block pending") {
+        rpc.replies = {{"http://primary", SubmitRpc::Reply::Rejected},
+                       {"http://backup1", SubmitRpc::Reply::Down},
+                       {"http://backup2", SubmitRpc::Reply::Rejected}};
+        CHECK_THROWS_AS(rpc.submitblock("00"), RpcConnectionError);
+    }
+    SUBCASE("an RPC error keeps the block pending") {
+        rpc.replies = {{"http://primary", SubmitRpc::Reply::Rejected},
+                       {"http://backup1", SubmitRpc::Reply::RpcError},
+                       {"http://backup2", SubmitRpc::Reply::Rejected}};
+        CHECK_THROWS_AS(rpc.submitblock("00"), RpcError);
+    }
+    SUBCASE("all definitive rejections are final") {
+        rpc.replies = {{"http://primary", SubmitRpc::Reply::Rejected},
+                       {"http://backup1", SubmitRpc::Reply::BadPreviousBlock},
+                       {"http://backup2", SubmitRpc::Reply::BadPreviousBlock}};
+        CHECK(rpc.submitblock("00") == "high-hash");
+    }
+    CHECK(rpc.hit_count("http://primary") == 1);
+    CHECK(rpc.hit_count("http://backup1") == 1);
+    CHECK(rpc.hit_count("http://backup2") == 1);
+}
+
+TEST_CASE("a blocked submitblock endpoint does not delay another endpoint") {
+    using namespace std::chrono_literals;
+
+    BlockingSubmitRpc rpc(kEndpoints);
+    auto primary_called = rpc.primary_called.get_future();
+    auto backup_called = rpc.backup_called.get_future();
+    auto submission = std::async(std::launch::async, [&rpc] { return rpc.submitblock("00"); });
+
+    const auto primary_status = primary_called.wait_for(1s);
+    const auto backup_status = backup_called.wait_for(1s);
+    rpc.release_primary.set_value();
+    const auto result = submission.get();
+
+    CHECK(primary_status == std::future_status::ready);
+    CHECK(backup_status == std::future_status::ready);
+    CHECK_FALSE(result.has_value());
 }
 
 // The raw GBT path parses directly into a BlockTemplate before publishing a new active endpoint.

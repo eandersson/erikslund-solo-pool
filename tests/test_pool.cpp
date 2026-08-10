@@ -36,6 +36,8 @@
 #include "gbt_fixture.hpp"
 #include "pool/pool.hpp"
 #include "stats/poolstatus.hpp"
+#include "util/hex.hpp"
+#include "util/sha256.hpp"
 
 using namespace erikslund;
 
@@ -49,34 +51,65 @@ bool is_lower_hex(const std::string& s) {
 class InconclusiveRpc final : public bitcoin::RpcClient {
 public:
     InconclusiveRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+    std::atomic<int> calls{0};
 
 protected:
     std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        calls.fetch_add(1, std::memory_order_relaxed);
         if (http_status)
             *http_status = 200;
         return R"({"result":"inconclusive","error":null,"id":1})";
     }
 };
 
-// submitblock returns null (accepted) -- stands in for the node once it can validate the block.
-class AcceptingRpc final : public bitcoin::RpcClient {
+class UnreachableRpc final : public bitcoin::RpcClient {
 public:
-    AcceptingRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+    UnreachableRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+    std::atomic<int> calls{0};
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long*) override {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        throw RpcConnectionError("transport error: connection reset");
+    }
+};
+
+class RecoveringRpc final : public bitcoin::RpcClient {
+public:
+    RecoveringRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+    std::atomic<int> calls{0};
+
+protected:
+    std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        const int call = calls.fetch_add(1, std::memory_order_relaxed);
+        if (http_status)
+            *http_status = 200;
+        if (call == 0)
+            return R"({"result":"inconclusive","error":null,"id":1})";
+        return R"({"result":null,"error":null,"id":1})";
+    }
+};
+
+class RejectingRpc final : public bitcoin::RpcClient {
+public:
+    RejectingRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
 
 protected:
     std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
         if (http_status)
             *http_status = 200;
-        return R"({"result":null,"error":null,"id":1})";
+        return R"({"result":"bad-cb-amount","error":null,"id":1})";
     }
 };
 
 class DuplicateRpc final : public bitcoin::RpcClient {
 public:
     DuplicateRpc() : RpcClient("http://127.0.0.1:1", "user", "pass") {}
+    std::atomic<int> calls{0};
 
 protected:
     std::string post_one(const Resolved&, const std::string&, long, long* http_status) override {
+        calls.fetch_add(1, std::memory_order_relaxed);
         if (http_status)
             *http_status = 200;
         return R"({"result":"duplicate","error":null,"id":1})";
@@ -222,6 +255,95 @@ public:
 
 private:
     const bitcoin::BlockTemplate block_template_ = refresh_template();
+};
+
+constexpr int64_t kRecoveredBlockHeight = 500;
+constexpr std::string_view kRecoveredBlockHeaderHex =
+    "01000000"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a"
+    "29ab5f49"
+    "ffff001d"
+    "1dac2b7c";
+
+struct RecoveredBlockFixture {
+    std::filesystem::path stats_directory;
+    std::filesystem::path spool_path;
+    std::string block_hash;
+};
+
+RecoveredBlockFixture write_recovered_block(std::string_view test_directory,
+                                            std::string filename_hash = {}) {
+    namespace fs = std::filesystem;
+    const fs::path stats_directory = fs::temp_directory_path() / test_directory;
+    fs::remove_all(stats_directory);
+    fs::create_directories(stats_directory / "blocks");
+
+    const Bytes header = util::from_hex(kRecoveredBlockHeaderHex);
+    const std::string block_hash = util::to_hex_reversed(util::sha256d(header));
+    if (filename_hash.empty())
+        filename_hash = block_hash;
+    const fs::path spool_path =
+        stats_directory / "blocks" /
+        std::format("{}_{}.hex", kRecoveredBlockHeight, filename_hash);
+    { std::ofstream(spool_path, std::ios::binary) << kRecoveredBlockHeaderHex << '\n'; }
+    return {stats_directory, spool_path, block_hash};
+}
+
+struct RecoveredChainState {
+    std::string candidate_hash;
+    int64_t candidate_height = kRecoveredBlockHeight;
+    std::string tip_hash;
+    int64_t tip_height = kRecoveredBlockHeight;
+    int64_t candidate_confirmations = 1;
+    bool fail_tip_lookup = false;
+};
+
+class RecoveredBlockWorkSource final : public bitcoin::WorkSource {
+public:
+    explicit RecoveredBlockWorkSource(RecoveredChainState state) : state_(std::move(state)) {}
+
+    bitcoin::ChainInfo detect_chain() override { return {.chain = "regtest", .blocks = 0}; }
+
+    std::string get_tip() override {
+        tip_lookups.fetch_add(1, std::memory_order_relaxed);
+        if (state_.fail_tip_lookup)
+            throw RpcConnectionError("tip lookup failed");
+        return state_.tip_hash;
+    }
+
+    bitcoin::BlockTemplate fetch_template() override { return refresh_template(); }
+
+    bitcoin::HeaderFacts fetch_header(const std::string& block_hash) override {
+        if (block_hash == state_.tip_hash) {
+            tip_header_lookups.fetch_add(1, std::memory_order_relaxed);
+            return {.height = state_.tip_height,
+                    .confirmations = 1,
+                    .bits_hex = {},
+                    .mediantime = 0};
+        }
+        if (block_hash == state_.candidate_hash) {
+            candidate_header_lookups.fetch_add(1, std::memory_order_relaxed);
+            return {.height = state_.candidate_height,
+                    .confirmations = state_.candidate_confirmations,
+                    .bits_hex = {},
+                    .mediantime = 0};
+        }
+        throw RpcError("unexpected block header lookup");
+    }
+
+    std::optional<std::string> submit_block_hex(const std::string&) override {
+        submissions.fetch_add(1, std::memory_order_relaxed);
+        return "inconclusive";
+    }
+
+    std::atomic<size_t> submissions{0};
+    std::atomic<size_t> tip_lookups{0};
+    std::atomic<size_t> tip_header_lookups{0};
+    std::atomic<size_t> candidate_header_lookups{0};
+
+private:
+    const RecoveredChainState state_;
 };
 
 template <typename Predicate>
@@ -422,13 +544,15 @@ TEST_CASE("resubmit_spooled_blocks leaves the block on disk when bitcoind is unr
 
     Config config;
     config.stats_directory = stats.string();
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc); // refused -> submitblock throws
-    Pool pool(config, rpc_source);
-    pool.resubmit_spooled_blocks();
+    UnreachableRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    {
+        Pool pool(config, rpc_source);
+        pool.resubmit_spooled_blocks();
+        REQUIRE(wait_until([&] { return rpc.calls.load(std::memory_order_relaxed) == 1; }));
+    }
 
-    // The node was unreachable, so the block must stay (a later restart retries it),
-    // never silently archived as submitted/rejected.
+    // Shutdown drops the in-memory retry, but the original remains durable for the next run.
     CHECK(fs::exists(block));
     CHECK_FALSE(fs::exists(block.string() + ".submitted"));
     CHECK_FALSE(fs::exists(block.string() + ".rejected"));
@@ -448,46 +572,15 @@ TEST_CASE("resubmit_spooled_blocks leaves an inconclusive submission available f
     config.stats_directory = stats.string();
     InconclusiveRpc rpc;
     bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
-    pool.resubmit_spooled_blocks();
+    {
+        Pool pool(config, rpc_source);
+        pool.resubmit_spooled_blocks();
+        REQUIRE(wait_until([&] { return rpc.calls.load(std::memory_order_relaxed) == 1; }));
+    }
 
     CHECK(fs::exists(block));
     CHECK_FALSE(fs::exists(block.string() + ".submitted"));
     CHECK_FALSE(fs::exists(block.string() + ".rejected"));
-
-    fs::remove_all(stats);
-}
-
-TEST_CASE("an inconclusive spooled block is submitted (archived) on a later restart") {
-    namespace fs = std::filesystem;
-    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_inconclusive_retry_test";
-    fs::remove_all(stats);
-    fs::create_directories(stats / "blocks");
-    const fs::path block = stats / "blocks" / "500_abc.hex";
-    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
-
-    Config config;
-    config.stats_directory = stats.string();
-
-    // Boot 1: bitcoind cannot yet validate the block ("inconclusive") -> it stays on disk for retry.
-    {
-        InconclusiveRpc rpc;
-        bitcoin::RpcWorkSource rpc_source(rpc);
-        Pool pool(config, rpc_source);
-        pool.resubmit_spooled_blocks();
-    }
-    REQUIRE(fs::exists(block));
-    REQUIRE_FALSE(fs::exists(block.string() + ".submitted"));
-
-    // Boot 2: bitcoind now confirms -> the same spooled block is submitted and archived.
-    {
-        AcceptingRpc rpc;
-        bitcoin::RpcWorkSource rpc_source(rpc);
-        Pool pool(config, rpc_source);
-        pool.resubmit_spooled_blocks();
-    }
-    CHECK_FALSE(fs::exists(block));
-    CHECK(fs::exists(block.string() + ".submitted"));
 
     fs::remove_all(stats);
 }
@@ -562,8 +655,332 @@ struct PoolTestPeek {
     static bool publication_worker_started(const Pool& pool) {
         return pool.publication_thread_.joinable();
     }
+    static size_t pending_submissions(Pool& pool) {
+        const std::scoped_lock lock(pool.submit_mutex_);
+        return pool.submit_queue_.size();
+    }
+    static void retry_submissions_now(Pool& pool) {
+        {
+            const std::scoped_lock lock(pool.submit_mutex_);
+            for (auto& submission : pool.submit_queue_)
+                submission.retry_after = {};
+        }
+        pool.submit_cv_.notify_all();
+    }
+    static std::vector<std::string> submission_priority(Pool& pool) {
+        const std::scoped_lock lock(pool.submit_mutex_);
+        const auto enqueue = [&](std::string hash, bool recovered) {
+            auto block = std::make_shared<Pool::PendingBlock>(
+                Pool::PendingBlock{1, std::move(hash), "00", "", ""});
+            pool.enqueue_submission_locked(Pool::PendingSubmission{
+                std::move(block),
+                recovered ? std::optional<std::filesystem::path>("recovered.hex") : std::nullopt});
+        };
+        enqueue("recovered-1", true);
+        enqueue("live-1", false);
+        enqueue("recovered-2", true);
+        enqueue("live-2", false);
+
+        std::vector<std::string> hashes;
+        for (const auto& submission : pool.submit_queue_)
+            hashes.push_back(submission.block->hash);
+        pool.submit_queue_.clear();
+        return hashes;
+    }
+    static bool submit_recovered(Pool& pool, const std::filesystem::path& path) {
+        const Pool::PendingBlock block{0, path.filename().string(), "00112233", "", ""};
+        return pool.submit_recovered_block(block, path);
+    }
 };
 } // namespace erikslund
+
+namespace {
+bool wait_for_first_recovered_submission(Pool& pool, RecoveredBlockWorkSource& source) {
+    pool.resubmit_spooled_blocks();
+    return wait_until(
+               [&] { return source.submissions.load(std::memory_order_relaxed) == 1; }) &&
+           wait_until([&] { return PoolTestPeek::pending_submissions(pool) == 1; });
+}
+} // namespace
+
+TEST_CASE("recovered blocks are submitted once before consulting the chain tip") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovered_first_submit_test");
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = fixture.block_hash,
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        CHECK(source.tip_lookups.load(std::memory_order_relaxed) == 0);
+        CHECK(fs::exists(fixture.spool_path));
+    }
+
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a recovered block at the active tip is archived before a second submission") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovered_active_tip_test");
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = fixture.block_hash,
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until(
+            [&] { return fs::exists(fixture.spool_path.string() + ".submitted"); }));
+        CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
+    }
+
+    CHECK_FALSE(fs::exists(fixture.spool_path));
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a recovered block on the active chain is archived as submitted after the tip advances") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovered_active_ancestor_test");
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = std::string(64, 'f'),
+        .tip_height = kRecoveredBlockHeight + 1,
+        .candidate_confirmations = 2,
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until(
+            [&] { return fs::exists(fixture.spool_path.string() + ".submitted"); }));
+        CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
+        CHECK(source.candidate_header_lookups.load(std::memory_order_relaxed) == 1);
+    }
+
+    CHECK_FALSE(fs::exists(fixture.spool_path));
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a recovered side-chain block is archived as stale after the tip advances") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovered_side_chain_test");
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = std::string(64, 'f'),
+        .tip_height = kRecoveredBlockHeight + 1,
+        .candidate_confirmations = -1,
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until(
+            [&] { return fs::exists(fixture.spool_path.string() + ".stale"); }));
+        CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
+        CHECK(source.candidate_header_lookups.load(std::memory_order_relaxed) == 1);
+    }
+
+    CHECK_FALSE(fs::exists(fixture.spool_path));
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a recovered block retries when a different block is the tip at the same height") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovered_same_height_test");
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = std::string(64, 'f'),
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until(
+            [&] { return source.submissions.load(std::memory_order_relaxed) == 2; }));
+        CHECK(fs::exists(fixture.spool_path));
+        CHECK_FALSE(fs::exists(fixture.spool_path.string() + ".stale"));
+    }
+
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a recovered block retries when the chain tip lookup fails") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovered_tip_failure_test");
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = fixture.block_hash,
+        .fail_tip_lookup = true,
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until(
+            [&] { return source.submissions.load(std::memory_order_relaxed) == 2; }));
+        CHECK(fs::exists(fixture.spool_path));
+        CHECK(source.tip_lookups.load(std::memory_order_relaxed) == 1);
+    }
+
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a recovered block retries when its filename hash does not match its header") {
+    namespace fs = std::filesystem;
+    const std::string filename_hash(64, 'f');
+    const auto fixture =
+        write_recovered_block("ep_recovered_mismatched_hash_test", filename_hash);
+    RecoveredBlockWorkSource source({
+        .candidate_hash = fixture.block_hash,
+        .tip_hash = filename_hash,
+    });
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        REQUIRE(wait_for_first_recovered_submission(pool, source));
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until(
+            [&] { return source.submissions.load(std::memory_order_relaxed) == 2; }));
+        CHECK(fs::exists(fixture.spool_path));
+        CHECK_FALSE(fs::exists(fixture.spool_path.string() + ".submitted"));
+        CHECK_FALSE(fs::exists(fixture.spool_path.string() + ".stale"));
+    }
+
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("live block submissions stay FIFO ahead of recovered blocks") {
+    Config config;
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+
+    const std::vector<std::string> expected{"live-1", "live-2", "recovered-1", "recovered-2"};
+    CHECK(PoolTestPeek::submission_priority(pool) == expected);
+}
+
+TEST_CASE("an archive failure leaves a terminal recovered block for the next restart") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_archive_failure_test";
+    const fs::path block = stats / "blocks" / "500_abc.hex";
+    fs::remove_all(stats);
+    fs::create_directories(block.parent_path());
+    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
+    fs::create_directory(block.string() + ".submitted"); // force rename to fail
+
+    Config config;
+    config.stats_directory = stats.string();
+    DuplicateRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    {
+        Pool pool(config, rpc_source);
+        CHECK_FALSE(PoolTestPeek::submit_recovered(pool, block));
+        CHECK(rpc.calls.load(std::memory_order_relaxed) == 1);
+        CHECK(pool.blocks_found() == 0);
+    }
+
+    CHECK(fs::exists(block));
+    fs::remove_all(stats);
+}
+
+TEST_CASE("a recovered block retries in-process without duplicate enqueue or accounting credit") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_retry_test";
+    fs::remove_all(stats);
+    fs::create_directories(stats / "blocks");
+    const fs::path block = stats / "blocks" / "500_abc.hex";
+    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
+
+    Config config;
+    config.stats_directory = stats.string();
+    RecoveringRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    {
+        Pool pool(config, rpc_source);
+        pool.resubmit_spooled_blocks();
+        REQUIRE(wait_until([&] { return rpc.calls.load(std::memory_order_relaxed) == 1; }));
+        REQUIRE(wait_until([&] { return PoolTestPeek::pending_submissions(pool) == 1; }));
+
+        pool.resubmit_spooled_blocks();
+        CHECK(PoolTestPeek::pending_submissions(pool) == 1);
+
+        PoolTestPeek::retry_submissions_now(pool);
+        REQUIRE(wait_until([&] { return fs::exists(block.string() + ".submitted"); }));
+        CHECK(rpc.calls.load(std::memory_order_relaxed) == 2);
+        CHECK(pool.blocks_found() == 0);
+    }
+
+    CHECK_FALSE(fs::exists(block));
+    fs::remove_all(stats);
+}
+
+TEST_CASE("a recovered duplicate archives as submitted without accounting credit") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_duplicate_test";
+    fs::remove_all(stats);
+    fs::create_directories(stats / "blocks");
+    const fs::path block = stats / "blocks" / "500_abc.hex";
+    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
+
+    Config config;
+    config.stats_directory = stats.string();
+    DuplicateRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    {
+        Pool pool(config, rpc_source);
+        pool.resubmit_spooled_blocks();
+        REQUIRE(wait_until([&] { return fs::exists(block.string() + ".submitted"); }));
+        CHECK(pool.blocks_found() == 0);
+    }
+
+    CHECK_FALSE(fs::exists(block));
+    fs::remove_all(stats);
+}
+
+TEST_CASE("a recovered rejection archives as rejected") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_resubmit_rejected_test";
+    fs::remove_all(stats);
+    fs::create_directories(stats / "blocks");
+    const fs::path block = stats / "blocks" / "500_abc.hex";
+    { std::ofstream(block, std::ios::binary) << "00112233\n"; }
+
+    Config config;
+    config.stats_directory = stats.string();
+    RejectingRpc rpc;
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    {
+        Pool pool(config, rpc_source);
+        pool.resubmit_spooled_blocks();
+        REQUIRE(wait_until([&] { return fs::exists(block.string() + ".rejected"); }));
+        CHECK(pool.blocks_found() == 0);
+    }
+
+    CHECK_FALSE(fs::exists(block));
+    fs::remove_all(stats);
+}
 
 TEST_CASE("block submission starts before durable spooling completes") {
     namespace fs = std::filesystem;

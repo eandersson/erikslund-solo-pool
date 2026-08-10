@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -37,6 +39,14 @@ std::optional<int64_t> rpc_error_code(const glz::generic& error) {
 bool endpoint_unavailable(const RpcError& error) {
     return error.code() == kRpcClientNotConnected ||
            error.code() == kRpcClientInInitialDownload || error.code() == kRpcInWarmup;
+}
+
+std::optional<std::string> submitblock_rejection(const glz::generic& result) {
+    if (result.is_null())
+        return std::nullopt;
+    if (result.is_string())
+        return result.get<std::string>();
+    return glz::write_json(result).value_or("");
 }
 
 std::string base64(std::string_view input) {
@@ -189,10 +199,10 @@ glz::generic RpcClient::call_one(const Resolved& endpoint, const std::string& pa
         const glz::generic& error = parsed["error"];
         throw RpcError(glz::write_json(error).value_or("rpc error"), rpc_error_code(error));
     }
+    if (!parsed.contains("result"))
+        throw RpcConnectionError("reply has no result (HTTP " + std::to_string(http_status) + ")");
     // Move the result subtree out; a copy would duplicate the whole DOM.
-    if (parsed.contains("result"))
-        return std::move(parsed["result"]);
-    return glz::generic{};
+    return std::move(parsed["result"]);
 }
 
 std::string RpcClient::make_getblocktemplate_payload() {
@@ -262,12 +272,51 @@ std::optional<std::string> RpcClient::submitblock(const std::string& block_hex) 
     payload += ",\"method\":\"submitblock\",\"params\":[\"";
     payload += block_hex;
     payload += "\"]}";
-    const glz::generic result = call_payload(payload, timeout_); // patient: never abort a block
-    if (result.is_null())
-        return std::nullopt; // block accepted
-    if (result.is_string())
-        return result.get<std::string>();
-    return glz::write_json(result).value_or("");
+
+    std::vector<std::future<glz::generic>> responses;
+    responses.reserve(endpoints_.size());
+    for (size_t index = 0; index < endpoints_.size(); ++index) {
+        responses.push_back(std::async(std::launch::async, [this, index, &payload] {
+            return call_one(endpoints_[index], payload, timeout_);
+        }));
+    }
+
+    bool accepted = false;
+    bool already_known = false;
+    std::optional<std::string> inconclusive;
+    std::optional<std::string> first_rejection;
+    std::exception_ptr first_error;
+    for (auto& response : responses) {
+        try {
+            const auto rejection = submitblock_rejection(response.get());
+            if (!rejection) {
+                accepted = true;
+            } else if (*rejection == "duplicate") {
+                already_known = true;
+            } else if (*rejection == "inconclusive" || *rejection == "duplicate-inconclusive") {
+                if (!inconclusive)
+                    inconclusive = rejection;
+            } else if (!first_rejection) {
+                first_rejection = rejection;
+            }
+        } catch (...) {
+            if (!first_error)
+                first_error = std::current_exception();
+        }
+    }
+
+    // Submission must not change which endpoint supplies mining work.
+    if (accepted)
+        return std::nullopt;
+    if (already_known)
+        return "duplicate";
+    if (inconclusive)
+        return inconclusive;
+    if (first_error)
+        std::rethrow_exception(first_error);
+    if (first_rejection)
+        return first_rejection;
+    throw RpcConnectionError("submitblock received no endpoint response");
 }
 
 glz::generic RpcClient::validateaddress(const std::string& address) {

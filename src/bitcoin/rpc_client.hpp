@@ -26,6 +26,7 @@ public:
                       long timeout = 0);
 
     BlockTemplate getblocktemplate_parsed();
+    // Send solved blocks to every node; acceptance or a valid duplicate from any node wins.
     std::optional<std::string> submitblock(const std::string& block_hex);
     glz::generic validateaddress(const std::string& address);
     glz::generic getblockchaininfo();

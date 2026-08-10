@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -45,6 +46,8 @@ namespace {
 // 24 x 30s = 12 min. Each job retains its tx data (up to ~4MB mainnet), so ~96MB worst-case.
 constexpr size_t kMaxRecentJobs = 24;
 constexpr std::chrono::seconds kInconclusiveRetryDelay{5};
+constexpr size_t kBlockHeaderHexCharacters = 160;
+constexpr int64_t kRpcBlockNotFound = -5;
 
 // How long a disconnected, never-mined registry row (authorize-only) lingers before prune evicts
 // it -- applied REGARDLESS of user_stats_retention_days so authorize-churn can't pin the registry
@@ -69,6 +72,41 @@ SubmitOutcome classify_submit(const std::optional<std::string>& rejection) {
     if (*rejection == "inconclusive" || *rejection == "duplicate-inconclusive")
         return SubmitOutcome::Inconclusive;
     return SubmitOutcome::Rejected;
+}
+
+struct SpooledBlockIdentity {
+    int64_t height;
+    std::string hash;
+};
+
+std::optional<SpooledBlockIdentity>
+parse_spooled_block_identity(const std::filesystem::path& path, std::string_view block_hex) {
+    if (path.extension() != ".hex")
+        return std::nullopt;
+
+    const std::string stem = path.stem().string();
+    const size_t separator = stem.find('_');
+    if (separator == std::string::npos || separator == 0 || separator != stem.rfind('_'))
+        return std::nullopt;
+
+    int64_t height = 0;
+    const char* height_begin = stem.data();
+    const char* height_end = height_begin + separator;
+    const auto [parsed_end, error] = std::from_chars(height_begin, height_end, height);
+    std::string hash = stem.substr(separator + 1);
+    if (error != std::errc{} || parsed_end != height_end || height <= 0 || hash.size() != 64 ||
+        !util::is_hex(hash))
+        return std::nullopt;
+
+    hash = util::to_hex(util::from_hex(hash));
+    if (block_hex.size() < kBlockHeaderHexCharacters ||
+        !util::is_hex(block_hex.substr(0, kBlockHeaderHexCharacters)))
+        return std::nullopt;
+    const Bytes header = util::from_hex(block_hex.substr(0, kBlockHeaderHexCharacters));
+    if (util::to_hex_reversed(util::sha256d(header)) != hash)
+        return std::nullopt;
+
+    return SpooledBlockIdentity{height, std::move(hash)};
 }
 
 void ratchet_max(std::atomic<double>& value, double candidate) {
@@ -851,47 +889,70 @@ void Pool::spool_block(const PendingBlock& block) {
 }
 
 void Pool::resubmit_spooled_blocks() {
-    // bitcoind safely rejects a stale/duplicate block, so a needless resubmit is a harmless no-op;
-    // each file is archived after handling so it is never retried.
     const std::filesystem::path dir = std::filesystem::path(config_.stats_directory) / "blocks";
     std::error_code ec;
-    if (!std::filesystem::exists(dir, ec))
+    if (!std::filesystem::exists(dir, ec)) {
+        if (ec)
+            log::warning("Could not inspect block spool {}: {}", dir.string(), ec.message());
         return;
+    }
     std::vector<std::filesystem::path> spooled;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
-        if (entry.path().extension() == ".hex")
-            spooled.push_back(entry.path());
+    std::filesystem::directory_iterator entry(dir, ec);
+    for (; !ec && entry != std::filesystem::directory_iterator(); entry.increment(ec))
+        if (entry->path().extension() == ".hex")
+            spooled.push_back(entry->path());
+    if (ec)
+        log::warning("Could not fully scan block spool {}: {}", dir.string(), ec.message());
     for (const auto& path : spooled) {
         std::string block_hex;
         {
             std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                log::warning("Could not read spooled block {}; leaving it on disk",
+                             path.filename().string());
+                continue;
+            }
             block_hex.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            if (in.bad()) {
+                log::warning("Could not fully read spooled block {}; leaving it on disk",
+                             path.filename().string());
+                continue;
+            }
         }
         while (!block_hex.empty() && std::isspace(static_cast<unsigned char>(block_hex.back())))
             block_hex.pop_back();
-        if (block_hex.empty())
+        if (block_hex.empty()) {
+            log::warning("Ignoring empty spooled block {}; leaving it on disk",
+                         path.filename().string());
             continue;
-        const std::string name = path.filename().string();
-        log::warning("Resubmitting block {} spooled by a previous run", name);
-        try {
-            const auto rejection = source_.submit_block_hex(block_hex);
-            const SubmitOutcome outcome = classify_submit(rejection);
-            if (outcome == SubmitOutcome::Accepted || outcome == SubmitOutcome::AlreadyKnown) {
-                log::info("Spooled block {} accepted/already known; archiving", name);
-                std::filesystem::rename(path, path.string() + ".submitted", ec);
-            } else if (outcome == SubmitOutcome::Inconclusive) {
-                log::warning("Spooled block {} submission was inconclusive; leaving it for retry",
-                             name);
-            } else {
-                log::warning("Spooled block {} rejected by bitcoind ({}); archiving", name,
-                             rejection.value_or("unknown"));
-                std::filesystem::rename(path, path.string() + ".rejected", ec);
-            }
-        } catch (const std::exception& e) {
-            log::error("Could not resubmit spooled block {} (bitcoind unreachable: {}); "
-                       "leaving it on disk for the next restart",
-                       name, e.what());
         }
+
+        const auto identity = parse_spooled_block_identity(path, block_hex);
+        if (!identity)
+            log::warning("Could not read height and hash from spooled block name {}; stale retry "
+                         "detection is disabled",
+                         path.filename().string());
+        auto block = std::make_shared<PendingBlock>(PendingBlock{
+            identity ? identity->height : -1,
+            identity ? identity->hash : std::string{},
+            std::move(block_hex),
+            "",
+            "",
+        });
+        {
+            const std::scoped_lock lock(submit_mutex_);
+            const auto [tracked, inserted] = tracked_recovered_blocks_.insert(path);
+            if (!inserted)
+                continue;
+            try {
+                enqueue_submission_locked(PendingSubmission{std::move(block), path});
+            } catch (...) {
+                tracked_recovered_blocks_.erase(tracked);
+                throw;
+            }
+        }
+        log::warning("Queued block {} spooled by a previous run", path.filename().string());
+        submit_cv_.notify_one();
     }
 }
 
@@ -1081,7 +1142,7 @@ void Pool::on_block_found(const std::string& address, const std::string& worker,
         job.build_block_hex(result.legacy_coinbase, result.header), address, worker});
     {
         const std::scoped_lock lock(submit_mutex_);
-        submit_queue_.push_back(PendingSubmission{block});
+        enqueue_submission_locked(PendingSubmission{block, std::nullopt});
     }
     submit_cv_.notify_one(); // Queue submission before potentially blocking log and disk work.
     spool_block(*block);
@@ -1141,6 +1202,105 @@ bool Pool::submit_block(const PendingBlock& block) {
     return true;
 }
 
+bool Pool::submit_recovered_block(const PendingBlock& block,
+                                  const std::filesystem::path& spool_path) {
+    const std::string name = spool_path.filename().string();
+    try {
+        const auto rejection = source_.submit_block_hex(block.hex);
+        const SubmitOutcome outcome = classify_submit(rejection);
+        std::string suffix;
+        if (outcome == SubmitOutcome::Accepted || outcome == SubmitOutcome::AlreadyKnown) {
+            log::info("Spooled block {} accepted/already known; archiving", name);
+            suffix = ".submitted";
+        } else if (outcome == SubmitOutcome::Inconclusive) {
+            log::warning("Spooled block {} submission was inconclusive; retrying in {} seconds",
+                         name, kInconclusiveRetryDelay.count());
+            return true;
+        } else {
+            log::warning("Spooled block {} rejected by bitcoind ({}); archiving", name,
+                         rejection.value_or("unknown"));
+            suffix = ".rejected";
+        }
+        archive_recovered_block(spool_path, suffix);
+        return false;
+    } catch (const std::exception& error) {
+        log::error("Could not resubmit spooled block {} ({}); retrying in {} seconds", name,
+                   error.what(), kInconclusiveRetryDelay.count());
+    }
+    return true;
+}
+
+void Pool::archive_recovered_block(const std::filesystem::path& spool_path,
+                                   std::string_view suffix) {
+    std::error_code error;
+    std::filesystem::rename(spool_path, spool_path.string() + std::string(suffix), error);
+    if (error)
+        log::error("Could not archive spooled block {} ({}); leaving it for the next restart",
+                   spool_path.filename().string(), error.message());
+}
+
+bool Pool::resolve_recovered_block_from_tip(const PendingBlock& block,
+                                            const std::filesystem::path& spool_path) {
+    if (block.height < 0 || block.hash.empty())
+        return false;
+
+    try {
+        const std::string raw_tip_hash = source_.get_tip();
+        if (raw_tip_hash.size() != 64 || !util::is_hex(raw_tip_hash))
+            return false;
+        const std::string tip_hash = util::to_hex(util::from_hex(raw_tip_hash));
+        if (block.hash == tip_hash) {
+            log::info("Spooled block {} is the active tip; archiving as submitted",
+                      spool_path.filename().string());
+            archive_recovered_block(spool_path, ".submitted");
+            return true;
+        }
+
+        const bitcoin::HeaderFacts tip = source_.fetch_header(tip_hash);
+        if (tip.confirmations < 1 || block.height >= tip.height)
+            return false;
+
+        try {
+            const bitcoin::HeaderFacts candidate = source_.fetch_header(block.hash);
+            if (candidate.height != block.height)
+                return false;
+            if (candidate.confirmations > 0) {
+                log::info("Spooled block {} is in the active chain; archiving as submitted",
+                          spool_path.filename().string());
+                archive_recovered_block(spool_path, ".submitted");
+                return true;
+            }
+            if (candidate.confirmations != -1)
+                return false;
+        } catch (const RpcError& error) {
+            if (error.code() != kRpcBlockNotFound)
+                throw;
+        }
+
+        log::info("Spooled block {} at height {} is below active tip height {}; archiving as stale",
+                  spool_path.filename().string(), block.height, tip.height);
+        archive_recovered_block(spool_path, ".stale");
+        return true;
+    } catch (const std::exception& error) {
+        log::debug("Could not check whether spooled block {} is stale: {}",
+                   spool_path.filename().string(), error.what());
+    }
+    return false;
+}
+
+void Pool::enqueue_submission_locked(PendingSubmission submission) {
+    if (submission.recovered_spool_path) {
+        submit_queue_.push_back(std::move(submission));
+        return;
+    }
+    // Keep live candidates FIFO, ahead of lower-priority recovery traffic.
+    const auto first_recovered =
+        std::ranges::find_if(submit_queue_, [](const PendingSubmission& queued) {
+            return queued.recovered_spool_path.has_value();
+        });
+    submit_queue_.insert(first_recovered, std::move(submission));
+}
+
 void Pool::submit_loop(const std::stop_token& stop) {
     std::unique_lock<std::mutex> lock(submit_mutex_);
     while (true) {
@@ -1174,11 +1334,22 @@ void Pool::submit_loop(const std::stop_token& stop) {
         PendingSubmission submission = std::move(*ready);
         submit_queue_.erase(ready);
         lock.unlock();
-        const bool retry = submit_block(*submission.block);
+        const bool recovered = submission.recovered_spool_path.has_value();
+        bool retry = false;
+        if (recovered && submission.submitted_once &&
+            resolve_recovered_block_from_tip(*submission.block,
+                                             *submission.recovered_spool_path)) {
+            retry = false;
+        } else {
+            retry = recovered ? submit_recovered_block(*submission.block,
+                                                       *submission.recovered_spool_path)
+                              : submit_block(*submission.block);
+            submission.submitted_once = true;
+        }
         lock.lock();
         if (retry) {
             submission.retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
-            submit_queue_.push_back(std::move(submission));
+            enqueue_submission_locked(std::move(submission));
         }
     }
 }

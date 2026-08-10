@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -21,6 +22,7 @@
 #include <shared_mutex>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -58,8 +60,7 @@ public:
     void status_loop(const std::stop_token& stop);
 
     void recover_stats();
-    // Re-submit any block a previous run spooled but never confirmed. Call once at startup
-    // after bitcoind is reachable.
+    // Queue blocks spooled by a previous run for submission and retry.
     void resubmit_spooled_blocks();
 
     void notify_new_block();
@@ -150,6 +151,8 @@ private:
 
     struct PendingSubmission {
         std::shared_ptr<const PendingBlock> block;
+        std::optional<std::filesystem::path> recovered_spool_path;
+        bool submitted_once = false;
         std::chrono::steady_clock::time_point retry_after{};
     };
 
@@ -242,10 +245,18 @@ private:
 
     bool credit_block(const PendingBlock& block);
     [[nodiscard]] bool submit_block(const PendingBlock& block);
+    [[nodiscard]] bool submit_recovered_block(const PendingBlock& block,
+                                              const std::filesystem::path& spool_path);
+    void archive_recovered_block(const std::filesystem::path& spool_path,
+                                 std::string_view suffix);
+    [[nodiscard]] bool resolve_recovered_block_from_tip(
+        const PendingBlock& block, const std::filesystem::path& spool_path);
+    void enqueue_submission_locked(PendingSubmission submission);
     void submit_loop(const std::stop_token& stop);
     std::mutex submit_mutex_;
     std::condition_variable_any submit_cv_;
     std::deque<PendingSubmission> submit_queue_;
+    std::set<std::filesystem::path> tracked_recovered_blocks_;
     std::jthread submit_thread_;
 
     std::mutex publication_mutex_;

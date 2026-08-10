@@ -4,7 +4,7 @@
 // auth header, and URL normalization all execute. Invariants pinned:
 //   * call_one extracts the "result" subtree; a present+non-null "error" becomes RpcError;
 //     a missing/null "error" is success; an unparseable body becomes RpcConnectionError (HTTP code
-//     preserved); a missing "result" yields a null value.
+//     preserved); a missing "result" is rejected.
 //   * submitblock: null result = accepted (nullopt); a string = the reject reason verbatim;
 //     anything else = its dump. The payload carries method "submitblock" and the block hex.
 //   * call(method, params) builds a jsonrpc-1.0 envelope and the request id strictly increases.
@@ -70,10 +70,10 @@ TEST_CASE("call_one returns the result subtree, not the whole envelope") {
     CHECK_FALSE(result.contains("id")); // the envelope id/error are stripped
 }
 
-TEST_CASE("call_one yields a null value when the reply has no result key") {
+TEST_CASE("call_one rejects a reply with no result key") {
     BodyRpc rpc;
     rpc.body = R"({"error":null,"id":1})";
-    CHECK(rpc.call("getblockcount").is_null());
+    CHECK_THROWS_AS(rpc.call("getblockcount"), RpcConnectionError);
 }
 
 TEST_CASE("a null/absent error field is NOT treated as a failure") {
@@ -156,6 +156,12 @@ TEST_CASE("submitblock: a null result means the block was ACCEPTED") {
     BodyRpc rpc;
     rpc.body = R"({"result":null,"error":null,"id":1})";
     CHECK(rpc.submitblock("00abcdef") == std::nullopt);
+}
+
+TEST_CASE("submitblock: a missing result is not mistaken for acceptance") {
+    BodyRpc rpc;
+    rpc.body = R"({"error":null,"id":1})";
+    CHECK_THROWS_AS(rpc.submitblock("00abcdef"), RpcConnectionError);
 }
 
 TEST_CASE("submitblock: a string result is the verbatim reject reason") {
