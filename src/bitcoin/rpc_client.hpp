@@ -71,7 +71,8 @@ private:
     mutable std::mutex failback_mutex_;
     std::optional<std::string> failback_expected_tip_;
 
-    // Template fetches use one caller thread, so the response buffer can be reused across polls.
+    // Pool::refresh_work is the sole fetch_template caller, so this buffer can be reused across
+    // polls.
     std::string gbt_body_;
 };
 

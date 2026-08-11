@@ -115,6 +115,38 @@ void ratchet_max(std::atomic<double>& value, double candidate) {
          !value.compare_exchange_weak(previous, candidate, std::memory_order_relaxed);)
         ;
 }
+
+template <typename Submission>
+std::optional<Submission> wait_for_submission(std::deque<Submission>& queue, std::mutex& mutex,
+                                              std::condition_variable_any& condition,
+                                              const std::stop_token& stop) {
+    std::unique_lock lock(mutex);
+    while (!stop.stop_requested()) {
+        condition.wait(lock, stop, [&queue] { return !queue.empty(); });
+        if (stop.stop_requested())
+            return std::nullopt;
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto submission = std::find_if(queue.begin(), queue.end(), [now](const auto& queued) {
+            return queued.retry_after <= now;
+        });
+        if (submission != queue.end()) {
+            Submission result = std::move(*submission);
+            queue.erase(submission);
+            return result;
+        }
+
+        const auto next_retry =
+            std::ranges::min_element(queue, {}, &Submission::retry_after)->retry_after;
+        condition.wait_until(lock, stop, next_retry, [&queue] {
+            const auto current = std::chrono::steady_clock::now();
+            return std::ranges::any_of(queue, [current](const auto& queued) {
+                return queued.retry_after <= current;
+            });
+        });
+    }
+    return std::nullopt;
+}
 } // namespace
 
 Pool::Pool(Config config, bitcoin::WorkSource& source)
@@ -135,9 +167,19 @@ Pool::Pool(Config config, bitcoin::WorkSource& source)
     // commitment = sha256d(64 zero bytes).
     empty_commitment_ = "6a24aa21a9ed" + util::to_hex(util::sha256d(Bytes(64, 0)));
     submit_thread_ = std::jthread([this](const std::stop_token& stop) { submit_loop(stop); });
+    recovery_thread_ = std::jthread([this](const std::stop_token& stop) { recovery_loop(stop); });
     if (!config_.sv2_ports.empty() || !config_.sv2_plaintext_ports.empty())
         publication_thread_ =
             std::jthread([this](const std::stop_token& stop) { publication_loop(stop); });
+}
+
+Pool::~Pool() {
+    submit_thread_.request_stop();
+    recovery_thread_.request_stop();
+    publication_thread_.request_stop();
+    submit_cv_.notify_all();
+    recovery_cv_.notify_all();
+    publication_cv_.notify_all();
 }
 
 void Pool::detect_network() {
@@ -940,19 +982,20 @@ void Pool::resubmit_spooled_blocks() {
             "",
         });
         {
-            const std::scoped_lock lock(submit_mutex_);
+            const std::scoped_lock lock(recovery_mutex_);
             const auto [tracked, inserted] = tracked_recovered_blocks_.insert(path);
             if (!inserted)
                 continue;
             try {
-                enqueue_submission_locked(PendingSubmission{std::move(block), path});
+                recovery_queue_.push_back(
+                    RecoveredSubmission{.block = std::move(block), .spool_path = path});
             } catch (...) {
                 tracked_recovered_blocks_.erase(tracked);
                 throw;
             }
         }
         log::warning("Queued block {} spooled by a previous run", path.filename().string());
-        submit_cv_.notify_one();
+        recovery_cv_.notify_one();
     }
 }
 
@@ -1142,7 +1185,7 @@ void Pool::on_block_found(const std::string& address, const std::string& worker,
         job.build_block_hex(result.legacy_coinbase, result.header), address, worker});
     {
         const std::scoped_lock lock(submit_mutex_);
-        enqueue_submission_locked(PendingSubmission{block, std::nullopt});
+        submit_queue_.push_back(LiveSubmission{.block = block});
     }
     submit_cv_.notify_one(); // Queue submission before potentially blocking log and disk work.
     spool_block(*block);
@@ -1288,69 +1331,40 @@ bool Pool::resolve_recovered_block_from_tip(const PendingBlock& block,
     return false;
 }
 
-void Pool::enqueue_submission_locked(PendingSubmission submission) {
-    if (submission.recovered_spool_path) {
-        submit_queue_.push_back(std::move(submission));
-        return;
+void Pool::submit_loop(const std::stop_token& stop) {
+    while (auto submission =
+               wait_for_submission(submit_queue_, submit_mutex_, submit_cv_, stop)) {
+        const bool retry = submit_block(*submission->block);
+        if (!retry || stop.stop_requested())
+            continue;
+        submission->retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
+        {
+            const std::scoped_lock lock(submit_mutex_);
+            submit_queue_.push_back(std::move(*submission));
+        }
+        submit_cv_.notify_one();
     }
-    // Keep live candidates FIFO, ahead of lower-priority recovery traffic.
-    const auto first_recovered =
-        std::ranges::find_if(submit_queue_, [](const PendingSubmission& queued) {
-            return queued.recovered_spool_path.has_value();
-        });
-    submit_queue_.insert(first_recovered, std::move(submission));
 }
 
-void Pool::submit_loop(const std::stop_token& stop) {
-    std::unique_lock<std::mutex> lock(submit_mutex_);
-    while (true) {
-        submit_cv_.wait(lock, stop, [this] { return !submit_queue_.empty(); });
-        if (stop.stop_requested())
-            return;
-
-        const auto now = std::chrono::steady_clock::now();
-        const auto ready = std::find_if(submit_queue_.begin(), submit_queue_.end(),
-                                        [now](const PendingSubmission& submission) {
-                                            return submission.retry_after <= now;
-                                        });
-        if (ready == submit_queue_.end()) {
-            const auto next_retry = std::min_element(
-                                        submit_queue_.begin(), submit_queue_.end(),
-                                        [](const PendingSubmission& left,
-                                           const PendingSubmission& right) {
-                                            return left.retry_after < right.retry_after;
-                                        })
-                                        ->retry_after;
-            submit_cv_.wait_until(lock, stop, next_retry, [this] {
-                const auto current = std::chrono::steady_clock::now();
-                return std::any_of(submit_queue_.begin(), submit_queue_.end(),
-                                   [current](const PendingSubmission& submission) {
-                                       return submission.retry_after <= current;
-                                   });
-            });
-            continue;
-        }
-
-        PendingSubmission submission = std::move(*ready);
-        submit_queue_.erase(ready);
-        lock.unlock();
-        const bool recovered = submission.recovered_spool_path.has_value();
+void Pool::recovery_loop(const std::stop_token& stop) {
+    while (auto submission =
+               wait_for_submission(recovery_queue_, recovery_mutex_, recovery_cv_, stop)) {
         bool retry = false;
-        if (recovered && submission.submitted_once &&
-            resolve_recovered_block_from_tip(*submission.block,
-                                             *submission.recovered_spool_path)) {
+        if (submission->submitted_once &&
+            resolve_recovered_block_from_tip(*submission->block, submission->spool_path)) {
             retry = false;
         } else {
-            retry = recovered ? submit_recovered_block(*submission.block,
-                                                       *submission.recovered_spool_path)
-                              : submit_block(*submission.block);
-            submission.submitted_once = true;
+            retry = submit_recovered_block(*submission->block, submission->spool_path);
+            submission->submitted_once = true;
         }
-        lock.lock();
-        if (retry) {
-            submission.retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
-            enqueue_submission_locked(std::move(submission));
+        if (!retry || stop.stop_requested())
+            continue;
+        submission->retry_after = std::chrono::steady_clock::now() + kInconclusiveRetryDelay;
+        {
+            const std::scoped_lock lock(recovery_mutex_);
+            recovery_queue_.push_back(std::move(*submission));
         }
+        recovery_cv_.notify_one();
     }
 }
 

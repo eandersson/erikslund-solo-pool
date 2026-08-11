@@ -20,6 +20,7 @@
 #include <optional>
 #include <semaphore>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -258,6 +259,7 @@ private:
 };
 
 constexpr int64_t kRecoveredBlockHeight = 500;
+constexpr std::chrono::seconds kSynchronizationTimeout{5};
 constexpr std::string_view kRecoveredBlockHeaderHex =
     "01000000"
     "0000000000000000000000000000000000000000000000000000000000000000"
@@ -344,6 +346,76 @@ public:
 
 private:
     const RecoveredChainState state_;
+};
+
+enum class RecoveryPause { Submission, TipLookup };
+
+class BlockingRecoveryWorkSource final : public bitcoin::WorkSource {
+public:
+    BlockingRecoveryWorkSource(std::string candidate_hash, RecoveryPause pause)
+        : candidate_hash_(std::move(candidate_hash)), pause_(pause) {}
+
+    bitcoin::ChainInfo detect_chain() override { return {.chain = "regtest", .blocks = 0}; }
+
+    std::string get_tip() override {
+        tip_lookups.fetch_add(1, std::memory_order_relaxed);
+        if (pause_ == RecoveryPause::TipLookup) {
+            recovery_paused.release();
+            continue_recovery.acquire();
+        }
+        return candidate_hash_;
+    }
+
+    bitcoin::BlockTemplate fetch_template() override { return refresh_template(); }
+
+    bitcoin::HeaderFacts fetch_header(const std::string&) override { return {}; }
+
+    std::optional<std::string> submit_block_hex(const std::string& block_hex) override {
+        if (block_hex == kRecoveredBlockHeaderHex) {
+            const size_t attempt = recovered_submissions.fetch_add(1, std::memory_order_relaxed);
+            if (pause_ == RecoveryPause::Submission && attempt == 0) {
+                recovery_paused.release();
+                continue_recovery.acquire();
+            }
+            return "inconclusive";
+        }
+
+        live_submissions.fetch_add(1, std::memory_order_relaxed);
+        live_submission_started.release();
+        return std::nullopt;
+    }
+
+    std::atomic<size_t> recovered_submissions{0};
+    std::atomic<size_t> live_submissions{0};
+    std::atomic<size_t> tip_lookups{0};
+    std::binary_semaphore recovery_paused{0};
+    std::binary_semaphore continue_recovery{0};
+    std::binary_semaphore live_submission_started{0};
+
+private:
+    const std::string candidate_hash_;
+    const RecoveryPause pause_;
+};
+
+class BlockingLiveWorkSource final : public bitcoin::WorkSource {
+public:
+    bitcoin::ChainInfo detect_chain() override { return {.chain = "regtest", .blocks = 0}; }
+    std::string get_tip() override { return {}; }
+    bitcoin::BlockTemplate fetch_template() override { return refresh_template(); }
+    bitcoin::HeaderFacts fetch_header(const std::string&) override { return {}; }
+
+    std::optional<std::string> submit_block_hex(const std::string&) override {
+        const size_t attempt = submissions.fetch_add(1, std::memory_order_relaxed);
+        if (attempt == 0) {
+            submission_started.release();
+            continue_submission.acquire();
+        }
+        return "inconclusive";
+    }
+
+    std::atomic<size_t> submissions{0};
+    std::binary_semaphore submission_started{0};
+    std::binary_semaphore continue_submission{0};
 };
 
 template <typename Predicate>
@@ -655,11 +727,11 @@ struct PoolTestPeek {
     static bool publication_worker_started(const Pool& pool) {
         return pool.publication_thread_.joinable();
     }
-    static size_t pending_submissions(Pool& pool) {
+    static size_t pending_live_submissions(Pool& pool) {
         const std::scoped_lock lock(pool.submit_mutex_);
         return pool.submit_queue_.size();
     }
-    static void retry_submissions_now(Pool& pool) {
+    static void retry_live_submissions_now(Pool& pool) {
         {
             const std::scoped_lock lock(pool.submit_mutex_);
             for (auto& submission : pool.submit_queue_)
@@ -667,25 +739,20 @@ struct PoolTestPeek {
         }
         pool.submit_cv_.notify_all();
     }
-    static std::vector<std::string> submission_priority(Pool& pool) {
-        const std::scoped_lock lock(pool.submit_mutex_);
-        const auto enqueue = [&](std::string hash, bool recovered) {
-            auto block = std::make_shared<Pool::PendingBlock>(
-                Pool::PendingBlock{1, std::move(hash), "00", "", ""});
-            pool.enqueue_submission_locked(Pool::PendingSubmission{
-                std::move(block),
-                recovered ? std::optional<std::filesystem::path>("recovered.hex") : std::nullopt});
-        };
-        enqueue("recovered-1", true);
-        enqueue("live-1", false);
-        enqueue("recovered-2", true);
-        enqueue("live-2", false);
-
-        std::vector<std::string> hashes;
-        for (const auto& submission : pool.submit_queue_)
-            hashes.push_back(submission.block->hash);
-        pool.submit_queue_.clear();
-        return hashes;
+    static std::stop_token live_submission_stop_token(Pool& pool) {
+        return pool.submit_thread_.get_stop_token();
+    }
+    static size_t pending_recovered_submissions(Pool& pool) {
+        const std::scoped_lock lock(pool.recovery_mutex_);
+        return pool.recovery_queue_.size();
+    }
+    static void retry_recovered_submissions_now(Pool& pool) {
+        {
+            const std::scoped_lock lock(pool.recovery_mutex_);
+            for (auto& submission : pool.recovery_queue_)
+                submission.retry_after = {};
+        }
+        pool.recovery_cv_.notify_all();
     }
     static bool submit_recovered(Pool& pool, const std::filesystem::path& path) {
         const Pool::PendingBlock block{0, path.filename().string(), "00112233", "", ""};
@@ -699,9 +766,155 @@ bool wait_for_first_recovered_submission(Pool& pool, RecoveredBlockWorkSource& s
     pool.resubmit_spooled_blocks();
     return wait_until(
                [&] { return source.submissions.load(std::memory_order_relaxed) == 1; }) &&
-           wait_until([&] { return PoolTestPeek::pending_submissions(pool) == 1; });
+           wait_until([&] { return PoolTestPeek::pending_recovered_submissions(pool) == 1; });
+}
+
+void enqueue_live_block(Pool& pool, char hash_digit) {
+    const Bytes tag{'/', 't', '/'};
+    stratum::Job job("live", refresh_template(), tag, 4, 4, 1);
+    stratum::ShareResult result;
+    result.difficulty = 1.0;
+    result.is_block = true;
+    result.legacy_coinbase = {0};
+    result.block_hash_chars.fill(hash_digit);
+    pool.on_block_found(kAddr, "worker", job, result);
+}
+
+std::filesystem::path live_spool_path(const std::filesystem::path& stats, char hash_digit) {
+    return stats / "blocks" / (std::to_string(refresh_template().height) + "_" +
+                                std::string(64, hash_digit) + ".hex");
 }
 } // namespace
+
+TEST_CASE("a blocked recovered submission does not delay a live block") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovery_submit_isolation_test");
+    BlockingRecoveryWorkSource source(fixture.block_hash, RecoveryPause::Submission);
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        pool.resubmit_spooled_blocks();
+        const bool recovery_paused =
+            source.recovery_paused.try_acquire_for(kSynchronizationTimeout);
+        bool live_started = false;
+        if (recovery_paused) {
+            enqueue_live_block(pool, 'd');
+            live_started =
+                source.live_submission_started.try_acquire_for(kSynchronizationTimeout);
+        }
+        source.continue_recovery.release();
+
+        REQUIRE(recovery_paused);
+        CHECK(live_started);
+        CHECK(source.live_submissions.load(std::memory_order_relaxed) == 1);
+        CHECK(wait_until([&] { return pool.blocks_found() == 1; }));
+    }
+
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("a blocked recovered tip lookup does not delay a live block") {
+    namespace fs = std::filesystem;
+    const auto fixture = write_recovered_block("ep_recovery_tip_isolation_test");
+    BlockingRecoveryWorkSource source(fixture.block_hash, RecoveryPause::TipLookup);
+    Config config;
+    config.stats_directory = fixture.stats_directory.string();
+
+    {
+        Pool pool(config, source);
+        pool.resubmit_spooled_blocks();
+        REQUIRE(wait_until([&] {
+            return source.recovered_submissions.load(std::memory_order_relaxed) == 1;
+        }));
+        REQUIRE(wait_until(
+            [&] { return PoolTestPeek::pending_recovered_submissions(pool) == 1; }));
+        PoolTestPeek::retry_recovered_submissions_now(pool);
+
+        const bool recovery_paused =
+            source.recovery_paused.try_acquire_for(kSynchronizationTimeout);
+        bool live_started = false;
+        if (recovery_paused) {
+            enqueue_live_block(pool, 'e');
+            live_started =
+                source.live_submission_started.try_acquire_for(kSynchronizationTimeout);
+        }
+        source.continue_recovery.release();
+
+        REQUIRE(recovery_paused);
+        CHECK(live_started);
+        CHECK(source.live_submissions.load(std::memory_order_relaxed) == 1);
+        CHECK(wait_until([&] { return pool.blocks_found() == 1; }));
+        CHECK(source.recovered_submissions.load(std::memory_order_relaxed) == 1);
+    }
+
+    fs::remove_all(fixture.stats_directory);
+}
+
+TEST_CASE("an inconclusive live block submission is retried") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_live_submission_retry_test";
+    fs::remove_all(stats);
+    Config config;
+    config.stats_directory = stats.string();
+    RecoveringRpc rpc;
+    bitcoin::RpcWorkSource source(rpc);
+
+    {
+        Pool pool(config, source);
+        enqueue_live_block(pool, 'c');
+        REQUIRE(wait_until([&] { return rpc.calls.load(std::memory_order_relaxed) == 1; }));
+        REQUIRE(wait_until([&] { return PoolTestPeek::pending_live_submissions(pool) == 1; }));
+        CHECK(PoolTestPeek::pending_recovered_submissions(pool) == 0);
+
+        PoolTestPeek::retry_live_submissions_now(pool);
+        REQUIRE(wait_until([&] { return rpc.calls.load(std::memory_order_relaxed) == 2; }));
+        REQUIRE(wait_until([&] { return pool.blocks_found() == 1; }));
+        CHECK(PoolTestPeek::pending_live_submissions(pool) == 0);
+
+        CHECK(fs::exists(live_spool_path(stats, 'c')));
+    }
+
+    fs::remove_all(stats);
+}
+
+TEST_CASE("Pool destruction joins an in-flight live submission without retrying") {
+    namespace fs = std::filesystem;
+    const fs::path stats = fs::temp_directory_path() / "ep_live_submission_shutdown_test";
+    fs::remove_all(stats);
+    Config config;
+    config.stats_directory = stats.string();
+    BlockingLiveWorkSource source;
+    auto pool = std::make_unique<Pool>(config, source);
+    const std::stop_token submit_stop = PoolTestPeek::live_submission_stop_token(*pool);
+
+    enqueue_live_block(*pool, 'f');
+    const bool submission_started =
+        source.submission_started.try_acquire_for(kSynchronizationTimeout);
+    if (!submission_started)
+        source.continue_submission.release();
+    REQUIRE(submission_started);
+
+    std::binary_semaphore stop_requested{0};
+    std::stop_callback stop_callback(submit_stop, [&stop_requested] { stop_requested.release(); });
+    auto destruction = std::async(std::launch::async, [owned_pool = std::move(pool)]() mutable {
+        owned_pool.reset();
+    });
+
+    const bool stop_observed = stop_requested.try_acquire_for(kSynchronizationTimeout);
+    const std::future_status blocked_state = destruction.wait_for(std::chrono::seconds::zero());
+    source.continue_submission.release();
+
+    REQUIRE(stop_observed);
+    CHECK(blocked_state == std::future_status::timeout);
+    REQUIRE(destruction.wait_for(kSynchronizationTimeout) == std::future_status::ready);
+    CHECK_NOTHROW(destruction.get());
+    CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
+
+    CHECK(fs::exists(live_spool_path(stats, 'f')));
+    fs::remove_all(stats);
+}
 
 TEST_CASE("recovered blocks are submitted once before consulting the chain tip") {
     namespace fs = std::filesystem;
@@ -736,7 +949,7 @@ TEST_CASE("a recovered block at the active tip is archived before a second submi
     {
         Pool pool(config, source);
         REQUIRE(wait_for_first_recovered_submission(pool, source));
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until(
             [&] { return fs::exists(fixture.spool_path.string() + ".submitted"); }));
         CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
@@ -761,7 +974,7 @@ TEST_CASE("a recovered block on the active chain is archived as submitted after 
     {
         Pool pool(config, source);
         REQUIRE(wait_for_first_recovered_submission(pool, source));
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until(
             [&] { return fs::exists(fixture.spool_path.string() + ".submitted"); }));
         CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
@@ -787,7 +1000,7 @@ TEST_CASE("a recovered side-chain block is archived as stale after the tip advan
     {
         Pool pool(config, source);
         REQUIRE(wait_for_first_recovered_submission(pool, source));
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until(
             [&] { return fs::exists(fixture.spool_path.string() + ".stale"); }));
         CHECK(source.submissions.load(std::memory_order_relaxed) == 1);
@@ -811,7 +1024,7 @@ TEST_CASE("a recovered block retries when a different block is the tip at the sa
     {
         Pool pool(config, source);
         REQUIRE(wait_for_first_recovered_submission(pool, source));
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until(
             [&] { return source.submissions.load(std::memory_order_relaxed) == 2; }));
         CHECK(fs::exists(fixture.spool_path));
@@ -835,7 +1048,7 @@ TEST_CASE("a recovered block retries when the chain tip lookup fails") {
     {
         Pool pool(config, source);
         REQUIRE(wait_for_first_recovered_submission(pool, source));
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until(
             [&] { return source.submissions.load(std::memory_order_relaxed) == 2; }));
         CHECK(fs::exists(fixture.spool_path));
@@ -860,7 +1073,7 @@ TEST_CASE("a recovered block retries when its filename hash does not match its h
     {
         Pool pool(config, source);
         REQUIRE(wait_for_first_recovered_submission(pool, source));
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until(
             [&] { return source.submissions.load(std::memory_order_relaxed) == 2; }));
         CHECK(fs::exists(fixture.spool_path));
@@ -869,16 +1082,6 @@ TEST_CASE("a recovered block retries when its filename hash does not match its h
     }
 
     fs::remove_all(fixture.stats_directory);
-}
-
-TEST_CASE("live block submissions stay FIFO ahead of recovered blocks") {
-    Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
-
-    const std::vector<std::string> expected{"live-1", "live-2", "recovered-1", "recovered-2"};
-    CHECK(PoolTestPeek::submission_priority(pool) == expected);
 }
 
 TEST_CASE("an archive failure leaves a terminal recovered block for the next restart") {
@@ -921,12 +1124,13 @@ TEST_CASE("a recovered block retries in-process without duplicate enqueue or acc
         Pool pool(config, rpc_source);
         pool.resubmit_spooled_blocks();
         REQUIRE(wait_until([&] { return rpc.calls.load(std::memory_order_relaxed) == 1; }));
-        REQUIRE(wait_until([&] { return PoolTestPeek::pending_submissions(pool) == 1; }));
+        REQUIRE(
+            wait_until([&] { return PoolTestPeek::pending_recovered_submissions(pool) == 1; }));
 
         pool.resubmit_spooled_blocks();
-        CHECK(PoolTestPeek::pending_submissions(pool) == 1);
+        CHECK(PoolTestPeek::pending_recovered_submissions(pool) == 1);
 
-        PoolTestPeek::retry_submissions_now(pool);
+        PoolTestPeek::retry_recovered_submissions_now(pool);
         REQUIRE(wait_until([&] { return fs::exists(block.string() + ".submitted"); }));
         CHECK(rpc.calls.load(std::memory_order_relaxed) == 2);
         CHECK(pool.blocks_found() == 0);

@@ -48,6 +48,7 @@ class Session;
 class Pool : public stratum::PoolContext {
 public:
     Pool(Config config, bitcoin::WorkSource& source);
+    ~Pool() override;
 
     // Set whether bitcoind can currently serve mining work.
     void set_generator_ready(bool ready) { generator_ready_.store(ready); }
@@ -149,9 +150,14 @@ private:
         std::string worker;
     };
 
-    struct PendingSubmission {
+    struct LiveSubmission {
         std::shared_ptr<const PendingBlock> block;
-        std::optional<std::filesystem::path> recovered_spool_path;
+        std::chrono::steady_clock::time_point retry_after{};
+    };
+
+    struct RecoveredSubmission {
+        std::shared_ptr<const PendingBlock> block;
+        std::filesystem::path spool_path;
         bool submitted_once = false;
         std::chrono::steady_clock::time_point retry_after{};
     };
@@ -251,17 +257,23 @@ private:
                                  std::string_view suffix);
     [[nodiscard]] bool resolve_recovered_block_from_tip(
         const PendingBlock& block, const std::filesystem::path& spool_path);
-    void enqueue_submission_locked(PendingSubmission submission);
     void submit_loop(const std::stop_token& stop);
     std::mutex submit_mutex_;
     std::condition_variable_any submit_cv_;
-    std::deque<PendingSubmission> submit_queue_;
+    std::deque<LiveSubmission> submit_queue_;
+
+    void recovery_loop(const std::stop_token& stop);
+    std::mutex recovery_mutex_;
+    std::condition_variable_any recovery_cv_;
+    std::deque<RecoveredSubmission> recovery_queue_;
     std::set<std::filesystem::path> tracked_recovered_blocks_;
-    std::jthread submit_thread_;
 
     std::mutex publication_mutex_;
     std::condition_variable_any publication_cv_;
     std::deque<PendingPublication> publication_queue_;
+
+    std::jthread submit_thread_;
+    std::jthread recovery_thread_;
     std::jthread publication_thread_;
 };
 

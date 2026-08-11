@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
     server.run(stop.get_token());
     stop.request_stop();
 
-    log::info("Shutdown complete -- {} shares accepted, {} blocks found", pool.accepted_shares(),
-                pool.blocks_found());
+    log::info("Shutdown requested -- {} shares accepted, {} blocks found", pool.accepted_shares(),
+              pool.blocks_found());
     return 0;
 }
