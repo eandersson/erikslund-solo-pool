@@ -1,4 +1,4 @@
-# Production image for erikslund pool. Multi-stage: GCC 16.1 on Debian
+# Production image for erikslund pool. Multi-stage: GCC 16.2 on Debian
 # trixie compiles the binary (libstdc++/libgcc statically linked), then a slim
 # Debian runtime carries only the shared libs it needs (libcurl, libzmq).
 #
@@ -14,7 +14,7 @@
 # config and publish -p 7777:7777.
 
 # ---- builder ---------------------------------------------------------------
-FROM gcc:16.1.0-trixie AS builder
+FROM gcc:16.2.0-trixie AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \

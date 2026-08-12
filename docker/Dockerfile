@@ -8,7 +8,7 @@
 #   docker run --rm -v "$PWD:/src:ro" \
 #       -v erikslund-build:/build erikslund-pool-build
 #
-FROM gcc:16.1.0-trixie
+FROM gcc:16.2.0-trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 # The gcc image already ships g++ 16 (C++26) + make; add CMake, clang-tidy (the
