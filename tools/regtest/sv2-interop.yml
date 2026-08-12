@@ -7,7 +7,7 @@ bitcoin_nodes:
 stratum_listen:
   - 0.0.0.0:3333
 sv2_listen:
-  - 0.0.0.0:3334
+  - 0.0.0.0:4333
 sv2_static_secret_key_file: /sv2/server.secret
 sv2_authority_public_key_file: /sv2/runtime-authority.public
 sv2_certificate_file: /sv2/server.cert

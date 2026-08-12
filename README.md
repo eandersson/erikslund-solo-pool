@@ -47,9 +47,42 @@ zmq_block_endpoint: tcp://bitcoind:28332
 
 | Port | Purpose |
 | --- | --- |
-| `3333` | Stratum V1 |
-| `3334` | Optional authenticated Stratum V2 |
+| `3333` | Plaintext Stratum V1 |
+| `3334` | Optional TLS-wrapped Stratum V1 |
+| `4333` | Optional authenticated Stratum V2 |
 | `7777` | Status API, health checks, and Prometheus metrics |
+
+### Stratum V1 TLS
+
+The optional HAProxy sidecar terminates TLS on port `3334` and forwards plaintext
+SV1 to the pool over loopback. Install the certificate chain and matching private
+key:
+
+```sh
+sudo sh deploy/setup.sh --create-directories
+sudo install -o 99 -g 99 -m 600 fullchain.pem /opt/erikslund-pool/etc/tls/server.pem
+sudo install -o 99 -g 99 -m 600 privkey.pem /opt/erikslund-pool/etc/tls/server.pem.key
+```
+
+Trust the loopback sidecar in `/opt/erikslund-pool/etc/pool.yml` so PROXY v2 can
+preserve miner IP addresses:
+
+```yaml
+proxy_protocol_from: [127.0.0.1]
+```
+
+Start the pool with the TLS overlay:
+
+```sh
+docker compose \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.tls.yml \
+  up -d --build
+```
+
+Point TLS-capable SV1 miners at the host on port `3334`. After renewing the
+certificate, restart only the sidecar with `docker compose` and the same two
+files: `restart tls`.
 
 ## Development
 

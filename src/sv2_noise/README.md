@@ -72,7 +72,7 @@ Publish the Base58Check authority key through a trusted channel:
 
 ```sh
 authority_key="$(sv2-noise-credentials print-authority-key server-authority.public)"
-printf 'stratum2+tcp://pool.example:3334/%s\n' "$authority_key"
+printf 'stratum2+tcp://pool.example:4333/%s\n' "$authority_key"
 ```
 
 An existing secret must be a 32-byte secp256k1 scalar with mode 0600. Validity values are inclusive

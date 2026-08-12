@@ -142,7 +142,7 @@ RUN mkdir -p /var/log/erikslund-pool && chown pool:pool /var/log/erikslund-pool
 WORKDIR /var/lib/erikslund-pool
 USER pool
 
-EXPOSE 3333 3334 7777
+EXPOSE 3333 4333 7777
 
 HEALTHCHECK --interval=30s --timeout=4s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:7777/health || exit 1

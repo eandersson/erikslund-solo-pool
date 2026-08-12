@@ -12,10 +12,15 @@ if [ "${1:-}" = "--create-directories" ]; then
     root=${POOL_ROOT:-/opt/erikslund-pool}
     uid=${POOL_UID:-1000}
     gid=${POOL_GID:-1000}
+    tls_uid=${POOL_TLS_UID:-99}
+    tls_gid=${POOL_TLS_GID:-99}
 
-    mkdir -p "$root/etc" "$root/data" "$root/logs"
+    mkdir -p "$root/etc" "$root/etc/tls" "$root/data" "$root/logs"
     chown "$uid:$gid" "$root" "$root/etc" "$root/data" "$root/logs"
+    chown "$tls_uid:$tls_gid" "$root/etc/tls"
+    chmod 750 "$root/etc/tls"
     echo "setup: created $root/{etc,data,logs} for $uid:$gid"
+    echo "setup: created $root/etc/tls for $tls_uid:$tls_gid"
     exit 0
 fi
 

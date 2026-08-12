@@ -1,0 +1,33 @@
+services:
+  tls:
+    image: haproxy:lts
+    restart: unless-stopped
+    network_mode: host
+    user: "99:99"
+    depends_on:
+      - pool
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 2.0
+    stop_grace_period: 30s
+    volumes:
+      - ./haproxy-tls.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - /opt/erikslund-pool/etc/tls/:/etc/haproxy/tls/:ro
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
