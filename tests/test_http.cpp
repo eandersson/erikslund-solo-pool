@@ -1,135 +1,228 @@
 #include <doctest/doctest.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <array>
+#include <charconv>
+#include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "api/http_server.hpp"
 #include "bitcoin/rpc_client.hpp"
 #include "bitcoin/work_source_rpc.hpp"
 #include "core/config.hpp"
 #include "pool/pool.hpp"
+#include "util/unique_fd.hpp"
 
 using namespace erikslund;
-using namespace erikslund::api;
 
 namespace {
-bool contains(const std::string& haystack, const std::string& needle) {
-    return haystack.find(needle) != std::string::npos;
+
+constexpr std::string_view kLoopbackAddress = "127.0.0.1";
+constexpr size_t kReceiveChunkBytes = 4'096;
+constexpr int kSocketTimeoutSeconds = 2;
+
+struct WireResponse {
+    int status = 0;
+    std::string headers;
+    std::string body;
+};
+
+struct PoolFixture {
+    Config config;
+    bitcoin::RpcClient rpc{"http://127.0.0.1:1", "user", "pass"};
+    bitcoin::RpcWorkSource source{rpc};
+    Pool pool{config, source};
+    api::HttpServer server{pool, std::string(kLoopbackAddress), 0};
+
+    PoolFixture() { server.start(); }
+};
+
+[[nodiscard]] bool send_all(int socket, std::string_view bytes) {
+    size_t sent = 0;
+    while (sent < bytes.size()) {
+        const ssize_t written =
+            ::send(socket, bytes.data() + sent, bytes.size() - sent, MSG_NOSIGNAL);
+        if (written <= 0)
+            return false;
+        sent += static_cast<size_t>(written);
+    }
+    return true;
 }
+
+[[nodiscard]] std::optional<WireResponse> send_raw(uint16_t port, std::string_view request) {
+    util::UniqueFd socket{::socket(AF_INET, SOCK_STREAM, 0)};
+    if (!socket)
+        return std::nullopt;
+
+    timeval timeout{};
+    timeout.tv_sec = kSocketTimeoutSeconds;
+    if (::setsockopt(socket.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0)
+        return std::nullopt;
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, kLoopbackAddress.data(), &address.sin_addr) != 1)
+        return std::nullopt;
+    if (::connect(socket.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0)
+        return std::nullopt;
+    if (!send_all(socket.get(), request))
+        return std::nullopt;
+
+    std::string bytes;
+    std::array<char, kReceiveChunkBytes> chunk{};
+    while (true) {
+        const ssize_t received = ::recv(socket.get(), chunk.data(), chunk.size(), 0);
+        if (received > 0) {
+            bytes.append(chunk.data(), static_cast<size_t>(received));
+            continue;
+        }
+        if (received == 0)
+            break;
+        return std::nullopt;
+    }
+
+    const size_t first_space = bytes.find(' ');
+    const size_t header_end = bytes.find("\r\n\r\n");
+    if (first_space == std::string::npos || header_end == std::string::npos)
+        return std::nullopt;
+
+    WireResponse response;
+    const char* status_begin = bytes.data() + first_space + 1;
+    const char* status_end = status_begin + 3;
+    const auto parsed = std::from_chars(status_begin, status_end, response.status);
+    if (parsed.ec != std::errc{} || parsed.ptr != status_end)
+        return std::nullopt;
+    response.headers = bytes.substr(0, header_end + 4);
+    response.body = bytes.substr(header_end + 4);
+    return response;
+}
+
+[[nodiscard]] std::optional<WireResponse> request(PoolFixture& fixture, std::string_view method,
+                                                   std::string_view target) {
+    std::string bytes;
+    bytes += method;
+    bytes += ' ';
+    bytes += target;
+    bytes += " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    return send_raw(fixture.server.port(), bytes);
+}
+
+[[nodiscard]] bool contains(std::string_view text, std::string_view expected) {
+    return text.find(expected) != std::string_view::npos;
+}
+
 } // namespace
 
-TEST_CASE("parse_request_line") {
-    const auto get = parse_request_line("GET /metrics HTTP/1.1");
-    REQUIRE(get.has_value());
-    CHECK(get->first == "GET");
-    CHECK(get->second == "/metrics");
+TEST_CASE("HTTP routes preserve the pool observability API") {
+    PoolFixture fixture;
 
-    const auto query = parse_request_line("GET /stats/client/bc1q?refresh=1 HTTP/1.1");
-    REQUIRE(query.has_value());
-    CHECK(query->second == "/stats/client/bc1q"); // query stripped
+    const auto root = request(fixture, "GET", "/");
+    REQUIRE(root.has_value());
+    CHECK(root->status == 200);
+    CHECK(contains(root->headers, "Content-Type: text/html"));
+    CHECK(contains(root->body, "<html"));
 
-    CHECK_FALSE(parse_request_line("garbage").has_value());
-    CHECK_FALSE(parse_request_line("GET /only-two-tokens").has_value());
-}
+    const auto metrics = request(fixture, "GET", "/metrics");
+    REQUIRE(metrics.has_value());
+    CHECK(metrics->status == 200);
+    CHECK(contains(metrics->headers, "version=0.0.4"));
+    CHECK(contains(metrics->body, "erikslundpool_up"));
 
-TEST_CASE("routing covers the endpoints + methods") {
-    // A Pool with an unconnected RPC client; route() only reads snapshot(), no I/O.
-    Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
-
-    CHECK(route("POST", "/metrics", pool).status == 405);
-    CHECK(route("GET", "/does-not-exist", pool).status == 404);
-
-    const auto metrics = route("GET", "/metrics", pool);
-    CHECK(metrics.status == 200);
-    CHECK(contains(metrics.content_type, "version=0.0.4"));
-    CHECK(contains(metrics.body, "erikslundpool_up"));
-
-    const auto status = route("GET", "/status", pool);
-    CHECK(status.status == 200);
-    CHECK(contains(status.content_type, "application/json"));
-
-    // Not ready (no job, connector not marked up).
-    CHECK(route("GET", "/health", pool).status == 503);
-
-    CHECK(route("GET", "/stats/client/bad!char", pool).status == 400);
-    CHECK(route("GET", "/stats/client/bc1qunknown", pool).status == 404);
-
-    CHECK(route("GET", "/", pool).status == 200);
-    CHECK(route("HEAD", "/metrics", pool).status == 200);
-}
-
-TEST_CASE("parse_request_line edge cases") {
-    // Leading slash path with HTTP version is fine.
-    const auto ok = parse_request_line("HEAD / HTTP/1.0");
-    REQUIRE(ok.has_value());
-    CHECK(ok->first == "HEAD");
-    CHECK(ok->second == "/");
-
-    // Query-only path strips to its prefix; an empty prefix ("?...") is rejected.
-    CHECK_FALSE(parse_request_line("GET ?onlyquery HTTP/1.1").has_value());
-
-    // A bare path with a fragment-like '?' keeps everything before '?'.
-    const auto frag = parse_request_line("GET /stats/pool?x=1&y=2 HTTP/1.1");
-    REQUIRE(frag.has_value());
-    CHECK(frag->second == "/stats/pool");
-
-    // Missing the second space (no HTTP version) is rejected.
-    CHECK_FALSE(parse_request_line("GET /metrics").has_value());
-    // Empty string is rejected.
-    CHECK_FALSE(parse_request_line("").has_value());
-    // Empty method (leading space) is rejected.
-    CHECK_FALSE(parse_request_line(" /metrics HTTP/1.1").has_value());
-}
-
-TEST_CASE("every read-only JSON endpoint returns 200 application/json") {
-    Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
-
-    for (const char* path : {"/metrics.json", "/status", "/stats/pool", "/stats/stratifier",
-                             "/stats/connector", "/stats/generator"}) {
-        const auto response = route("GET", path, pool);
-        CHECK(response.status == 200);
-        CHECK(contains(response.content_type, "application/json"));
+    for (const std::string_view path : {"/metrics.json", "/status", "/stats/pool",
+                                        "/stats/stratifier", "/stats/connector",
+                                        "/stats/generator"}) {
+        CAPTURE(path);
+        const auto response = request(fixture, "GET", path);
+        REQUIRE(response.has_value());
+        CHECK(response->status == 200);
+        CHECK(contains(response->headers, "Content-Type: application/json"));
     }
 }
 
-TEST_CASE("the root path serves HTML, /metrics serves prometheus text") {
-    Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
+TEST_CASE("HTTP health aliases remain cheap readiness probes") {
+    PoolFixture fixture;
 
-    const auto root = route("GET", "/", pool);
-    CHECK(contains(root.content_type, "text/html"));
-    CHECK(contains(root.body, "<html"));
+    for (const std::string_view path : {"/health", "/healthz"}) {
+        CAPTURE(path);
+        const auto response = request(fixture, "GET", path);
+        REQUIRE(response.has_value());
+        CHECK(response->status == 503);
+        CHECK(response->body == "degraded\n");
+    }
 
-    const auto metrics = route("GET", "/metrics", pool);
-    CHECK(contains(metrics.content_type, "text/plain"));
+    const auto favicon = request(fixture, "GET", "/favicon.ico");
+    REQUIRE(favicon.has_value());
+    CHECK(favicon->status == 204);
+    CHECK(favicon->body.empty());
 }
 
-TEST_CASE("an over-long client address is rejected as a bad request") {
-    Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
-    // 128 valid characters exceeds the 127-byte cap.
-    const std::string long_address = "/stats/client/" + std::string(128, 'a');
-    CHECK(route("GET", long_address, pool).status == 400);
-    // An empty address ("/stats/client/") is also a 400.
-    CHECK(route("GET", "/stats/client/", pool).status == 400);
+TEST_CASE("HTTP routing delegates methods and parsing to erikslund-http-embedded") {
+    PoolFixture fixture;
+
+    const auto missing = request(fixture, "GET", "/does-not-exist");
+    REQUIRE(missing.has_value());
+    CHECK(missing->status == 404);
+
+    const auto write = request(fixture, "POST", "/metrics");
+    REQUIRE(write.has_value());
+    CHECK(write->status == 405);
+    CHECK(contains(write->headers, "Allow: GET, HEAD"));
+
+    const auto head = request(fixture, "HEAD", "/metrics?refresh=1");
+    REQUIRE(head.has_value());
+    CHECK(head->status == 200);
+    CHECK(head->body.empty());
+    CHECK(contains(head->headers, "Content-Length:"));
+
+    const auto malformed = send_raw(fixture.server.port(),
+                                    "GET /metrics HTTP/1.1\r\nConnection: close\r\n\r\n");
+    REQUIRE(malformed.has_value());
+    CHECK(malformed->status == 400);
 }
 
-TEST_CASE("HEAD is allowed on JSON endpoints and 405 on a write method") {
-    Config config;
-    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
-    bitcoin::RpcWorkSource rpc_source(rpc);
-    Pool pool(config, rpc_source);
-    CHECK(route("HEAD", "/status", pool).status == 200);
-    CHECK(route("HEAD", "/", pool).status == 200);
-    CHECK(route("PUT", "/status", pool).status == 405);
-    CHECK(route("DELETE", "/", pool).status == 405);
+TEST_CASE("HTTP client statistics validate decoded addresses") {
+    PoolFixture fixture;
+
+    for (const std::string& path : {
+             std::string("/stats/client/"),
+             std::string("/stats/client/bad!char"),
+             std::string("/stats/client/bad%21char"),
+             "/stats/client/" + std::string(128, 'a'),
+         }) {
+        CAPTURE(path);
+        const auto response = request(fixture, "GET", path);
+        REQUIRE(response.has_value());
+        CHECK(response->status == 400);
+    }
+
+    const auto unknown = request(fixture, "GET", "/stats/client/some.worker_name");
+    REQUIRE(unknown.has_value());
+    CHECK(unknown->status == 404);
+
+    const auto maximum = request(fixture, "GET", "/stats/client/" + std::string(127, 'a'));
+    REQUIRE(maximum.has_value());
+    CHECK(maximum->status == 404);
+}
+
+TEST_CASE("HTTP request limits reject oversized targets before routing") {
+    PoolFixture fixture;
+    const auto response = request(fixture, "GET", "/" + std::string(3'000, 'a'));
+    REQUIRE(response.has_value());
+    CHECK(response->status == 414);
+}
+
+TEST_CASE("HTTP request bodies are rejected before routing") {
+    PoolFixture fixture;
+    const auto response = send_raw(
+        fixture.server.port(),
+        "POST /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1\r\nConnection: "
+        "close\r\n\r\nx");
+    REQUIRE(response.has_value());
+    CHECK(response->status == 413);
 }

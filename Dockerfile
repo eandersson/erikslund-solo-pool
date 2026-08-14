@@ -35,6 +35,29 @@ RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenbe
     && cp -r /tmp/glaze/include/glaze /usr/local/include/glaze \
     && rm -rf /tmp/glaze
 
+# erikslund-http-embedded: the event-driven HTTP server behind the pool's status and metrics API.
+# It is installed from a pinned release like the other native dependencies. TLS, compression, and
+# reflection stay off because this build does not use them.
+ARG ERIKSLUND_HTTP_VERSION=0.1.2
+RUN git clone --depth 1 --branch "${ERIKSLUND_HTTP_VERSION}" \
+        https://github.com/eandersson/erikslund-http-embedded.git /tmp/erikslund-http-embedded \
+    && cmake -S /tmp/erikslund-http-embedded -B /tmp/erikslund-http-embedded/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DERIKSLUND_HTTP_TLS=OFF \
+        -DERIKSLUND_HTTP_ZLIB=OFF \
+        -DERIKSLUND_HTTP_REFLECTION=OFF \
+        -DERIKSLUND_HTTP_BUILD_TESTS=OFF \
+        -DERIKSLUND_HTTP_BUILD_EXAMPLES=OFF \
+        -DERIKSLUND_HTTP_BUILD_TOOLS=OFF \
+        -DERIKSLUND_HTTP_INSTALL=ON \
+        -DNATIVE_ARCH=OFF \
+    && cmake --build /tmp/erikslund-http-embedded/build -j"$(nproc)" \
+    && cmake --install /tmp/erikslund-http-embedded/build \
+    && install -D /tmp/erikslund-http-embedded/LICENSE \
+        /usr/share/doc/erikslund-http-embedded/LICENSE \
+    && rm -rf /tmp/erikslund-http-embedded
+
 # mimalloc (Microsoft): the allocator interposed for the share path's many small concurrent
 # allocations. Built from a pinned release (like Glaze) instead of the distro package -- installs
 # libmimalloc.so + mimalloc.h to /usr/local (MI_INSTALL_TOPLEVEL) for find_library/<mimalloc.h>.
@@ -131,6 +154,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /src/build/erikslund-pool /usr/local/bin/erikslund-pool
 COPY --from=builder /staging/lib/ /usr/local/lib/
 COPY src/sv2_noise/LICENSE-secp256k1 /usr/share/doc/erikslund-pool/LICENSE-secp256k1
+COPY --from=builder /usr/share/doc/erikslund-http-embedded/LICENSE \
+    /usr/share/doc/erikslund-pool/LICENSE-erikslund-http-embedded
 RUN ldconfig
 COPY --from=builder /src/conf/pool.yml /etc/erikslund-pool/pool.yml
 

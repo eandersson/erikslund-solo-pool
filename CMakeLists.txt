@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.25)
 project(erikslund_pool LANGUAGES C CXX)
 
 # ---- language / warnings -----------------------------------------------------
@@ -104,6 +104,7 @@ set_source_files_properties(${IPC_GENERATED} PROPERTIES COMPILE_OPTIONS "-w")
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
+find_package(erikslund-http 0.1.2 CONFIG REQUIRED)
 find_library(ZMQ_LIBRARY zmq REQUIRED)
 # libsecp256k1 (pinned to a release, installed to /usr/local by the Docker images like Glaze and
 # mimalloc). Found here as well as inside src/sv2_noise/ so the imported target is visible in this
@@ -165,7 +166,8 @@ add_library(erikslund_core STATIC ${CORE_SOURCES} ${BTC_CRYPTO_SOURCES})
 target_include_directories(erikslund_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${BTC_DIR})
 target_link_libraries(
     erikslund_core
-    PUBLIC Threads::Threads CURL::libcurl ${ZMQ_LIBRARY} sv2_noise::static)
+    PUBLIC Threads::Threads CURL::libcurl ${ZMQ_LIBRARY} sv2_noise::static
+    PRIVATE erikslund::http)
 # yaml-cpp: prefer the imported target from find_package; else the raw library.
 if(yaml-cpp_FOUND)
     target_link_libraries(erikslund_core PUBLIC yaml-cpp)

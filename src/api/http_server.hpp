@@ -1,43 +1,33 @@
 #pragma once
-// Read-only HTTP/1.1 status/metrics API (GET/HEAD only); slow-loris-resistant.
+// Pool-specific routes hosted by erikslund-http-embedded.
 #include <cstdint>
-#include <optional>
+#include <memory>
 #include <stop_token>
 #include <string>
-#include <string_view>
-#include <utility>
 
-#include "pool/pool.hpp"
-#include "util/unique_fd.hpp"
+namespace erikslund::http {
+class Server;
+}
+
+namespace erikslund {
+class Pool;
+}
 
 namespace erikslund::api {
-
-struct HttpResponse {
-    int status;
-    std::string content_type;
-    std::string body;
-};
-
-std::optional<std::pair<std::string, std::string>> parse_request_line(std::string_view line);
-
-HttpResponse route(const std::string& method, const std::string& path, Pool& pool);
 
 class HttpServer {
 public:
     HttpServer(Pool& pool, std::string host, uint16_t port);
+    ~HttpServer();
+    HttpServer(const HttpServer&) = delete;
+    HttpServer& operator=(const HttpServer&) = delete;
 
     void start();
     void run(const std::stop_token& stop);
-    uint16_t port() const { return port_; }
+    [[nodiscard]] uint16_t port() const noexcept;
 
 private:
-    void accept_loop(const std::stop_token& stop);
-    void serve_connection(util::UniqueFd conn, const std::stop_token& stop);
-
-    Pool& pool_;
-    std::string host_;
-    uint16_t port_;
-    int listen_fd_ = -1;
+    std::unique_ptr<http::Server> server_;
 };
 
 } // namespace erikslund::api

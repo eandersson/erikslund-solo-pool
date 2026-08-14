@@ -35,6 +35,29 @@ RUN git clone --depth 1 --branch "${GLAZE_VERSION}" https://github.com/stephenbe
     && cp -r /tmp/glaze/include/glaze /usr/local/include/glaze \
     && rm -rf /tmp/glaze
 
+# erikslund-http-embedded: the event-driven HTTP server behind the pool's status and metrics API.
+# Installed from a pinned release like the other native dependencies; TLS, compression, and
+# reflection are disabled because this build does not use them.
+ARG ERIKSLUND_HTTP_VERSION=0.1.2
+RUN git clone --depth 1 --branch "${ERIKSLUND_HTTP_VERSION}" \
+        https://github.com/eandersson/erikslund-http-embedded.git /tmp/erikslund-http-embedded \
+    && cmake -S /tmp/erikslund-http-embedded -B /tmp/erikslund-http-embedded/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DERIKSLUND_HTTP_TLS=OFF \
+        -DERIKSLUND_HTTP_ZLIB=OFF \
+        -DERIKSLUND_HTTP_REFLECTION=OFF \
+        -DERIKSLUND_HTTP_BUILD_TESTS=OFF \
+        -DERIKSLUND_HTTP_BUILD_EXAMPLES=OFF \
+        -DERIKSLUND_HTTP_BUILD_TOOLS=OFF \
+        -DERIKSLUND_HTTP_INSTALL=ON \
+        -DNATIVE_ARCH=OFF \
+    && cmake --build /tmp/erikslund-http-embedded/build -j"$(nproc)" \
+    && cmake --install /tmp/erikslund-http-embedded/build \
+    && install -D /tmp/erikslund-http-embedded/LICENSE \
+        /usr/share/doc/erikslund-http-embedded/LICENSE \
+    && rm -rf /tmp/erikslund-http-embedded
+
 # mimalloc (Microsoft): the interposed allocator. Built from a pinned release (like Glaze) instead
 # of the distro package -- installs libmimalloc.so + mimalloc.h to /usr/local (MI_INSTALL_TOPLEVEL).
 ARG MIMALLOC_VERSION=v3.4.5
