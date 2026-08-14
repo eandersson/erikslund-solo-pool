@@ -455,6 +455,40 @@ TEST_CASE("validate_address resolves locally, without any bitcoind RPC") {
     CHECK_FALSE(pool.validate_address("").has_value());
 }
 
+TEST_CASE("Pool applies reloadable mining settings without replacing startup state") {
+    Config config;
+    bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");
+    bitcoin::RpcWorkSource rpc_source(rpc);
+    Pool pool(config, rpc_source);
+    CHECK(pool.snapshot().config_generation == 0);
+    CHECK_FALSE(pool.snapshot().last_reload_rejected);
+
+    pool.note_config_reload_rejected();
+    CHECK(pool.snapshot().config_generation == 0);
+    CHECK(pool.snapshot().last_reload_rejected);
+
+    Config replacement = config;
+    replacement.initial_difficulty = 128.0;
+    replacement.minimum_difficulty = 4.0;
+    replacement.maximum_difficulty = 8192.0;
+    replacement.variable_difficulty = false;
+    replacement.vardiff_target_shares_per_minute = 24.0;
+    replacement.vardiff_retarget_seconds = 20;
+    replacement.version_rolling_mask = 0x00002000u;
+    pool.reload_config(replacement.runtime_config());
+
+    const auto runtime = pool.runtime_config();
+    CHECK(runtime->initial_difficulty == doctest::Approx(128.0));
+    CHECK(runtime->minimum_difficulty == doctest::Approx(4.0));
+    CHECK(runtime->maximum_difficulty == doctest::Approx(8192.0));
+    CHECK_FALSE(runtime->variable_difficulty);
+    CHECK(runtime->vardiff_target_shares_per_minute == doctest::Approx(24.0));
+    CHECK(runtime->vardiff_retarget_seconds == 20);
+    CHECK(pool.version_mask() == config.version_rolling_mask);
+    CHECK(pool.snapshot().config_generation == 1);
+    CHECK_FALSE(pool.snapshot().last_reload_rejected);
+}
+
 TEST_CASE("SV2 readiness expires without waiting for another handshake") {
     Config config;
     bitcoin::RpcClient rpc("http://127.0.0.1:1", "user", "pass");

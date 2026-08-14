@@ -73,18 +73,24 @@ class StressPool : public PoolContext {
 public:
     std::shared_ptr<Job> job_a;
     std::shared_ptr<Job> job_b;
+    std::shared_ptr<const RuntimeConfig> runtime;
     std::atomic<int> accepted{0}, rejected{0}, blocks{0};
-    std::atomic<bool> vardiff{true};
     // Every credited difficulty note_accepted_share saw, for post-join verification that the
     // phase-A snapshot handoff only ever produces difficulties the session legitimately held.
     std::mutex credited_mutex;
     std::vector<double> credited_seen;
 
     explicit StressPool(uint32_t curtime)
-        : job_a(make_job("aaaa0001", curtime)), job_b(make_job("bbbb0002", curtime)) {}
+        : job_a(make_job("aaaa0001", curtime)), job_b(make_job("bbbb0002", curtime)) {
+        RuntimeConfig config = Config{}.runtime_config();
+        config.initial_difficulty = 1e-9;
+        config.minimum_difficulty = 1e-12;
+        config.vardiff_retarget_seconds = 0; // retarget on every call
+        runtime = std::make_shared<const RuntimeConfig>(config);
+    }
 
     size_t extranonce2_size() const override { return 4; }
-    double start_difficulty() const override { return 1e-9; }
+    std::shared_ptr<const RuntimeConfig> runtime_config() const override { return runtime; }
     std::optional<Bytes> validate_address(const std::string& address) override {
         return address == "validaddr" ? std::make_optional(kPayout) : std::nullopt;
     }
@@ -109,11 +115,6 @@ public:
                         const ShareResult&) override {
         blocks.fetch_add(1, std::memory_order_relaxed);
     }
-    bool vardiff_enabled() const override { return vardiff.load(std::memory_order_relaxed); }
-    double min_difficulty() const override { return 1e-12; }
-    double max_difficulty() const override { return 0.0; }
-    double vardiff_target_shares_per_minute() const override { return 12.0; }
-    int vardiff_retarget_seconds() const override { return 0; } // retarget on every call
     uint32_t version_mask() const override { return 0x1fffe000u; }
 };
 

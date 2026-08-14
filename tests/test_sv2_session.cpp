@@ -81,8 +81,14 @@ public:
     size_t extranonce2_size() const override {
         return extranonce_size;
     }
-    double start_difficulty() const override {
-        return initial_difficulty;
+    std::shared_ptr<const RuntimeConfig> runtime_config() const override {
+        RuntimeConfig config = Config{}.runtime_config();
+        config.initial_difficulty = initial_difficulty;
+        config.minimum_difficulty = 1e-12;
+        config.variable_difficulty = vardiff;
+        config.vardiff_target_shares_per_minute = 1.0;
+        config.vardiff_retarget_seconds = 0;
+        return std::make_shared<const RuntimeConfig>(config);
     }
     std::optional<Bytes> validate_address(const std::string& address) override {
         return address == "validaddr" || address == "otheraddr"
@@ -116,21 +122,6 @@ public:
         block_worker = worker;
         block_job = &source;
         block_result = result;
-    }
-    bool vardiff_enabled() const override {
-        return vardiff;
-    }
-    double min_difficulty() const override {
-        return 1e-12;
-    }
-    double max_difficulty() const override {
-        return 0.0;
-    }
-    double vardiff_target_shares_per_minute() const override {
-        return 1.0;
-    }
-    int vardiff_retarget_seconds() const override {
-        return 0;
     }
     uint32_t version_mask() const override {
         return 0x1fffe000;
@@ -684,7 +675,8 @@ TEST_CASE("SV2 calibrates the initial target from nominal hashrate") {
         sv2::decode_open_standard_mining_channel_success(frames[0].payload);
     const double expected_difficulty =
         static_cast<double>(kNominalHashRate) * 60.0 /
-        (stats::kHashesPerDiff1Share * pool.vardiff_target_shares_per_minute());
+        (stats::kHashesPerDiff1Share *
+         pool.runtime_config()->vardiff_target_shares_per_minute);
     CHECK(util::uint256::from_le_bytes(opened.target) ==
           util::target_from_difficulty(expected_difficulty));
 }

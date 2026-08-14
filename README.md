@@ -52,6 +52,20 @@ zmq_block_endpoint: tcp://bitcoind:28332
 | `4333` | Optional authenticated Stratum V2 |
 | `7777` | Status API, health checks, and Prometheus metrics |
 
+### Reloading configuration
+
+After editing `pool.yml`, validate and apply runtime settings without disconnecting miners:
+
+```sh
+docker compose -f deploy/docker-compose.yml kill -s HUP pool
+```
+
+The pool parses and validates the complete file before changing anything. Difficulty/vardiff,
+poll and rebroadcast intervals, fast block notification, stats intervals and retention, client and
+worker caps, and idle/authentication/protocol-error limits are reloadable. A changed starting
+difficulty applies to new connections; changed vardiff bounds apply to existing miners on their
+next retarget.
+
 ### Stratum V1 TLS
 
 The optional HAProxy sidecar terminates TLS on port `3334` and forwards plaintext

@@ -10,6 +10,8 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <sys/resource.h>
 
@@ -35,8 +37,41 @@
 
 namespace {
 std::atomic<bool> g_shutdown{false};
-extern "C" void handle_signal(int /*signum*/) {
-    g_shutdown.store(true);
+std::atomic<bool> g_reload_requested{false};
+
+extern "C" void handle_signal(int signum) {
+    if (signum == SIGHUP)
+        g_reload_requested.store(true, std::memory_order_relaxed);
+    else
+        g_shutdown.store(true, std::memory_order_relaxed);
+}
+
+void apply_api_overrides(erikslund::Config& config,
+                         const std::optional<std::string>& host,
+                         const std::optional<uint16_t>& port) {
+    if (host)
+        config.api_host = *host;
+    if (port)
+        config.api_port = *port;
+}
+
+void clamp_max_clients(erikslund::Config& config, long open_file_limit) {
+    if (open_file_limit < 0 || config.max_clients <= open_file_limit)
+        return;
+    erikslund::log::warning("max_clients ({}) exceeds the open file limit ({}); lowering to {} "
+                            "-- raise it (ulimit -n / LimitNOFILE) to allow more",
+                            config.max_clients, open_file_limit, open_file_limit);
+    config.max_clients = static_cast<int>(open_file_limit);
+}
+
+std::string join_names(const std::vector<std::string>& names) {
+    std::string joined;
+    for (const std::string& name : names) {
+        if (!joined.empty())
+            joined += ", ";
+        joined += name;
+    }
+    return joined;
 }
 } // namespace
 
@@ -85,23 +120,14 @@ int main(int argc, char** argv) {
         log::error("Config error: {}", e.what());
         return 1;
     }
-    // CLI overrides win over the file.
-    if (api_host_override)
-        config.api_host = *api_host_override;
-    if (api_port_override)
-        config.api_port = *api_port_override;
+    apply_api_overrides(config, api_host_override, api_port_override);
 
     log::info("erikslund-solo-pool v{} starting -- stratum {}:{}, bitcoind {}", kVersion,
                 config.bind_host, config.bind_port, util::redact_url(config.rpc_url));
     long open_file_limit = -1; // -1 means unlimited / unavailable
     if (rlimit nofile{}; ::getrlimit(RLIMIT_NOFILE, &nofile) == 0 && nofile.rlim_cur != RLIM_INFINITY)
         open_file_limit = static_cast<long>(nofile.rlim_cur);
-    if (open_file_limit >= 0 && config.max_clients > open_file_limit) {
-        log::warning("max_clients ({}) exceeds the open file limit ({}); lowering to {} "
-                     "-- raise it (ulimit -n / LimitNOFILE) to allow more",
-                     config.max_clients, open_file_limit, open_file_limit);
-        config.max_clients = static_cast<int>(open_file_limit);
-    }
+    clamp_max_clients(config, open_file_limit);
     const std::string open_file_limit_text =
         open_file_limit < 0 ? std::string("unlimited") : std::to_string(open_file_limit);
     log::info("Max clients: {} (open file limit of {})", config.max_clients, open_file_limit_text);
@@ -139,6 +165,7 @@ int main(int argc, char** argv) {
     // SIGPIPE ignored so a broken socket write never kills the process.
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+    std::signal(SIGHUP, handle_signal);
     std::signal(SIGPIPE, SIG_IGN);
 
     // Retry rather than exit on first failure: bitcoind may still be warming up or its socket not
@@ -187,10 +214,41 @@ int main(int argc, char** argv) {
 
     std::stop_source stop;
     const std::stop_callback interrupt_work(stop.get_token(), [source] { source->interrupt(); });
-    // request_stop isn't async-signal-safe, so a watcher polls the signal flag.
-    std::jthread watcher([&stop] {
-        while (!g_shutdown.load() && !stop.stop_requested())
+    // The signal handler only sets flags; parsing and applying configuration happens here.
+    std::jthread watcher([&stop, &pool, &server, config_path, api_host_override,
+                          api_port_override, open_file_limit, active_config = config]() mutable {
+        while (!g_shutdown.load(std::memory_order_relaxed) && !stop.stop_requested()) {
+            if (g_reload_requested.exchange(false, std::memory_order_relaxed)) {
+                if (config_path.empty()) {
+                    pool.note_config_reload_rejected();
+                    log::warning("Config reload ignored: the pool was started without --config");
+                } else {
+                    try {
+                        Config replacement = Config::from_file(config_path);
+                        apply_api_overrides(replacement, api_host_override, api_port_override);
+                        clamp_max_clients(replacement, open_file_limit);
+                        const auto restart_required =
+                            active_config.restart_required_changes(replacement);
+                        if (!restart_required.empty()) {
+                            pool.note_config_reload_rejected();
+                            log::warning("Config reload rejected; restart required for: {}",
+                                         join_names(restart_required));
+                        } else {
+                            const RuntimeConfig runtime_config = replacement.runtime_config();
+                            pool.reload_config(runtime_config);
+                            server.reload_config(runtime_config);
+                            active_config = std::move(replacement);
+                            log::info("Configuration reloaded from {}", config_path);
+                        }
+                    } catch (const std::exception& error) {
+                        pool.note_config_reload_rejected();
+                        log::warning("Config reload failed; keeping current settings: {}",
+                                     error.what());
+                    }
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
         stop.request_stop();
     });
     // Each thread guards its body: a throw escaping a jthread calls std::terminate().

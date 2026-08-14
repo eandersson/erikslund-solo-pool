@@ -21,6 +21,8 @@ PoolSnapshot sample() {
     s.connector_ready = true;
     s.stratifier_ready = true;
     s.ready = true;
+    s.config_generation = 3;
+    s.last_reload_rejected = true;
     s.sv2_authenticated_ready = true;
     s.sv2_certificate_expiry_timestamp = 2'000'000'000;
     s.height = 200;
@@ -167,6 +169,19 @@ TEST_CASE("optional gauges are omitted with no job, counters remain") {
     CHECK_FALSE(contains(m, "erikslundpool_block_height"));
     CHECK_FALSE(contains(m, "erikslundpool_network_difficulty"));
     CHECK(contains(m, "erikslundpool_shares_accepted_total 10"));
+}
+
+TEST_CASE("configuration reload state is exported") {
+    const PoolSnapshot snapshot = sample();
+    const std::string prometheus = build_prometheus(snapshot);
+    CHECK(contains(prometheus, "# TYPE erikslundpool_config_generation counter"));
+    CHECK(contains(prometheus, "erikslundpool_config_generation 3"));
+    CHECK(contains(prometheus, "# TYPE erikslundpool_last_reload_rejected gauge"));
+    CHECK(contains(prometheus, "erikslundpool_last_reload_rejected 1"));
+
+    const auto metrics = metrics_json(snapshot);
+    CHECK(metrics["config_generation"].get<double>() == 3.0);
+    CHECK(metrics["last_reload_rejected"].get<bool>());
 }
 
 TEST_CASE("SV2 observability is omitted when authenticated SV2 is disabled") {

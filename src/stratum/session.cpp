@@ -47,6 +47,7 @@ const std::string& or_empty(const std::optional<std::string>& value) {
 double vardiff_next(double current, double shares_per_minute, double target, double min_difficulty,
                     double max_difficulty) {
     const double difficulty_cap = max_difficulty > 0.0 ? max_difficulty : 1e12;
+    current = std::clamp(current, min_difficulty, difficulty_cap);
     if (shares_per_minute > target * 2.0 && current < difficulty_cap)
         return std::min(difficulty_cap, current * 2.0);
     if (shares_per_minute < target / 2.0)
@@ -69,31 +70,32 @@ Session::Session(PoolContext& pool, Connection& connection, Bytes extranonce1)
       connection_(connection),
       extranonce1_(std::move(extranonce1)),
       extranonce1_hex_(util::to_hex(extranonce1_)),
-      difficulty_(pool.start_difficulty()),
+      difficulty_(0.0),
       connected_at_(static_cast<int64_t>(std::time(nullptr))), // wall: DISPLAYED
       connected_at_steady_(stats::steady_seconds()),           // monotonic
       last_retarget_(connected_at_steady_),                    // monotonic
       // Seed the window clock at connect time so the first share folds a real interval.
       hashrate_(std::span<const int, stats::kHashrateWindows.size()>(stats::kHashrateWindows),
                 connected_at_steady_) {
-    min_difficulty_ = pool.min_difficulty();
-    difficulty_ = std::max(difficulty_, min_difficulty_);
+    const auto config = pool.runtime_config();
+    difficulty_ = std::max(config->initial_difficulty, config->minimum_difficulty);
 }
 
 void Session::maybe_retarget() {
     const std::scoped_lock lock(mutex_);
-    if (!pool_.vardiff_enabled() || !authorized_)
+    const auto config = pool_.runtime_config();
+    if (!config->variable_difficulty || !authorized_)
         return;
     const double now = stats::steady_seconds(); // monotonic
     const double elapsed = now - last_retarget_;
-    if (elapsed < pool_.vardiff_retarget_seconds())
+    if (elapsed < config->vardiff_retarget_seconds)
         return;
 
     const double shares_per_minute =
         elapsed > 0.0 ? (static_cast<double>(shares_since_retarget_) / elapsed) * 60.0 : 0.0;
     const double new_difficulty =
-        vardiff_next(difficulty_, shares_per_minute, pool_.vardiff_target_shares_per_minute(),
-                     min_difficulty_, pool_.max_difficulty());
+        vardiff_next(difficulty_, shares_per_minute, config->vardiff_target_shares_per_minute,
+                     config->minimum_difficulty, config->maximum_difficulty);
 
     shares_since_retarget_ = 0;
     last_retarget_ = now;
@@ -386,8 +388,10 @@ void Session::handle_authorize(const json& id, const std::vector<std::string>& p
 void Session::handle_suggest_difficulty(const Request& request) {
     // Advisory: a missing/malformed value is acked but ignored. dispatch() holds mutex_.
     if (request.suggested_difficulty) {
+        const auto config = pool_.runtime_config();
         const auto clamped = clamp_suggested_difficulty(*request.suggested_difficulty,
-                                                         min_difficulty_, pool_.max_difficulty());
+                                                         config->minimum_difficulty,
+                                                         config->maximum_difficulty);
         if (clamped && *clamped != difficulty_) {
             begin_difficulty_change(*clamped);
             shares_since_retarget_ = 0; // restart the vardiff window at the new baseline

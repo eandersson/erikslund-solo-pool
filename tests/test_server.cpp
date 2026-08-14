@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -38,6 +39,14 @@ struct ServerTestPeek {
                           &address_size) != 0)
             throw std::runtime_error("could not read test listener port");
         return ntohs(address.sin_port);
+    }
+
+    static int max_clients(const Server& server) {
+        return server.max_clients_.load(std::memory_order_relaxed);
+    }
+
+    static int drop_idle_seconds(const Server& server) {
+        return server.drop_idle_seconds_.load(std::memory_order_relaxed);
     }
 };
 } // namespace erikslund::net
@@ -87,6 +96,21 @@ TEST_CASE("resolve_worker_count honors an explicit count and clamps auto") {
 
 TEST_CASE("an explicit single worker is honored") {
     CHECK(resolve_worker_count(1) == 1u);
+}
+
+TEST_CASE("Server applies reloadable connection limits") {
+    Config config;
+    FinalSubmitWorkSource source;
+    Pool pool(config, source);
+    Server server(pool, config);
+
+    RuntimeConfig replacement = config.runtime_config();
+    replacement.max_clients = 17;
+    replacement.drop_idle_seconds = 45;
+    server.reload_config(replacement);
+
+    CHECK(ServerTestPeek::max_clients(server) == 17);
+    CHECK(ServerTestPeek::drop_idle_seconds(server) == 45);
 }
 
 TEST_CASE("a negative configured count is treated as auto") {

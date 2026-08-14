@@ -72,7 +72,12 @@ public:
     explicit FakePool(uint32_t curtime) : job(make_fake_job(curtime)) {}
 
     size_t extranonce2_size() const override { return 4; }
-    double start_difficulty() const override { return 1e-9; }
+    std::shared_ptr<const RuntimeConfig> runtime_config() const override {
+        Config config;
+        config.initial_difficulty = 1e-9;
+        config.variable_difficulty = false;
+        return std::make_shared<const RuntimeConfig>(config.runtime_config());
+    }
     std::optional<Bytes> validate_address(const std::string& address) override {
         if (address == "validaddr")
             return kPayoutScript;
@@ -90,11 +95,6 @@ public:
     }
     void on_block_found(const std::string&, const std::string&, const Job&,
                         const ShareResult&) override {}
-    bool vardiff_enabled() const override { return false; }
-    double min_difficulty() const override { return 0.001; }
-    double max_difficulty() const override { return 0.0; }
-    double vardiff_target_shares_per_minute() const override { return 12.0; }
-    int vardiff_retarget_seconds() const override { return 60; }
     uint32_t version_mask() const override { return 0x1fffe000u; }
 };
 

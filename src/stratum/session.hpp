@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/config.hpp"
 #include "mining/client.hpp"
 #include "stats/share_accounting.hpp"
 #include "stratum/job.hpp"
@@ -41,7 +42,7 @@ class PoolContext {
 public:
     virtual ~PoolContext() = default;
     virtual size_t extranonce2_size() const = 0;
-    virtual double start_difficulty() const = 0;
+    virtual std::shared_ptr<const RuntimeConfig> runtime_config() const = 0;
     // Payout scriptPubKey for an address, or nullopt if it's invalid.
     virtual std::optional<Bytes> validate_address(const std::string& address) = 0;
     virtual std::shared_ptr<const Job> current_job() const = 0;
@@ -76,12 +77,6 @@ public:
     virtual void on_block_found(const std::string& address, const std::string& worker,
                                 const Job& job, const ShareResult& result) = 0;
 
-    // Vardiff + protocol parameters (sourced from Config).
-    virtual bool vardiff_enabled() const = 0;
-    virtual double min_difficulty() const = 0;
-    virtual double max_difficulty() const = 0; // 0 = no maximum
-    virtual double vardiff_target_shares_per_minute() const = 0;
-    virtual int vardiff_retarget_seconds() const = 0;
     virtual uint32_t version_mask() const = 0;
 };
 
@@ -172,7 +167,6 @@ private:
     stats::WorkerAccountingHandle worker_accounting_;
 
     double difficulty_;
-    double min_difficulty_ = 0.0; // vardiff floor
     double previous_difficulty_ = 0.0;
     bool pending_difficulty_change_ = false;
     int64_t connected_at_ = 0;          // wall epoch: DISPLAYED

@@ -80,15 +80,16 @@ double Session::maximum_hash_rate(ChannelKind kind) const {
     return job_hashes(kind) * kMaximumJobSpaceUtilization / refresh_interval;
 }
 
-double Session::difficulty_for_hashrate(float nominal_hash_rate) const {
+double Session::difficulty_for_hashrate(float nominal_hash_rate,
+                                        const RuntimeConfig& config) const {
     double selected_difficulty =
-        std::max(pool_.start_difficulty(), pool_.min_difficulty());
-    if (pool_.vardiff_enabled() && nominal_hash_rate > 0.0F) {
+        std::max(config.initial_difficulty, config.minimum_difficulty);
+    if (config.variable_difficulty && nominal_hash_rate > 0.0F) {
         const double hashrate_difficulty =
             static_cast<double>(nominal_hash_rate) * 60.0 /
-            (stats::kHashesPerDiff1Share * pool_.vardiff_target_shares_per_minute());
+            (stats::kHashesPerDiff1Share * config.vardiff_target_shares_per_minute);
         selected_difficulty = std::max(selected_difficulty, hashrate_difficulty);
-        const double maximum_difficulty = pool_.max_difficulty();
+        const double maximum_difficulty = config.maximum_difficulty;
         if (maximum_difficulty > 0.0)
             selected_difficulty =
                 std::min(selected_difficulty, maximum_difficulty);
@@ -383,8 +384,9 @@ void Session::open_channel_locked(uint32_t request_id, std::string_view user_ide
     channel.worker_accounting =
         pool_.attach_worker(channel.address, channel.worker);
     channel.device_maximum_target = maximum_target;
+    const auto config = pool_.runtime_config();
     channel.target = std::min(
-        util::target_from_difficulty(difficulty_for_hashrate(nominal_hash_rate)),
+        util::target_from_difficulty(difficulty_for_hashrate(nominal_hash_rate, *config)),
         channel.device_maximum_target);
     channel.difficulty = util::difficulty_from_target(channel.target);
     channel.last_publication_sequence =
@@ -462,9 +464,10 @@ void Session::handle_update_locked(const UpdateChannel& message) {
     update_job_refresh_requirement_locked(channel,
                                           message.nominal_hash_rate);
     util::uint256 requested_target = channel.target;
-    if (pool_.vardiff_enabled() && message.nominal_hash_rate > 0.0F) {
-        requested_target =
-            util::target_from_difficulty(difficulty_for_hashrate(message.nominal_hash_rate));
+    const auto config = pool_.runtime_config();
+    if (config->variable_difficulty && message.nominal_hash_rate > 0.0F) {
+        requested_target = util::target_from_difficulty(
+            difficulty_for_hashrate(message.nominal_hash_rate, *config));
     }
     requested_target =
         std::min(requested_target, channel.device_maximum_target);
@@ -946,13 +949,14 @@ void Session::finish_share_locked(const ShareSubmission& share,
 
 void Session::maybe_retarget() {
     const std::scoped_lock lock(mutex_);
-    if (!pool_.vardiff_enabled() || channels_.empty())
+    const auto config = pool_.runtime_config();
+    if (!config->variable_difficulty || channels_.empty())
         return;
     const double current_steady_time = stats::steady_seconds();
     for (auto& [channel_id, channel] : channels_) {
         const double elapsed =
             current_steady_time - channel.last_retarget_at_steady;
-        if (elapsed < pool_.vardiff_retarget_seconds())
+        if (elapsed < config->vardiff_retarget_seconds)
             continue;
 
         const double shares_per_minute =
@@ -963,8 +967,9 @@ void Session::maybe_retarget() {
         channel.last_retarget_at_steady = current_steady_time;
         const double requested_difficulty =
             stratum::vardiff_next(channel.difficulty, shares_per_minute,
-                                  pool_.vardiff_target_shares_per_minute(),
-                                  pool_.min_difficulty(), pool_.max_difficulty());
+                                  config->vardiff_target_shares_per_minute,
+                                  config->minimum_difficulty,
+                                  config->maximum_difficulty);
         const util::uint256 new_target =
             std::min(util::target_from_difficulty(requested_difficulty),
                      channel.device_maximum_target);

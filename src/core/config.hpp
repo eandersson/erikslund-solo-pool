@@ -10,6 +10,25 @@
 
 namespace erikslund {
 
+struct RuntimeConfig {
+    double initial_difficulty;
+    double minimum_difficulty;
+    double maximum_difficulty;
+    bool variable_difficulty;
+    double vardiff_target_shares_per_minute;
+    int vardiff_retarget_seconds;
+    double work_rebroadcast_seconds;
+    double poll_interval;
+    double status_interval_seconds;
+    int user_stats_retention_days;
+    bool fast_block_notify;
+    int max_clients;
+    int max_workers_per_address;
+    int drop_idle_seconds;
+    int auth_timeout_seconds;
+    int max_protocol_errors;
+};
+
 struct Config {
     // bitcoind JSON-RPC (primary endpoint).
     std::string rpc_url = "http://127.0.0.1:18443";
@@ -111,6 +130,9 @@ struct Config {
     std::vector<uint16_t> stratum_ports() const {
         return bind_ports.empty() ? std::vector<uint16_t>{bind_port} : bind_ports;
     }
+
+    RuntimeConfig runtime_config() const;
+    std::vector<std::string> restart_required_changes(const Config& replacement) const;
 
     static Config from_string(const std::string& text);
     static Config from_file(const std::string& path);

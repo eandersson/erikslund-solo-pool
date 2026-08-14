@@ -91,7 +91,13 @@ public:
     explicit FakePool(uint32_t curtime) : job(make_fake_job(curtime)) {}
 
     size_t extranonce2_size() const override { return 4; }
-    double start_difficulty() const override { return 1e-9; }
+    std::shared_ptr<const RuntimeConfig> runtime_config() const override {
+        Config config;
+        config.initial_difficulty = 1e-9;
+        config.variable_difficulty = vardiff;
+        return std::make_shared<const RuntimeConfig>(config.runtime_config());
+    }
+    double start_difficulty() const { return runtime_config()->initial_difficulty; }
     std::optional<Bytes> validate_address(const std::string& address) override {
         if (address == "validaddr")
             return kPayoutScript;
@@ -125,11 +131,6 @@ public:
         if (block_found_hook)
             block_found_hook();
     }
-    bool vardiff_enabled() const override { return vardiff; }
-    double min_difficulty() const override { return 0.001; }
-    double max_difficulty() const override { return 0.0; }
-    double vardiff_target_shares_per_minute() const override { return 12.0; }
-    int vardiff_retarget_seconds() const override { return 60; }
     uint32_t version_mask() const override { return 0x1fffe000u; }
 };
 
@@ -485,8 +486,13 @@ TEST_CASE("difficulty-grace crediting: LOWER direction and the meets-the-harder-
     // default fixture clamps the start up to min_difficulty, leaving no room below it).
     struct LowFloorPool : FakePool {
         using FakePool::FakePool;
-        double start_difficulty() const override { return 1e-9; }
-        double min_difficulty() const override { return 1e-12; }
+        std::shared_ptr<const RuntimeConfig> runtime_config() const override {
+            Config config;
+            config.initial_difficulty = 1e-9;
+            config.minimum_difficulty = 1e-12;
+            config.variable_difficulty = vardiff;
+            return std::make_shared<const RuntimeConfig>(config.runtime_config());
+        }
     };
     const uint32_t curtime = static_cast<uint32_t>(std::time(nullptr));
     LowFloorPool pool{curtime};
@@ -602,6 +608,11 @@ TEST_CASE("vardiff_next band edges hold (strict comparisons)") {
 TEST_CASE("vardiff_next never exceeds the implicit 1e12 cap when no max is set") {
     // current already at the implicit cap: a fast rate cannot push it higher.
     CHECK(vardiff_next(1e12, 1000, 12, 0.001, 0) == doctest::Approx(1e12));
+}
+
+TEST_CASE("vardiff_next applies changed bounds while the share rate is in band") {
+    CHECK(vardiff_next(1.0, 12.0, 12.0, 4.0, 100.0) == doctest::Approx(4.0));
+    CHECK(vardiff_next(200.0, 12.0, 12.0, 1.0, 100.0) == doctest::Approx(100.0));
 }
 
 TEST_CASE("clamp_suggested_difficulty rejects NaN") {

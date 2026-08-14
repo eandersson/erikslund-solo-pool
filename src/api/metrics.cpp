@@ -158,6 +158,12 @@ std::string build_prometheus(const PoolSnapshot& snapshot) {
     metric("erikslundpool_ready", "gauge", "1 when all required subsystems are ready",
            snapshot.ready ? 1 : 0);
     metric("erikslundpool_uptime_seconds", "gauge", "Seconds since process start", snapshot.uptime);
+    metric("erikslundpool_config_generation", "counter",
+           "Successfully applied configuration reloads since process start",
+           snapshot.config_generation);
+    metric("erikslundpool_last_reload_rejected", "gauge",
+           "1 when the most recent configuration reload was rejected",
+           snapshot.last_reload_rejected ? 1 : 0);
 
     out += "# HELP erikslundpool_subsystem_ready 1 when a subsystem is ready\n"
            "# TYPE erikslundpool_subsystem_ready gauge\n";
@@ -309,6 +315,8 @@ glz::generic generator_stats_json(const PoolSnapshot& snapshot) {
 glz::generic metrics_json(const PoolSnapshot& snapshot) {
     glz::generic j;
     j["uptime_seconds"] = static_cast<double>(snapshot.uptime);
+    j["config_generation"] = static_cast<double>(snapshot.config_generation);
+    j["last_reload_rejected"] = snapshot.last_reload_rejected;
     j["ready"] = snapshot.ready;
     j["bitcoind_connected"] = snapshot.generator_ready;
     j["work_ready"] = snapshot.stratifier_ready;

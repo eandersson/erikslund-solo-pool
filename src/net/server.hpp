@@ -40,6 +40,7 @@ public:
 
     // Accept loop, round-robin onto reactors. Returns once `stop` fires (joins reactors).
     void run(const std::stop_token& stop);
+    void reload_config(const RuntimeConfig& config) noexcept;
 
     ~Server(); // out-of-line: workers_ holds the incomplete ServerWorker
 
@@ -87,12 +88,12 @@ private:
     std::atomic<bool> certificate_validity_warning_logged_{false};
     std::string sv2_plaintext_host_;
     std::vector<uint16_t> sv2_plaintext_ports_;
-    int max_clients_;
+    std::atomic<int> max_clients_;
     size_t max_line_bytes_;
-    int drop_idle_seconds_;
-    int auth_timeout_seconds_;
-    int max_protocol_errors_;
-    double work_rebroadcast_seconds_;
+    std::atomic<int> drop_idle_seconds_;
+    std::atomic<int> auth_timeout_seconds_;
+    std::atomic<int> max_protocol_errors_;
+    std::atomic<double> work_rebroadcast_seconds_;
     std::vector<std::string> proxy_protocol_from_; // trusted PROXY-header sources (empty = off)
     unsigned worker_count_;
     std::atomic<size_t> incomplete_noise_handshakes_{0};

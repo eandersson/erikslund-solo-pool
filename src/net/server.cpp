@@ -322,6 +322,15 @@ Server::Server(Pool& pool, const Config& config)
       proxy_protocol_from_(config.proxy_protocol_from),
       worker_count_(resolve_worker_count(config.worker_threads)) {}
 
+void Server::reload_config(const RuntimeConfig& config) noexcept {
+    max_clients_.store(config.max_clients, std::memory_order_relaxed);
+    drop_idle_seconds_.store(config.drop_idle_seconds, std::memory_order_relaxed);
+    auth_timeout_seconds_.store(config.auth_timeout_seconds, std::memory_order_relaxed);
+    max_protocol_errors_.store(config.max_protocol_errors, std::memory_order_relaxed);
+    work_rebroadcast_seconds_.store(config.work_rebroadcast_seconds,
+                                    std::memory_order_relaxed);
+}
+
 // Out-of-line so ServerWorker is complete at the point unique_ptr is destroyed.
 Server::~Server() = default;
 
@@ -574,10 +583,12 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
                 }
                 connection->socket->uncork();
 
-                if (max_protocol_errors_ > 0 &&
-                    connection->session->protocol_errors() >= max_protocol_errors_) {
+                const int max_protocol_errors =
+                    max_protocol_errors_.load(std::memory_order_relaxed);
+                if (max_protocol_errors > 0 &&
+                    connection->session->protocol_errors() >= max_protocol_errors) {
                     log::info("Client {} exceeded the protocol-error budget ({}); disconnecting",
-                              connection->socket->peer(), max_protocol_errors_);
+                              connection->socket->peer(), max_protocol_errors);
                     remove_connection(connection);
                     return false;
                 }
@@ -631,7 +642,8 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
             try {
                 set_nonblocking(fd);
                 socket = std::make_shared<SocketConnection>(
-                    fd, work_rebroadcast_seconds_, std::move(incoming.peer));
+                    fd, work_rebroadcast_seconds_.load(std::memory_order_relaxed),
+                    std::move(incoming.peer));
                 connection = std::make_unique<ClientConnection>();
                 connection->fd = fd;
                 connection->protocol = incoming.protocol;
@@ -696,6 +708,8 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
     // Evict silent (idle) and never-authorized connections.
     const auto sweep_expired = [&]() {
         const auto now = std::chrono::steady_clock::now();
+        const int drop_idle_seconds = drop_idle_seconds_.load(std::memory_order_relaxed);
+        const int auth_timeout_seconds = auth_timeout_seconds_.load(std::memory_order_relaxed);
         std::vector<ClientConnection*> expired;
         for (auto& [fd, connection] : worker.connections) {
             if (connection->should_close()) {
@@ -707,16 +721,16 @@ void Server::worker_loop(ServerWorker& worker, const std::stop_token& stop) {
                 log::debug("SV2 Noise handshake timed out for {}",
                            connection->socket->peer());
                 expired.push_back(connection.get());
-            } else if (drop_idle_seconds_ > 0 &&
-                now - connection->last_activity > std::chrono::seconds(drop_idle_seconds_)) {
+            } else if (drop_idle_seconds > 0 &&
+                now - connection->last_activity > std::chrono::seconds(drop_idle_seconds)) {
                 log::info("Client {} idle for over {}s; disconnecting", connection->socket->peer(),
-                          drop_idle_seconds_);
+                          drop_idle_seconds);
                 expired.push_back(connection.get());
-            } else if (auth_timeout_seconds_ > 0 &&
-                       now - connection->created_at > std::chrono::seconds(auth_timeout_seconds_) &&
+            } else if (auth_timeout_seconds > 0 &&
+                       now - connection->created_at > std::chrono::seconds(auth_timeout_seconds) &&
                        !connection->session->ever_authorized()) {
                 log::info("Client {} did not authorize within {}s; disconnecting",
-                          connection->socket->peer(), auth_timeout_seconds_);
+                          connection->socket->peer(), auth_timeout_seconds);
                 expired.push_back(connection.get());
             }
         }
@@ -956,14 +970,15 @@ void Server::run(const std::stop_token& stop) {
                 for (const auto& worker : workers_)
                     pending_total += worker->pending.load(std::memory_order_relaxed);
                 const size_t occupied_slots = pool_.client_count() + pending_total;
-                if (occupied_slots >= static_cast<size_t>(max_clients_)) {
-                    log::warning("Max clients ({}) reached; dropping connection", max_clients_);
+                const int max_clients = max_clients_.load(std::memory_order_relaxed);
+                if (occupied_slots >= static_cast<size_t>(max_clients)) {
+                    log::warning("Max clients ({}) reached; dropping connection", max_clients);
                     ::close(fd);
                     continue;
                 }
                 const WireProtocol protocol = listeners_[i].protocol;
                 if (protocol != WireProtocol::Sv1 &&
-                    occupied_slots >= sv2_admission_limit(max_clients_)) {
+                    occupied_slots >= sv2_admission_limit(max_clients)) {
                     log::debug(
                         "SV2 client limit reached; reserving capacity for SV1");
                     ::close(fd);

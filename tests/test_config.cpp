@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/config.hpp"
@@ -213,6 +214,16 @@ TEST_CASE("donation_percent must be within [0, 100]") {
               .donation_percent == doctest::Approx(100.0));
     CHECK(Config::from_string(R"({"donation_percent": 1.5, "donation_address": "bc1qexample"})")
               .donation_percent == doctest::Approx(1.5));
+}
+
+TEST_CASE("maximum_difficulty cannot be below minimum_difficulty") {
+    CHECK_THROWS_AS(
+        Config::from_string(R"({"minimum_difficulty": 10, "maximum_difficulty": 9})"),
+        ConfigError);
+    CHECK_NOTHROW(
+        Config::from_string(R"({"minimum_difficulty": 10, "maximum_difficulty": 10})"));
+    CHECK_NOTHROW(
+        Config::from_string(R"({"minimum_difficulty": 10, "maximum_difficulty": 0})"));
 }
 
 TEST_CASE("an over-long coinbase_signature is rejected at load") {
@@ -459,4 +470,107 @@ TEST_CASE("rpc_endpoints lists the primary first, then failover in order") {
     CHECK(endpoints[0].password == "pp");
     CHECK(endpoints[1].url == "a");
     CHECK(endpoints[2].url == "b");
+}
+
+TEST_CASE("runtime-only config changes do not require a restart") {
+    const Config current;
+    Config replacement = current;
+    replacement.initial_difficulty = 64.0;
+    replacement.minimum_difficulty = 2.0;
+    replacement.maximum_difficulty = 4096.0;
+    replacement.variable_difficulty = false;
+    replacement.vardiff_target_shares_per_minute = 20.0;
+    replacement.vardiff_retarget_seconds = 30;
+    replacement.work_rebroadcast_seconds = 15.0;
+    replacement.poll_interval = 0.5;
+    replacement.status_interval_seconds = 10.0;
+    replacement.user_stats_retention_days = 30;
+    replacement.fast_block_notify = false;
+    replacement.max_clients = 500;
+    replacement.max_workers_per_address = 64;
+    replacement.drop_idle_seconds = 600;
+    replacement.auth_timeout_seconds = 10;
+    replacement.max_protocol_errors = 20;
+
+    CHECK(current.restart_required_changes(replacement).empty());
+    const RuntimeConfig runtime = replacement.runtime_config();
+    CHECK(runtime.initial_difficulty == doctest::Approx(64.0));
+    CHECK(runtime.poll_interval == doctest::Approx(0.5));
+    CHECK(runtime.max_clients == 500);
+    CHECK(runtime.fast_block_notify == false);
+}
+
+TEST_CASE("every startup setting is rejected by config reload") {
+    struct SettingMutation {
+        std::string_view field;
+        std::string_view reported_name;
+        void (*mutate)(Config&);
+    };
+    const std::vector<SettingMutation> settings{
+        {"rpc_url", "bitcoin_nodes", [](Config& config) { config.rpc_url = "other:8332"; }},
+        {"rpc_user", "bitcoin_nodes", [](Config& config) { config.rpc_user = "other"; }},
+        {"rpc_password", "bitcoin_nodes", [](Config& config) { config.rpc_password = "other"; }},
+        {"rpc_failover", "bitcoin_nodes", [](Config& config) {
+             config.rpc_failover.push_back({"backup:8332", "user", "password"});
+         }},
+        {"bind_host", "stratum_listen", [](Config& config) { config.bind_host = "127.0.0.1"; }},
+        {"bind_port", "stratum_listen", [](Config& config) { config.bind_port = 4444; }},
+        {"bind_ports", "stratum_listen", [](Config& config) { config.bind_ports = {3333, 4444}; }},
+        {"sv2_host", "sv2_listen", [](Config& config) { config.sv2_host = "127.0.0.1"; }},
+        {"sv2_ports", "sv2_listen", [](Config& config) { config.sv2_ports = {4333}; }},
+        {"sv2_static_secret_key_file", "sv2_static_secret_key_file", [](Config& config) {
+             config.sv2_static_secret_key_file = "static.key";
+         }},
+        {"sv2_authority_public_key_file", "sv2_authority_public_key_file", [](Config& config) {
+             config.sv2_authority_public_key_file = "authority.pub";
+         }},
+        {"sv2_certificate_file", "sv2_certificate_file", [](Config& config) {
+             config.sv2_certificate_file = "certificate.bin";
+         }},
+        {"sv2_plaintext_host", "sv2_plaintext_listen", [](Config& config) {
+             config.sv2_plaintext_host = "localhost";
+         }},
+        {"sv2_plaintext_ports", "sv2_plaintext_listen", [](Config& config) {
+             config.sv2_plaintext_ports = {14333};
+         }},
+        {"proxy_protocol_from", "proxy_protocol_from", [](Config& config) {
+             config.proxy_protocol_from = {"127.0.0.1"};
+         }},
+        {"api_host", "api_listen", [](Config& config) { config.api_host = "0.0.0.0"; }},
+        {"api_port", "api_listen", [](Config& config) { config.api_port = 9000; }},
+        {"extranonce1_size", "extranonce1_size", [](Config& config) { config.extranonce1_size = 6; }},
+        {"extranonce2_size", "extranonce2_size", [](Config& config) { config.extranonce2_size = 4; }},
+        {"extranonce1_prefix", "extranonce1_prefix", [](Config& config) {
+             config.extranonce1_prefix = {0x00, 0x01};
+         }},
+        {"coinbase_signature", "coinbase_signature", [](Config& config) {
+             config.coinbase_signature = "/replacement/";
+         }},
+        {"coinbase_version", "coinbase_version", [](Config& config) { config.coinbase_version = 2; }},
+        {"donation_percent", "donation_percent", [](Config& config) { config.donation_percent = 1.0; }},
+        {"donation_address", "donation_address", [](Config& config) { config.donation_address = "address"; }},
+        {"stats_directory", "stats_directory", [](Config& config) {
+             config.stats_directory = "/tmp/replacement";
+         }},
+        {"zmq_block_endpoint", "zmq_block_endpoint", [](Config& config) {
+             config.zmq_block_endpoint = "tcp://node:28332";
+         }},
+        {"work_source", "work_source", [](Config& config) { config.work_source = "ipc"; }},
+        {"ipc_socket_path", "ipc_socket_path", [](Config& config) {
+             config.ipc_socket_path = "/tmp/replacement.sock";
+         }},
+        {"max_line_bytes", "max_line_bytes", [](Config& config) { config.max_line_bytes = 8192; }},
+        {"worker_threads", "worker_threads", [](Config& config) { config.worker_threads = 4; }},
+        {"version_rolling_mask", "version_rolling_mask", [](Config& config) {
+             config.version_rolling_mask = 0x00002000u;
+         }},
+    };
+    const Config current;
+    for (const auto& setting : settings) {
+        CAPTURE(setting.field);
+        Config replacement = current;
+        setting.mutate(replacement);
+        CHECK(current.restart_required_changes(replacement) ==
+              std::vector<std::string>{std::string(setting.reported_name)});
+    }
 }

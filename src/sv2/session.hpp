@@ -201,7 +201,8 @@ private:
                                 double share_difficulty);
     double job_hashes(ChannelKind kind) const;
     double maximum_hash_rate(ChannelKind kind) const;
-    double difficulty_for_hashrate(float nominal_hash_rate) const;
+    double difficulty_for_hashrate(float nominal_hash_rate,
+                                   const RuntimeConfig& config) const;
     void update_job_refresh_requirement_locked(Channel& channel,
                                                float nominal_hash_rate);
     bool requires_new_prevhash_locked(const Channel& channel,

@@ -152,6 +152,7 @@ std::optional<Submission> wait_for_submission(std::deque<Submission>& queue, std
 Pool::Pool(Config config, bitcoin::WorkSource& source)
     : config_(std::move(config)),
       source_(source),
+      runtime_config_(std::make_shared<const RuntimeConfig>(config_.runtime_config())),
       started_(static_cast<int64_t>(std::time(nullptr))), // wall: DISPLAYED/STORED
       started_steady_(stats::steady_seconds()),           // monotonic
       // Seed the window clock at start so the first share folds a real interval.
@@ -209,6 +210,18 @@ void Pool::detect_network() {
 
 void Pool::set_connector_ready(bool ready) {
     connector_ready_.store(ready);
+}
+
+void Pool::reload_config(const RuntimeConfig& config) {
+    auto replacement = std::make_shared<const RuntimeConfig>(config);
+    runtime_config_.store(std::move(replacement));
+    last_reload_rejected_.store(false, std::memory_order_relaxed);
+    config_generation_.fetch_add(1, std::memory_order_relaxed);
+    notify_new_block();
+}
+
+void Pool::note_config_reload_rejected() noexcept {
+    last_reload_rejected_.store(true, std::memory_order_relaxed);
 }
 
 void Pool::set_sv2_authenticated_state(
@@ -422,7 +435,7 @@ uint64_t block_subsidy(int64_t height, int64_t halving_interval) {
 }
 
 void Pool::on_zmq_block(const std::string& block_hash_display) {
-    if (config_.fast_block_notify && !block_hash_display.empty()) {
+    if (runtime_config_.load()->fast_block_notify && !block_hash_display.empty()) {
         // Cheap precheck (no RPC); the authoritative check repeats below. Gating testnet here
         // avoids a pointless header fetch per block where fastblock is permanently ineligible.
         bool maybe_eligible = false;
@@ -509,13 +522,14 @@ void Pool::refresh_work(const std::stop_token& stop) {
 
     while (!stop.stop_requested()) {
         try {
+            const auto runtime_config = runtime_config_.load();
             // A mainnet template is multi-MB; fetching it every poll just to read
             // previousblockhash is ~25MB/s of allocator churn (OOMs a 512MB host). Gate the heavy
             // call on a ~100-byte tip probe: fetch only when the tip moved, a rebroadcast is due,
             // or we have no work at all.
             const bool refresh_due =
                 stats::steady_seconds() - last_broadcast_steady_.load() >=
-                config_.work_rebroadcast_seconds;
+                runtime_config->work_rebroadcast_seconds;
             const auto job = current_job();
             bool fetch = refresh_failing || refresh_due || job == nullptr;
             if (!fetch) {
@@ -546,8 +560,10 @@ void Pool::refresh_work(const std::stop_token& stop) {
             report_failure(e);
         }
         // Wait poll_interval, but wake immediately on a ZMQ block notification.
+        const auto runtime_config = runtime_config_.load();
         std::unique_lock<std::mutex> wait_lock(wakeup_mutex_);
-        wakeup_cv_.wait_for(wait_lock, stop, std::chrono::duration<double>(config_.poll_interval),
+        wakeup_cv_.wait_for(wait_lock, stop,
+                            std::chrono::duration<double>(runtime_config->poll_interval),
                             [this] { return new_block_flag_; });
         new_block_flag_ = false;
     }
@@ -623,7 +639,7 @@ std::shared_ptr<const stratum::Job> Pool::recent_job(const std::string& job_id) 
 std::string Pool::resolve_worker_key(const WorkerMap& workers, const std::string& worker) const {
     if (workers.contains(worker))
         return worker; // an existing row keeps its key
-    const int cap = config_.max_workers_per_address;
+    const int cap = runtime_config_.load()->max_workers_per_address;
     if (!worker.empty() && cap > 0) {
         size_t named = 0;
         for (const auto& [name, _] : workers)
@@ -716,7 +732,7 @@ void Pool::prune_user_stats(int64_t now) {
     // only past the retention window (retention_days <= 0 keeps it forever); a never-mined row
     // (authorize-only) ages out after a short grace REGARDLESS of retention. Never evicts a
     // connected worker; a folded live worker resolves to its "" bucket key, protecting that row.
-    const int retention_days = config_.user_stats_retention_days;
+    const int retention_days = runtime_config_.load()->user_stats_retention_days;
     const bool retention_on = retention_days > 0;
     const int64_t ghost_cutoff = now - kGhostRowGraceSeconds;
     const int64_t retention_cutoff =
@@ -764,7 +780,7 @@ void Pool::notify_new_block() {
 
 void Pool::vardiff_loop(const std::stop_token& stop) {
     while (!stop.stop_requested()) {
-        const int interval = std::max(5, config_.vardiff_retarget_seconds / 2);
+        const int interval = std::max(5, runtime_config_.load()->vardiff_retarget_seconds / 2);
         for (int i = 0; i < interval && !stop.stop_requested(); ++i)
             std::this_thread::sleep_for(std::chrono::seconds(1));
         if (stop.stop_requested())
@@ -787,7 +803,7 @@ void Pool::vardiff_loop(const std::stop_token& stop) {
 
 void Pool::status_loop(const std::stop_token& stop) {
     while (!stop.stop_requested()) {
-        const double interval = std::max(1.0, config_.status_interval_seconds);
+        const double interval = std::max(1.0, runtime_config_.load()->status_interval_seconds);
         for (double slept = 0.0; slept < interval && !stop.stop_requested(); slept += 0.5)
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (stop.stop_requested())
@@ -828,7 +844,8 @@ void Pool::recover_user_stats() {
     // The prune clock is the last SHARE time (`lastshare`), NOT the file mtime -- files are
     // rewritten every cycle, so mtime would reset every idle row's retention clock on restart and
     // make evicted data immortal. Skip never-mined rows and rows already past retention.
-    const int retention_days = config_.user_stats_retention_days;
+    const auto runtime_config = runtime_config_.load();
+    const int retention_days = runtime_config->user_stats_retention_days;
     const int64_t now_wall = static_cast<int64_t>(std::time(nullptr));
     const int64_t cutoff = retention_days > 0 ? now_wall - static_cast<int64_t>(retention_days) * 86400
                                               : std::numeric_limits<int64_t>::min();
@@ -849,10 +866,10 @@ void Pool::recover_user_stats() {
             continue;
         auto& keys = by_address[rw.address];
         std::string key = rw.worker; // re-apply the admission cap against the keys seen so far
-        if (!key.empty() && !keys.contains(key) && config_.max_workers_per_address > 0) {
+        if (!key.empty() && !keys.contains(key) && runtime_config->max_workers_per_address > 0) {
             const auto named =
                 std::ranges::count_if(keys, [](const auto& entry) { return !entry.first.empty(); });
-            if (named >= static_cast<int64_t>(config_.max_workers_per_address))
+            if (named >= static_cast<int64_t>(runtime_config->max_workers_per_address))
                 key.clear();
         }
         Accum& a = keys[key];
@@ -888,9 +905,10 @@ void Pool::write_stats() {
         prune_user_stats(static_cast<int64_t>(std::time(nullptr)));
 
         const auto snap = snapshot(/*include_workers=*/true); // the file writer needs the registry
+        const int retention_days = runtime_config_.load()->user_stats_retention_days;
         stats::write_pool_status(config_.stats_directory, snap);
         stats::write_user_files(config_.stats_directory, snap, stats::kMaxUserFiles,
-                                config_.user_stats_retention_days * 86400.0);
+                                retention_days * 86400.0);
     } catch (const std::exception& e) {
         log::warning("Failed to write stats to {}: {}", config_.stats_directory, e.what());
     }
@@ -1011,6 +1029,8 @@ api::PoolSnapshot Pool::snapshot(bool include_workers) const {
     snapshot.pid = ::getpid();
     snapshot.starttime = started_;
     snapshot.uptime = static_cast<int64_t>(now_steady - started_steady_);
+    snapshot.config_generation = config_generation_.load(std::memory_order_relaxed);
+    snapshot.last_reload_rejected = last_reload_rejected_.load(std::memory_order_relaxed);
     snapshot.generator_ready = generator_ready_.load();
     snapshot.connector_ready = connector_ready_.load();
     const AuthenticatedSv2State authenticated_sv2_state =

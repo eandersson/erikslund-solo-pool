@@ -75,6 +75,8 @@ public:
     void set_sv2_authenticated_state(
         std::optional<bool> ready,
         std::optional<int64_t> certificate_expiry_timestamp);
+    void reload_config(const RuntimeConfig& config);
+    void note_config_reload_rejected() noexcept;
 
     // include_workers samples the persistent per-worker registry into snapshot.workers (an
     // O(registry) walk under user_stats_mutex_). Only the stats-file writer passes true; the HTTP
@@ -86,7 +88,9 @@ public:
     void on_zmq_block(const std::string& block_hash_display);
 
     size_t extranonce2_size() const override { return config_.extranonce2_size; }
-    double start_difficulty() const override { return config_.initial_difficulty; }
+    std::shared_ptr<const RuntimeConfig> runtime_config() const override {
+        return runtime_config_.load();
+    }
     std::optional<Bytes> validate_address(const std::string& address) override;
     std::shared_ptr<const stratum::Job> current_job() const override;
     std::shared_ptr<const stratum::Job> recent_job(const std::string& job_id) const override;
@@ -108,13 +112,6 @@ public:
     void on_block_found(const std::string& address, const std::string& worker,
                         const stratum::Job& job,
                         const stratum::ShareResult& result) override;
-    bool vardiff_enabled() const override { return config_.variable_difficulty; }
-    double min_difficulty() const override { return config_.minimum_difficulty; }
-    double max_difficulty() const override { return config_.maximum_difficulty; }
-    double vardiff_target_shares_per_minute() const override {
-        return config_.vardiff_target_shares_per_minute;
-    }
-    int vardiff_retarget_seconds() const override { return config_.vardiff_retarget_seconds; }
     uint32_t version_mask() const override { return config_.version_rolling_mask; }
 
     uint64_t accepted_shares() const { return accepted_shares_.load(); }
@@ -178,6 +175,7 @@ private:
 
     Config config_;
     bitcoin::WorkSource& source_;
+    std::atomic<std::shared_ptr<const RuntimeConfig>> runtime_config_;
     bitcoin::Network network_ = bitcoin::Network::Regtest;
     std::string chain_name_ = "regtest";
     Bytes donation_script_;
@@ -214,6 +212,8 @@ private:
     std::atomic<int64_t> sv2_certificate_expiry_timestamp_{
         kUnknownCertificateExpiry};
     std::atomic<int64_t> chain_blocks_{-1};
+    std::atomic<uint64_t> config_generation_{0};
+    std::atomic<bool> last_reload_rejected_{false};
     int64_t started_ = 0;
     double started_steady_ = 0.0;
 

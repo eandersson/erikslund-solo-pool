@@ -144,6 +144,9 @@ void finalize_and_validate(Config& config) {
         throw ConfigError("minimum_difficulty must be > 0");
     if (config.maximum_difficulty < 0.0)
         throw ConfigError("maximum_difficulty must be >= 0 (0 = no maximum)");
+    if (config.maximum_difficulty > 0.0 &&
+        config.maximum_difficulty < config.minimum_difficulty)
+        throw ConfigError("maximum_difficulty must be >= minimum_difficulty (or 0 for no maximum)");
     if (config.vardiff_target_shares_per_minute <= 0.0)
         throw ConfigError("vardiff_target_shares_per_minute must be > 0");
     if (config.vardiff_retarget_seconds < 1)
@@ -335,6 +338,76 @@ Config config_from(const ConfigFile& file) {
 }
 
 } // namespace
+
+RuntimeConfig Config::runtime_config() const {
+    return {
+        .initial_difficulty = initial_difficulty,
+        .minimum_difficulty = minimum_difficulty,
+        .maximum_difficulty = maximum_difficulty,
+        .variable_difficulty = variable_difficulty,
+        .vardiff_target_shares_per_minute = vardiff_target_shares_per_minute,
+        .vardiff_retarget_seconds = vardiff_retarget_seconds,
+        .work_rebroadcast_seconds = work_rebroadcast_seconds,
+        .poll_interval = poll_interval,
+        .status_interval_seconds = status_interval_seconds,
+        .user_stats_retention_days = user_stats_retention_days,
+        .fast_block_notify = fast_block_notify,
+        .max_clients = max_clients,
+        .max_workers_per_address = max_workers_per_address,
+        .drop_idle_seconds = drop_idle_seconds,
+        .auth_timeout_seconds = auth_timeout_seconds,
+        .max_protocol_errors = max_protocol_errors,
+    };
+}
+
+std::vector<std::string> Config::restart_required_changes(const Config& replacement) const {
+    std::vector<std::string> changes;
+    const auto changed = [&changes](bool differs, std::string_view name) {
+        if (differs)
+            changes.emplace_back(name);
+    };
+    const auto endpoints_equal = [](const auto& left, const auto& right) {
+        if (left.size() != right.size())
+            return false;
+        for (std::size_t index = 0; index < left.size(); ++index) {
+            if (left[index].url != right[index].url || left[index].user != right[index].user ||
+                left[index].password != right[index].password)
+                return false;
+        }
+        return true;
+    };
+
+    changed(!endpoints_equal(rpc_endpoints(), replacement.rpc_endpoints()), "bitcoin_nodes");
+    changed(bind_host != replacement.bind_host || bind_port != replacement.bind_port ||
+                bind_ports != replacement.bind_ports,
+            "stratum_listen");
+    changed(sv2_host != replacement.sv2_host || sv2_ports != replacement.sv2_ports, "sv2_listen");
+    changed(sv2_static_secret_key_file != replacement.sv2_static_secret_key_file,
+            "sv2_static_secret_key_file");
+    changed(sv2_authority_public_key_file != replacement.sv2_authority_public_key_file,
+            "sv2_authority_public_key_file");
+    changed(sv2_certificate_file != replacement.sv2_certificate_file, "sv2_certificate_file");
+    changed(sv2_plaintext_host != replacement.sv2_plaintext_host ||
+                sv2_plaintext_ports != replacement.sv2_plaintext_ports,
+            "sv2_plaintext_listen");
+    changed(proxy_protocol_from != replacement.proxy_protocol_from, "proxy_protocol_from");
+    changed(api_host != replacement.api_host || api_port != replacement.api_port, "api_listen");
+    changed(extranonce1_size != replacement.extranonce1_size, "extranonce1_size");
+    changed(extranonce2_size != replacement.extranonce2_size, "extranonce2_size");
+    changed(extranonce1_prefix != replacement.extranonce1_prefix, "extranonce1_prefix");
+    changed(coinbase_signature != replacement.coinbase_signature, "coinbase_signature");
+    changed(coinbase_version != replacement.coinbase_version, "coinbase_version");
+    changed(donation_percent != replacement.donation_percent, "donation_percent");
+    changed(donation_address != replacement.donation_address, "donation_address");
+    changed(stats_directory != replacement.stats_directory, "stats_directory");
+    changed(zmq_block_endpoint != replacement.zmq_block_endpoint, "zmq_block_endpoint");
+    changed(work_source != replacement.work_source, "work_source");
+    changed(ipc_socket_path != replacement.ipc_socket_path, "ipc_socket_path");
+    changed(max_line_bytes != replacement.max_line_bytes, "max_line_bytes");
+    changed(worker_threads != replacement.worker_threads, "worker_threads");
+    changed(version_rolling_mask != replacement.version_rolling_mask, "version_rolling_mask");
+    return changes;
+}
 
 Config Config::from_string(const std::string& text) {
     ConfigFile file;

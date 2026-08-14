@@ -53,6 +53,8 @@ struct PoolSnapshot {
     bool stratifier_ready = false;
     bool connector_ready = false;
     bool ready = false;
+    uint64_t config_generation = 0;
+    bool last_reload_rejected = false;
     // Absent when authenticated SV2 is disabled; never gates pool readiness.
     std::optional<bool> sv2_authenticated_ready;
     std::optional<int64_t> sv2_certificate_expiry_timestamp;
